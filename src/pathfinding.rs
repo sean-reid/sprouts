@@ -68,6 +68,45 @@ pub fn find_path_on_skeleton(
     // Apply Chaikin's corner cutting for smooth organic curves (3 iterations for more smoothness)
     let smoothed = smooth_path_chaikin(&resampled, 3);
     
+    // Measure path tightness by checking distance transform along the path
+    let mut tightness_sum = 0.0;
+    let mut tightness_samples = 0;
+    for point in &resampled {
+        let px = point.x.round() as i32;
+        let py = point.y.round() as i32;
+        if let Some(&dist) = distance_transform.get(px, py) {
+            tightness_sum += dist as f64;
+            tightness_samples += 1;
+        }
+    }
+    let avg_clearance = if tightness_samples > 0 {
+        tightness_sum / tightness_samples as f64
+    } else {
+        5.0  // Assume moderate if we can't measure
+    };
+    
+    // Dynamic clearance requirement based on path tightness
+    // Very tight paths (avg < 2px) → require 0px clearance (trust the skeleton)
+    // Tight paths (avg < 4px) → require 1px clearance
+    // Normal paths (avg >= 4px) → require 2px clearance
+    let required_clearance = if avg_clearance < 2.0 {
+        0  // Very tight - trust skeleton completely
+    } else if avg_clearance < 4.0 {
+        1  // Tight - minimal clearance
+    } else {
+        1  // Normal - standard clearance (reduced from 2 for better tight space handling)
+    };
+    
+    // Dynamic failure tolerance based on path tightness
+    // Tighter paths get more tolerance for smoothing failures
+    let failure_tolerance = if avg_clearance < 2.0 {
+        0.30  // Very tight - allow 30% failures
+    } else if avg_clearance < 4.0 {
+        0.20  // Tight - allow 20% failures
+    } else {
+        0.15  // Normal - allow 15% failures
+    };
+    
     // Validate smoothed path stays within safe distance from obstacles
     let mut smoothed_is_safe = true;
     let mut failed_points = 0;
@@ -77,8 +116,7 @@ pub fn find_path_on_skeleton(
         let py = point.y.round() as i32;
         
         if let Some(&dist) = distance_transform.get(px, py) {
-            // Very permissive - only 1px clearance required for tight spaces
-            if dist < 1 {
+            if dist < required_clearance {
                 smoothed_is_safe = false;
                 failed_points += 1;
             }
@@ -88,8 +126,8 @@ pub fn find_path_on_skeleton(
         }
     }
     
-    // Use smoothed path if at least 85% of points are safe (more lenient for tight spaces)
-    let final_path = if smoothed_is_safe || (failed_points as f64 / smoothed.len() as f64) < 0.15 {
+    // Use smoothed path if safe enough given the context
+    let final_path = if smoothed_is_safe || (failed_points as f64 / smoothed.len() as f64) < failure_tolerance {
         smoothed
     } else {
         resampled
@@ -105,8 +143,25 @@ fn find_nearest_skeleton_pixel(skeleton: &crate::types::Grid<bool>, pos: &Point)
     let cx = pos.x.round() as i32;
     let cy = pos.y.round() as i32;
 
-    // Search in expanding radius - increased to handle larger margins and corridors
-    for radius in 0..150 {
+    // Calculate distance to nearest border
+    let dist_to_left = pos.x;
+    let dist_to_right = 800.0 - pos.x;
+    let dist_to_top = pos.y;
+    let dist_to_bottom = 800.0 - pos.y;
+    let min_border_dist = dist_to_left.min(dist_to_right).min(dist_to_top).min(dist_to_bottom);
+    
+    // Dynamic max search radius based on border proximity
+    // Nodes near borders may need to search further due to thin margins
+    let max_radius = if min_border_dist < 15.0 {
+        350  // Very close to border - search extensively
+    } else if min_border_dist < 30.0 {
+        300  // Near border - increased search
+    } else {
+        250  // Interior - standard search
+    };
+
+    // Search in expanding radius
+    for radius in 0..max_radius {
         for dy in -radius..=radius {
             for dx in -radius..=radius {
                 if (dx as i32).abs() != radius && (dy as i32).abs() != radius {
@@ -137,6 +192,55 @@ fn astar_search(
     let mut came_from: HashMap<PixelCoord, PixelCoord> = HashMap::new();
     let mut g_score: HashMap<PixelCoord, f64> = HashMap::new();
     let mut closed_set: HashSet<PixelCoord> = HashSet::new();
+
+    // Measure available space by sampling the skeleton
+    // This helps us understand if we're in a tight endgame scenario
+    let mut space_samples = 0;
+    let mut total_distance = 0u32;
+    for sample in 0..100 {
+        let x = (start.x + goal.x) / 2 + (sample as i32 % 10 - 5) * 10;
+        let y = (start.y + goal.y) / 2 + (sample as i32 / 10 - 5) * 10;
+        if let Some(&dist) = distance_transform.get(x, y) {
+            if dist > 0 {
+                space_samples += 1;
+                total_distance += dist as u32;
+            }
+        }
+    }
+    
+    // Calculate average passage width in the search area
+    let avg_width = if space_samples > 0 {
+        (total_distance as f64 / space_samples as f64)
+    } else {
+        10.0  // Assume moderate space if we can't measure
+    };
+    
+    // Dynamic parameters based on available space
+    // Tight spaces (avg_width < 3) → minimal penalties, tight constraints
+    // Open spaces (avg_width > 8) → normal penalties and constraints
+    let forbidden_radius = if avg_width < 3.0 {
+        5.0  // Very tight - allow closer to nodes
+    } else if avg_width < 5.0 {
+        6.5  // Tight - slightly relaxed
+    } else {
+        8.0  // Normal - standard constraint
+    };
+    
+    let dist_penalty_strength = if avg_width < 3.0 {
+        0.01  // Very tight - barely prefer wider paths
+    } else if avg_width < 5.0 {
+        0.03  // Tight - mild preference
+    } else {
+        0.05  // Normal - moderate preference
+    };
+    
+    let heuristic_weight = if avg_width < 3.0 {
+        1.0  // Very tight - pure A* (no bias)
+    } else if avg_width < 5.0 {
+        1.1  // Tight - slight preference for directness
+    } else {
+        1.2  // Normal - prefer shorter paths
+    };
 
     g_score.insert(start, 0.0);
     let h_start = heuristic(&start, &goal);
@@ -180,14 +284,14 @@ fn astar_search(
                 }
 
                 // Check if this pixel is too close to a forbidden node (intermediate node)
-                // Use 8px radius - tight enough to prevent cutting through, loose enough for narrow passages
+                // Use dynamic radius based on available space
                 let neighbor_point = Point::new(neighbor.x as f64 + 0.5, neighbor.y as f64 + 0.5);
                 let mut too_close_to_forbidden = false;
                 for forbidden in forbidden_nodes {
                     let dx = neighbor_point.x - forbidden.x;
                     let dy = neighbor_point.y - forbidden.y;
                     let dist = (dx * dx + dy * dy).sqrt();
-                    if dist < 8.0 {
+                    if dist < forbidden_radius {
                         too_close_to_forbidden = true;
                         break;
                     }
@@ -199,9 +303,9 @@ fn astar_search(
 
                 let move_cost = if dx == 0 || dy == 0 { 1.0 } else { 1.414 };
                 
-                // Prefer paths through wider passages (but don't make this too strong)
+                // Prefer paths through wider passages (strength varies with context)
                 let dist_penalty = if let Some(&dist) = distance_transform.get(neighbor.x, neighbor.y) {
-                    1.0 + 0.05 / (1.0 + dist as f64)
+                    1.0 + dist_penalty_strength / (1.0 + dist as f64)
                 } else {
                     1.5
                 };
@@ -212,8 +316,8 @@ fn astar_search(
                     came_from.insert(neighbor, current);
                     g_score.insert(neighbor, tentative_g);
 
-                    // Moderate heuristic weight (1.2x) to find paths in tight spaces while preferring shorter routes
-                    let h = heuristic(&neighbor, &goal) * 1.2;
+                    // Dynamic heuristic weight based on available space
+                    let h = heuristic(&neighbor, &goal) * heuristic_weight;
                     open_set.push(AStarNode {
                         coord: neighbor,
                         g_score: tentative_g,

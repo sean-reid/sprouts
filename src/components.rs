@@ -143,17 +143,40 @@ pub fn label_components(
         meta.bounding_box.update(coord.x, coord.y);
     }
 
-    // Assign nodes to components
+    // Assign nodes to components with dynamic search based on border proximity
     for node in &state.nodes {
         let node_x = node.position.x.round() as i32;
         let node_y = node.position.y.round() as i32;
 
+        // Calculate distances to borders
+        let dist_to_left = node.position.x;
+        let dist_to_right = 800.0 - node.position.x;
+        let dist_to_top = node.position.y;
+        let dist_to_bottom = 800.0 - node.position.y;
+        let min_border_dist = dist_to_left.min(dist_to_right).min(dist_to_top).min(dist_to_bottom);
+        
+        // Dynamic search radius based on border proximity
+        // Nodes near borders need more aggressive searching because margins are thinner
+        let initial_search_radius = if min_border_dist < 15.0 {
+            40  // Very close to border - search widely immediately
+        } else if min_border_dist < 30.0 {
+            30  // Near border - increased initial search
+        } else {
+            20  // Interior - standard search
+        };
+        
+        let max_search_radius = if min_border_dist < 20.0 {
+            400  // Near border - search very far if needed
+        } else {
+            300  // Interior - standard max search
+        };
+
         // Search in progressively larger radii to find any nearby skeleton
         let mut assigned = false;
         
-        // First try immediate vicinity (fast)
-        for dy in -20..=20 {
-            for dx in -20..=20 {
+        // First try immediate vicinity (fast) with dynamic radius
+        for dy in -initial_search_radius..=initial_search_radius {
+            for dx in -initial_search_radius..=initial_search_radius {
                 let px = node_x + dx;
                 let py = node_y + dy;
 
@@ -172,7 +195,7 @@ pub fn label_components(
         
         // If not found nearby, search in larger radius
         if !assigned {
-            for radius in 21..=200 {  // Increased from 100 to 200
+            for radius in (initial_search_radius + 1)..=max_search_radius {
                 for dy in -radius..=radius {
                     for dx in -radius..=radius {
                         // Only check perimeter for efficiency

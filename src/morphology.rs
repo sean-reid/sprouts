@@ -5,14 +5,23 @@ use std::collections::{BinaryHeap, HashMap, HashSet};
 const LINE_WIDTH: f64 = 3.0;
 const DILATION_RADIUS: f64 = 7.0;  // Reduced to allow tighter gaps while preventing line crossings
 const CORRIDOR_LENGTH: f64 = 6.0;
-const BORDER_MARGIN: f64 = 20.0;
+const BORDER_MARGIN: f64 = 10.0;  // Reduced to allow paths closer to edges
+
+// Dynamic shrinking margin system:
+// - Divides each edge into 50px segments
+// - Measures distance to nearest content (nodes or lines) in each segment
+// - Margin width shrinks smoothly based on proximity:
+//   * 12px when no content nearby (>40px away)
+//   * 3px when content very close (≤5px away)
+//   * Linear interpolation between (5-40px range)
+// - AI can always path around border-adjacent nodes
 
 pub fn generate_skeleton(state: &GameState) -> (Grid<bool>, Grid<u8>) {
     let mut obstacle_map = Grid::new(800, 800, false);
     for line in &state.lines {
         rasterize_polyline(&mut obstacle_map, &line.polyline, LINE_WIDTH);
     }
-    add_border_obstacles(&mut obstacle_map, &state.lines);
+    add_border_obstacles(&mut obstacle_map, &state.lines, &state.nodes);
     let mut protected_mask = Grid::new(800, 800, false);
     for node in &state.nodes {
         if node.connection_count >= 3 { continue; }
@@ -135,7 +144,7 @@ fn ensure_node_connected(skeleton: &mut Grid<bool>, node_x: i32, node_y: i32, ob
         }
     }
     let mut skeleton_targets = Vec::new();
-    for search_radius in 1..500 {  // Increased from 400 to 500
+    for search_radius in 1..600 {  // Increased from 500 to 600 for nodes near borders
         for dy in -search_radius..=search_radius {
             for dx in -search_radius..=search_radius {
                 if (dx as i32).abs() != search_radius && (dy as i32).abs() != search_radius { continue; }
@@ -356,30 +365,154 @@ pub fn chamfer_distance_transform(obstacle_map: &Grid<bool>) -> Grid<u8> {
     dist
 }
 
-fn add_border_obstacles(grid: &mut Grid<bool>, lines: &[crate::types::Line]) {
-    let mut has_content_left = false;
-    let mut has_content_right = false;
-    let mut has_content_top = false;
-    let mut has_content_bottom = false;
-    for line in lines {
-        for point in &line.polyline {
-            if point.x < 30.0 { has_content_left = true; }
-            if point.x > 770.0 { has_content_right = true; }
-            if point.y < 30.0 { has_content_top = true; }
-            if point.y > 770.0 { has_content_bottom = true; }
+fn add_border_obstacles(grid: &mut Grid<bool>, lines: &[crate::types::Line], nodes: &[crate::types::Node]) {
+    // Dynamic margin system - margins shrink based on proximity to content
+    // The closer content is to the edge, the thinner the margin becomes
+    
+    const SEGMENT_SIZE: usize = 50; // Check in 50px segments
+    const MAX_OBSTACLE_WIDTH: usize = 12; // Maximum margin when no content nearby
+    const MIN_OBSTACLE_WIDTH: usize = 3;  // Minimum margin when content very close
+    const DETECTION_RANGE: f64 = 40.0;    // Distance to check for content
+    
+    // Helper function to calculate obstacle width based on nearest content distance
+    let calc_obstacle_width = |min_distance: f64| -> usize {
+        if min_distance >= DETECTION_RANGE {
+            // No content nearby - use full margin
+            MAX_OBSTACLE_WIDTH
+        } else if min_distance <= 5.0 {
+            // Content very close - use minimum margin
+            MIN_OBSTACLE_WIDTH
+        } else {
+            // Linear interpolation between min and max based on distance
+            // Distance 5-40 maps to width 3-12
+            let t = (min_distance - 5.0) / (DETECTION_RANGE - 5.0);
+            let width = MIN_OBSTACLE_WIDTH as f64 + t * (MAX_OBSTACLE_WIDTH - MIN_OBSTACLE_WIDTH) as f64;
+            width.round() as usize
+        }
+    };
+    
+    // Top edge - divide into segments
+    for seg_start in (0..800).step_by(SEGMENT_SIZE) {
+        let seg_end = (seg_start + SEGMENT_SIZE).min(800);
+        let mut min_distance = DETECTION_RANGE + 1.0;
+        
+        // Find closest node in this segment
+        for node in nodes {
+            if node.position.x >= seg_start as f64 && node.position.x < seg_end as f64 {
+                let dist = node.position.y;
+                min_distance = min_distance.min(dist);
+            }
+        }
+        
+        // Find closest line point in this segment
+        for line in lines {
+            for point in &line.polyline {
+                if point.x >= seg_start as f64 && point.x < seg_end as f64 {
+                    let dist = point.y;
+                    min_distance = min_distance.min(dist);
+                }
+            }
+        }
+        
+        let obstacle_width = calc_obstacle_width(min_distance);
+        for x in seg_start..seg_end {
+            for y in 0..obstacle_width {
+                grid.set(x as i32, y as i32, true);
+            }
         }
     }
-    if !has_content_top {
-        for x in 0..800 { for y in 0..20 { grid.set(x, y, true); } }
+    
+    // Bottom edge - divide into segments
+    for seg_start in (0..800).step_by(SEGMENT_SIZE) {
+        let seg_end = (seg_start + SEGMENT_SIZE).min(800);
+        let mut min_distance = DETECTION_RANGE + 1.0;
+        
+        // Find closest node
+        for node in nodes {
+            if node.position.x >= seg_start as f64 && node.position.x < seg_end as f64 {
+                let dist = 800.0 - node.position.y;
+                min_distance = min_distance.min(dist);
+            }
+        }
+        
+        // Find closest line point
+        for line in lines {
+            for point in &line.polyline {
+                if point.x >= seg_start as f64 && point.x < seg_end as f64 {
+                    let dist = 800.0 - point.y;
+                    min_distance = min_distance.min(dist);
+                }
+            }
+        }
+        
+        let obstacle_width = calc_obstacle_width(min_distance);
+        for x in seg_start..seg_end {
+            for y in 0..obstacle_width {
+                grid.set(x as i32, (799 - y) as i32, true);
+            }
+        }
     }
-    if !has_content_bottom {
-        for x in 0..800 { for y in 0..20 { grid.set(x, 799 - y, true); } }
+    
+    // Left edge - divide into segments
+    for seg_start in (0..800).step_by(SEGMENT_SIZE) {
+        let seg_end = (seg_start + SEGMENT_SIZE).min(800);
+        let mut min_distance = DETECTION_RANGE + 1.0;
+        
+        // Find closest node
+        for node in nodes {
+            if node.position.y >= seg_start as f64 && node.position.y < seg_end as f64 {
+                let dist = node.position.x;
+                min_distance = min_distance.min(dist);
+            }
+        }
+        
+        // Find closest line point
+        for line in lines {
+            for point in &line.polyline {
+                if point.y >= seg_start as f64 && point.y < seg_end as f64 {
+                    let dist = point.x;
+                    min_distance = min_distance.min(dist);
+                }
+            }
+        }
+        
+        let obstacle_width = calc_obstacle_width(min_distance);
+        for y in seg_start..seg_end {
+            for x in 0..obstacle_width {
+                grid.set(x as i32, y as i32, true);
+            }
+        }
     }
-    if !has_content_left {
-        for y in 0..800 { for x in 0..20 { grid.set(x, y, true); } }
-    }
-    if !has_content_right {
-        for y in 0..800 { for x in 0..20 { grid.set(799 - x, y, true); } }
+    
+    // Right edge - divide into segments
+    for seg_start in (0..800).step_by(SEGMENT_SIZE) {
+        let seg_end = (seg_start + SEGMENT_SIZE).min(800);
+        let mut min_distance = DETECTION_RANGE + 1.0;
+        
+        // Find closest node
+        for node in nodes {
+            if node.position.y >= seg_start as f64 && node.position.y < seg_end as f64 {
+                let dist = 800.0 - node.position.x;
+                min_distance = min_distance.min(dist);
+            }
+        }
+        
+        // Find closest line point
+        for line in lines {
+            for point in &line.polyline {
+                if point.y >= seg_start as f64 && point.y < seg_end as f64 {
+                    let dist = 800.0 - point.x;
+                    min_distance = min_distance.min(dist);
+                }
+            }
+        }
+        
+        let obstacle_width = calc_obstacle_width(min_distance);
+        for y in seg_start..seg_end {
+            for x in 0..obstacle_width {
+                grid.set((799 - x) as i32, y as i32, true);
+            }
+        }
     }
 }
 
