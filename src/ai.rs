@@ -3,7 +3,7 @@ use crate::pathfinding::find_path_on_skeleton;
 use crate::types::{GameState, Move};
 use crate::validation::validate_ai_move;
 
-const SEARCH_DEPTH: usize = 3;
+const SEARCH_DEPTH: usize = 2;
 
 pub fn find_best_move(state: &mut GameState, _max_time_ms: u32) -> Option<Move> {
     let classification = classify_nodes(state);
