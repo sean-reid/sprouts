@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <title>Sprouts Game</title>
     <style>
         * {
@@ -19,25 +19,28 @@
             display: flex;
             flex-direction: column;
             align-items: center;
-            min-height: 100vh;
-            padding: 40px 20px;
+            height: 100vh; /* Lock body height */
+            padding: 10px;
+            overflow: hidden; /* Prevent body scroll */
+            touch-action: manipulation;
         }
         
         h1 {
-            font-size: 48px;
+            font-size: clamp(20px, 5vh, 40px);
             font-weight: 300;
-            letter-spacing: 12px;
-            margin-bottom: 60px;
+            letter-spacing: 8px;
+            margin-bottom: 10px;
             color: #FFFFFF;
+            flex-shrink: 0;
         }
         
         #status {
-            font-size: 16px;
-            font-weight: 400;
+            font-size: 14px;
             color: #A0A0A0;
-            margin-bottom: 24px;
-            min-height: 24px;
-            transition: color 200ms ease-in-out;
+            margin-bottom: 10px;
+            min-height: 20px;
+            text-align: center;
+            flex-shrink: 0;
         }
         
         #status.win { color: #10B981; }
@@ -45,132 +48,99 @@
         
         .controls {
             display: flex;
-            gap: 12px;
-            margin-bottom: 24px;
+            gap: 8px;
+            margin-bottom: 15px;
+            flex-wrap: wrap;
+            justify-content: center;
+            flex-shrink: 0;
         }
         
         button {
             background: #1A1A1A;
             border: 1px solid #2A2A2A;
             color: #A0A0A0;
-            padding: 12px 32px;
+            padding: 8px 16px;
             border-radius: 4px;
-            font-size: 14px;
+            font-size: 11px;
             font-weight: 500;
-            letter-spacing: 2px;
+            letter-spacing: 1px;
             text-transform: uppercase;
             cursor: pointer;
             transition: all 150ms ease-in-out;
-            font-family: inherit;
         }
         
         button:hover:not(:disabled) {
             background: #252525;
             color: #FFFFFF;
-            border-color: #404040;
+        }
+
+        button.confirm-btn {
+            background: #10B981;
+            color: white;
+            border-color: #059669;
         }
         
-        button:active:not(:disabled) {
-            background: #303030;
-            transform: translateY(1px);
+        /* The "Fit to Window" Logic */
+        .canvas-container {
+            position: relative;
+            flex-grow: 1; /* Take up remaining space */
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            width: 100%;
+            min-height: 0; /* Allow container to shrink below content size */
         }
-        
-        button:disabled {
-            opacity: 0.4;
-            cursor: not-allowed;
-        }
-        
+
         #canvas {
             background: #1A1A1A;
             border: 1px solid #2A2A2A;
-            cursor: default;
             display: block;
+            touch-action: none;
+            /* Scale based on both width and height constraints */
+            max-width: 100%;
+            max-height: 100%;
+            width: auto;
+            height: auto;
+            aspect-ratio: 1 / 1;
         }
-        
-        #canvas:hover {
-            cursor: inherit;
-        }
-        
-        .canvas-container {
-            position: relative;
-        }
-        
-        #debugInfo {
+
+        #mobileOverlay {
             position: absolute;
-            top: 20px;
-            right: 20px;
-            font-size: 11px;
-            color: #A0A0A0;
-            font-weight: 400;
-            letter-spacing: 0.5px;
+            bottom: 20px;
+            left: 50%;
+            transform: translateX(-50%);
             display: none;
-            background: rgba(0, 0, 0, 0.9);
-            padding: 12px 16px;
-            border-radius: 4px;
+            gap: 12px;
+            z-index: 10;
+            background: rgba(10, 10, 10, 0.9);
+            padding: 12px;
+            border-radius: 8px;
             border: 1px solid #2A2A2A;
-            font-family: monospace;
-            pointer-events: none;
-            white-space: pre;
-            line-height: 1.6;
         }
-        
-        #debugInfo.visible {
-            display: block;
-        }
+
+        #mobileOverlay.visible { display: flex; }
         
         .modal {
             display: none;
             position: fixed;
-            top: 0;
-            left: 0;
-            width: 100%;
-            height: 100%;
+            top: 0; left: 0;
+            width: 100%; height: 100%;
             background: rgba(0, 0, 0, 0.9);
             justify-content: center;
             align-items: center;
             z-index: 1000;
         }
         
-        .modal.visible {
-            display: flex;
-        }
+        .modal.visible { display: flex; }
         
         .modal-content {
             background: #1A1A1A;
             border: 1px solid #2A2A2A;
-            padding: 60px 80px;
+            padding: 40px 20px;
             border-radius: 4px;
             text-align: center;
-        }
-        
-        .modal-content h2 {
-            font-size: 36px;
-            font-weight: 300;
-            letter-spacing: 8px;
-            margin-bottom: 40px;
-            color: #FFFFFF;
-        }
-        
-        .modal-content p {
-            font-size: 18px;
-            color: #A0A0A0;
-            margin-bottom: 40px;
-        }
-        
-        @media (max-width: 900px) {
-            h1 {
-                font-size: 32px;
-                letter-spacing: 8px;
-            }
-            
-            #canvas {
-                width: 100%;
-                height: auto;
-            }
-            
-            .modal-content {
-                padding: 40px 60px;
-            }
+            width: 90%;
+            max-width: 400px;
         }
     </style>
 </head>
@@ -187,13 +157,16 @@
     
     <div class="canvas-container">
         <canvas id="canvas" width="800" height="800"></canvas>
-        <div id="debugInfo"></div>
+        <div id="mobileOverlay">
+            <button onclick="cancelPlacement()">Cancel</button>
+            <button class="confirm-btn" onclick="confirmMove()">Confirm Move</button>
+        </div>
     </div>
 
     <div id="gameOverModal" class="modal">
         <div class="modal-content">
-            <h2 id="winnerText"></h2>
-            <p>Game Over</p>
+            <h2 id="winnerText" style="letter-spacing: 4px; margin-bottom: 20px;"></h2>
+            <p style="margin-bottom: 30px; color: #A0A0A0;">Game Over</p>
             <button onclick="closeModal(); newGame(3);">New Game</button>
         </div>
     </div>
@@ -219,8 +192,8 @@
             hoveredNode: null,
             animatingLine: null,
             animationProgress: 0,
-            debugMode: false,
-            gameOver: false
+            gameOver: false,
+            isTouchDevice: false
         };
 
         let canvas, ctx;
@@ -250,51 +223,165 @@
 
             worker = new Worker('./ai-worker.js', { type: 'module' });
             worker.onmessage = handleWorkerMessage;
-            worker.onerror = (error) => {
-                console.error('Worker error:', error);
-                setStatus('Failed to load game. Please check console.', 'lose');
-            };
 
-            canvas.addEventListener('mousedown', onMouseDown);
-            canvas.addEventListener('mousemove', onMouseMove);
-            canvas.addEventListener('mouseup', onMouseUp);
-            canvas.addEventListener('click', onClick);
+            // Input handlers
+            canvas.addEventListener('mousedown', (e) => {
+                if(gameState.isTouchDevice) return;
+                handleStart(e.clientX, e.clientY);
+            });
+            canvas.addEventListener('mousemove', (e) => {
+                if(gameState.isTouchDevice) return;
+                handleMove(e.clientX, e.clientY);
+            });
+            canvas.addEventListener('mouseup', (e) => {
+                if(gameState.isTouchDevice) return;
+                handleEnd(e.clientX, e.clientY);
+            });
+            canvas.addEventListener('click', (e) => {
+                if(gameState.isTouchDevice) return;
+                handleDesktopClick();
+            });
+
+            canvas.addEventListener('touchstart', (e) => {
+                gameState.isTouchDevice = true;
+                e.preventDefault();
+                handleStart(e.touches[0].clientX, e.touches[0].clientY);
+            }, { passive: false });
+            canvas.addEventListener('touchmove', (e) => {
+                e.preventDefault();
+                handleMove(e.touches[0].clientX, e.touches[0].clientY);
+            }, { passive: false });
+            canvas.addEventListener('touchend', (e) => {
+                e.preventDefault();
+                handleEnd(e.changedTouches[0].clientX, e.changedTouches[0].clientY);
+            }, { passive: false });
 
             requestAnimationFrame(render);
+            await workerCall('init', { nodeCount: 3 });
+            await updateGameState();
+            setStatus('Draw a line between two nodes');
+        }
 
-            try {
-                await workerCall('init', { nodeCount: 3 });
-                await updateGameState();
-                setStatus('Draw a line between two nodes to make your move');
-            } catch (error) {
-                console.error('Failed to initialize:', error);
-                setStatus('Failed to load game. Please check console.', 'lose');
+        function getCanvasCoords(clientX, clientY) {
+            const rect = canvas.getBoundingClientRect();
+            return {
+                x: (clientX - rect.left) * (canvas.width / rect.width),
+                y: (clientY - rect.top) * (canvas.height / rect.height)
+            };
+        }
+
+        function handleStart(clientX, clientY) {
+            if (gameState.mode !== GameMode.IDLE || gameState.gameOver) return;
+            const { x, y } = getCanvasCoords(clientX, clientY);
+            const node = findNodeAt(x, y);
+            if (node && gameState.activeNodes.has(node.id)) {
+                gameState.mode = GameMode.DRAGGING;
+                gameState.dragStartNode = node.id;
+                gameState.dragPath = [{ x: node.position.x, y: node.position.y }];
             }
         }
 
-        async function newGame(nodeCount) {
-            await workerCall('init', { nodeCount });
+        async function handleMove(clientX, clientY) {
+            const { x, y } = getCanvasCoords(clientX, clientY);
+            const node = findNodeAt(x, y);
+            gameState.hoveredNode = node ? node.id : null;
+
+            if (gameState.mode === GameMode.DRAGGING) {
+                const last = gameState.dragPath[gameState.dragPath.length - 1];
+                if (Math.hypot(x - last.x, y - last.y) > 5) {
+                    gameState.dragPath.push({ x, y });
+                    gameState.dragPath = healPath(gameState.dragPath);
+                }
+            } else if (gameState.mode === GameMode.PLACING_NODE) {
+                const pathData = gameState.lockedPath.flatMap(p => [p.x, p.y]);
+                const { point } = await workerCall('get_closest_point', { pathData, x, y });
+                const closest = { x: point[0], y: point[1] };
+                
+                const snapDist = gameState.isTouchDevice ? 60 : 30;
+                if (Math.hypot(x - closest.x, y - closest.y) < snapDist) {
+                    const { valid } = await workerCall('validate_placement', { 
+                        pathData, newNodeX: closest.x, newNodeY: closest.y 
+                    });
+                    gameState.placementDot = { position: closest, valid };
+                }
+            }
+        }
+
+        function handleEnd(clientX, clientY) {
+            if (gameState.mode !== GameMode.DRAGGING) return;
+            const { x, y } = getCanvasCoords(clientX, clientY);
+            const endNode = findNodeAt(x, y);
+
+            if (!endNode || !gameState.activeNodes.has(endNode.id)) {
+                gameState.mode = GameMode.IDLE;
+                gameState.dragPath = [];
+                setStatus('Connect to a valid node', 'lose');
+                return;
+            }
+
+            gameState.lockedPath = [...gameState.dragPath];
+            gameState.lockedPath[gameState.lockedPath.length - 1] = { x: endNode.position.x, y: endNode.position.y };
+            gameState.dragEndNode = endNode.id;
+            gameState.mode = GameMode.PLACING_NODE;
+            
+            if (gameState.isTouchDevice) {
+                document.getElementById('mobileOverlay').classList.add('visible');
+                setStatus('Slide finger along curve to place node');
+            } else {
+                setStatus('Click on the curve to place node', 'win');
+            }
+        }
+
+        async function handleDesktopClick() {
+            if (gameState.mode === GameMode.PLACING_NODE && !gameState.isTouchDevice) {
+                await executeMove();
+            }
+        }
+
+        window.confirmMove = async () => {
+            if (gameState.isTouchDevice) await executeMove();
+        };
+
+        async function executeMove() {
+            if (!gameState.placementDot || !gameState.placementDot.valid) {
+                setStatus('Select a valid spot on the line', 'lose');
+                return;
+            }
+            const pathData = gameState.lockedPath.flatMap(p => [p.x, p.y]);
+            const newPos = gameState.placementDot.position;
+            document.getElementById('mobileOverlay').classList.remove('visible');
+            await workerCall('apply_move', {
+                fromNode: gameState.dragStartNode, toNode: gameState.dragEndNode,
+                pathData, newNodeX: newPos.x, newNodeY: newPos.y
+            });
             await updateGameState();
             gameState.mode = GameMode.IDLE;
             gameState.dragPath = [];
             gameState.lockedPath = [];
             gameState.placementDot = null;
-            gameState.gameOver = false;
-            closeModal();
-            setStatus('Draw a line between two nodes to make your move');
+            if (!gameState.gameOver) {
+                setStatus('AI is thinking...');
+                performAIMove();
+            }
         }
+
+        window.cancelPlacement = () => {
+            gameState.mode = GameMode.IDLE;
+            gameState.dragPath = [];
+            gameState.lockedPath = [];
+            gameState.placementDot = null;
+            document.getElementById('mobileOverlay').classList.remove('visible');
+            setStatus('Move cancelled');
+        };
 
         function healPath(points) {
             if (points.length < 4) return points;
-            const healed = [];
-            healed.push(points[0]);
+            const healed = [points[0]];
             for (let i = 1; i < points.length; i++) {
                 const current = points[i];
                 for (let j = 0; j < healed.length - 2; j++) {
                     if (segmentsIntersect(healed[healed.length - 1], current, healed[j], healed[j + 1])) {
-                        const trimmed = healed.slice(0, j + 2);
-                        trimmed.push(current);
-                        return healPath(trimmed);
+                        return healPath([...healed.slice(0, j + 2), current]);
                     }
                 }
                 healed.push(current);
@@ -310,7 +397,6 @@
         async function updateGameState() {
             const { state } = await workerCall('get_state');
             let idx = 0;
-
             const nodeCount = state[idx++];
             gameState.nodes = [];
             for (let i = 0; i < nodeCount; i++) {
@@ -320,7 +406,6 @@
                     connectionCount: state[idx++]
                 });
             }
-
             const lineCount = state[idx++];
             gameState.lines = [];
             for (let i = 0; i < lineCount; i++) {
@@ -329,452 +414,138 @@
                 const to = state[idx++];
                 const pointCount = state[idx++];
                 const polyline = [];
-                for (let j = 0; j < pointCount; j++) {
-                    polyline.push({ x: state[idx++], y: state[idx++] });
-                }
+                for (let j = 0; j < pointCount; j++) polyline.push({ x: state[idx++], y: state[idx++] });
                 const newNodePos = { x: state[idx++], y: state[idx++] };
                 const player = state[idx++];
                 gameState.lines.push({ id, from, to, polyline, newNodePos, player });
             }
-
             const { activeNodes } = await workerCall('get_active_nodes');
             gameState.activeNodes = new Set(activeNodes);
-
             const { gameOver } = await workerCall('is_game_over');
             if (gameOver) {
                 gameState.gameOver = true;
                 showGameOver();
             }
-            
-            // Refresh skeleton debug if in debug mode
-            if (gameState.debugMode) {
-                await refreshSkeletonDebug();
-            }
-        }
-
-        function setStatus(message, type = '') {
-            const statusEl = document.getElementById('status');
-            statusEl.textContent = message;
-            statusEl.className = type;
-        }
-
-        function onMouseDown(e) {
-            if (gameState.mode !== GameMode.IDLE) return;
-            if (gameState.gameOver) return;
-
-            const rect = canvas.getBoundingClientRect();
-            const x = (e.clientX - rect.left) * (canvas.width / rect.width);
-            const y = (e.clientY - rect.top) * (canvas.height / rect.height);
-
-            const node = findNodeAt(x, y);
-            if (node && gameState.activeNodes.has(node.id)) {
-                gameState.mode = GameMode.DRAGGING;
-                gameState.dragStartNode = node.id;
-                gameState.dragPath = [{ x: node.position.x, y: node.position.y }];
-                setStatus('Drag to draw your path...');
-            }
-        }
-
-        async function onMouseMove(e) {
-            const rect = canvas.getBoundingClientRect();
-            const x = (e.clientX - rect.left) * (canvas.width / rect.width);
-            const y = (e.clientY - rect.top) * (canvas.height / rect.height);
-
-            const node = findNodeAt(x, y);
-            gameState.hoveredNode = node ? node.id : null;
-
-            if (gameState.mode === GameMode.DRAGGING) {
-                const last = gameState.dragPath[gameState.dragPath.length - 1];
-                const dx = x - last.x;
-                const dy = y - last.y;
-                if (dx * dx + dy * dy > 16) {
-                    gameState.dragPath.push({ x, y });
-                    gameState.dragPath = healPath(gameState.dragPath);
-                }
-            } else if (gameState.mode === GameMode.PLACING_NODE) {
-                const pathData = gameState.lockedPath.flatMap(p => [p.x, p.y]);
-                const { point } = await workerCall('get_closest_point', { pathData, x, y });
-                const closest = { x: point[0], y: point[1] };
-
-                const { valid } = await workerCall('validate_placement', { 
-                    pathData, 
-                    newNodeX: closest.x, 
-                    newNodeY: closest.y 
-                });
-
-                gameState.placementDot = {
-                    position: closest,
-                    valid
-                };
-            }
-        }
-
-        function onMouseUp(e) {
-            if (gameState.mode !== GameMode.DRAGGING) return;
-
-            const rect = canvas.getBoundingClientRect();
-            const x = (e.clientX - rect.left) * (canvas.width / rect.width);
-            const y = (e.clientY - rect.top) * (canvas.height / rect.height);
-
-            const endNode = findNodeAt(x, y);
-            if (!endNode || !gameState.activeNodes.has(endNode.id)) {
-                gameState.mode = GameMode.IDLE;
-                gameState.dragPath = [];
-                setStatus('Must end on an active (blue) node', 'lose');
-                return;
-            }
-
-            const snappedPath = [...gameState.dragPath];
-            snappedPath[snappedPath.length - 1] = { x: endNode.position.x, y: endNode.position.y };
-
-            gameState.lockedPath = snappedPath;
-            gameState.dragEndNode = endNode.id;
-            gameState.mode = GameMode.PLACING_NODE;
-            setStatus('Click on the curve to place the new node', 'win');
-        }
-
-        async function onClick(e) {
-            if (gameState.mode !== GameMode.PLACING_NODE) return;
-
-            if (!gameState.placementDot || !gameState.placementDot.valid) {
-                setStatus('Invalid placement location', 'lose');
-                return;
-            }
-
-            const pathData = gameState.lockedPath.flatMap(p => [p.x, p.y]);
-            const newPos = gameState.placementDot.position;
-
-            await workerCall('apply_move', {
-                fromNode: gameState.dragStartNode,
-                toNode: gameState.dragEndNode,
-                pathData,
-                newNodeX: newPos.x,
-                newNodeY: newPos.y
-            });
-
-            await updateGameState();
-            gameState.mode = GameMode.IDLE;
-            gameState.dragPath = [];
-            gameState.lockedPath = [];
-            gameState.placementDot = null;
-            gameState.dragEndNode = null;
-
-            if (!gameState.gameOver) {
-                setStatus('AI is thinking...');
-                performAIMove();
-            }
         }
 
         async function performAIMove() {
             const { move: aiMoveData } = await workerCall('get_ai_move');
-
             if (aiMoveData.length === 0) {
-                const { classification: classDebug } = await workerCall('get_classification_debug');
-                let idx = 0;
-                
-                const activeCount = classDebug[idx++];
-                const activeNodes = [];
-                for (let i = 0; i < activeCount; i++) {
-                    activeNodes.push(classDebug[idx++]);
-                }
-                
-                const pairsCount = classDebug[idx++];
-                const legalPairs = [];
-                for (let i = 0; i < pairsCount; i++) {
-                    legalPairs.push([classDebug[idx++], classDebug[idx++]]);
-                }
-                
-                const loopsCount = classDebug[idx++];
-                const selfLoops = [];
-                for (let i = 0; i < loopsCount; i++) {
-                    selfLoops.push(classDebug[idx++]);
-                }
-                
                 gameState.gameOver = true;
                 showGameOver();
                 return;
             }
-
             let idx = 0;
             const fromNode = aiMoveData[idx++];
             const toNode = aiMoveData[idx++];
             const pointCount = aiMoveData[idx++];
             const path = [];
-            for (let i = 0; i < pointCount; i++) {
-                path.push({ x: aiMoveData[idx++], y: aiMoveData[idx++] });
-            }
+            for (let i = 0; i < pointCount; i++) path.push({ x: aiMoveData[idx++], y: aiMoveData[idx++] });
             const newPos = { x: aiMoveData[idx++], y: aiMoveData[idx++] };
-
             gameState.mode = GameMode.ANIMATING_AI;
             gameState.animatingLine = { path, newPos };
             gameState.animationProgress = 0;
-
-            const animationDuration = 500;
             const startTime = performance.now();
-
             function animate(currentTime) {
-                const elapsed = currentTime - startTime;
-                gameState.animationProgress = Math.min(elapsed / animationDuration, 1.0);
-
-                if (gameState.animationProgress < 1.0) {
-                    requestAnimationFrame(animate);
-                } else {
-                    applyAIMove(fromNode, toNode, path, newPos);
-                }
+                gameState.animationProgress = Math.min((currentTime - startTime) / 500, 1.0);
+                if (gameState.animationProgress < 1.0) requestAnimationFrame(animate);
+                else finishAIMove(fromNode, toNode, path, newPos);
             }
-
             requestAnimationFrame(animate);
         }
 
-        async function applyAIMove(fromNode, toNode, path, newPos) {
-            const pathData = path.flatMap(p => [p.x, p.y]);
+        async function finishAIMove(fromNode, toNode, path, newPos) {
             await workerCall('apply_move', {
-                fromNode,
-                toNode,
-                pathData,
-                newNodeX: newPos.x,
-                newNodeY: newPos.y
+                fromNode, toNode, pathData: path.flatMap(p => [p.x, p.y]),
+                newNodeX: newPos.x, newNodeY: newPos.y
             });
-            
             await updateGameState();
             gameState.mode = GameMode.IDLE;
             gameState.animatingLine = null;
-
-            if (!gameState.gameOver) {
-                setStatus('Your turn! Draw a line between two nodes');
-            }
+            if (!gameState.gameOver) setStatus('Your turn!');
         }
 
         function findNodeAt(x, y) {
-            const threshold = 15;
-            for (const node of gameState.nodes) {
-                const dx = x - node.position.x;
-                const dy = y - node.position.y;
-                if (dx * dx + dy * dy < threshold * threshold) {
-                    return node;
-                }
-            }
-            return null;
+            const threshold = gameState.isTouchDevice ? 25 : 15;
+            return gameState.nodes.find(n => Math.hypot(x - n.position.x, y - n.position.y) < threshold) || null;
         }
 
-        let skeletonDebugCache = null;
-
-        async function refreshSkeletonDebug() {
-            if (gameState.debugMode && worker) {
-                const { skeleton } = await workerCall('get_skeleton_debug');
-                skeletonDebugCache = new ImageData(new Uint8ClampedArray(skeleton), 800, 800);
-            }
-        }
-
-        async function render() {
-            ctx.clearRect(0, 0, canvas.width, canvas.height);
-
+        function render() {
             ctx.fillStyle = '#1A1A1A';
             ctx.fillRect(0, 0, canvas.width, canvas.height);
-
-            if (gameState.debugMode && skeletonDebugCache) {
-                ctx.globalAlpha = 0.15;
-                ctx.putImageData(skeletonDebugCache, 0, 0);
-                ctx.globalAlpha = 1.0;
-            }
-
             for (const line of gameState.lines) {
-                ctx.strokeStyle = line.player === 0 ? '#2C2C2C' : '#EF4444';
-                ctx.lineWidth = 2.5;
-                ctx.lineCap = 'round';
-                ctx.lineJoin = 'round';
-
+                ctx.strokeStyle = line.player === 0 ? '#444' : '#EF4444';
+                ctx.lineWidth = 3;
                 ctx.beginPath();
                 ctx.moveTo(line.polyline[0].x, line.polyline[0].y);
-                for (let i = 1; i < line.polyline.length; i++) {
-                    ctx.lineTo(line.polyline[i].x, line.polyline[i].y);
-                }
+                for (let i = 1; i < line.polyline.length; i++) ctx.lineTo(line.polyline[i].x, line.polyline[i].y);
                 ctx.stroke();
             }
-
-            if (gameState.mode === GameMode.DRAGGING && gameState.dragPath.length > 1) {
-                ctx.strokeStyle = 'rgba(44, 44, 44, 0.45)';
-                ctx.lineWidth = 2.5;
-                ctx.lineCap = 'round';
-                ctx.lineJoin = 'round';
-
+            const activePath = gameState.mode === GameMode.DRAGGING ? gameState.dragPath : 
+                               gameState.mode === GameMode.PLACING_NODE ? gameState.lockedPath : null;
+            if (activePath && activePath.length > 1) {
+                ctx.strokeStyle = '#3B82F6';
+                ctx.lineWidth = 3;
                 ctx.beginPath();
-                ctx.moveTo(gameState.dragPath[0].x, gameState.dragPath[0].y);
-                for (let i = 1; i < gameState.dragPath.length; i++) {
-                    ctx.lineTo(gameState.dragPath[i].x, gameState.dragPath[i].y);
-                }
+                ctx.moveTo(activePath[0].x, activePath[0].y);
+                for (let i = 1; i < activePath.length; i++) ctx.lineTo(activePath[i].x, activePath[i].y);
                 ctx.stroke();
             }
-
-            if (gameState.mode === GameMode.PLACING_NODE) {
-                ctx.strokeStyle = '#2C2C2C';
-                ctx.lineWidth = 2.5;
-                ctx.lineCap = 'round';
-                ctx.lineJoin = 'round';
-
+            if (gameState.mode === GameMode.PLACING_NODE && gameState.placementDot) {
+                ctx.fillStyle = gameState.placementDot.valid ? '#10B981' : '#EF4444';
                 ctx.beginPath();
-                ctx.moveTo(gameState.lockedPath[0].x, gameState.lockedPath[0].y);
-                for (let i = 1; i < gameState.lockedPath.length; i++) {
-                    ctx.lineTo(gameState.lockedPath[i].x, gameState.lockedPath[i].y);
-                }
-                ctx.stroke();
-
-                if (gameState.placementDot) {
-                    ctx.fillStyle = gameState.placementDot.valid ? '#10B981' : '#EF4444';
-                    ctx.beginPath();
-                    ctx.arc(
-                        gameState.placementDot.position.x,
-                        gameState.placementDot.position.y,
-                        5,
-                        0,
-                        Math.PI * 2
-                    );
-                    ctx.fill();
-                }
+                ctx.arc(gameState.placementDot.position.x, gameState.placementDot.position.y, 8, 0, Math.PI * 2);
+                ctx.fill();
             }
-
             for (const node of gameState.nodes) {
                 const isActive = gameState.activeNodes.has(node.id);
-                const isHovered = gameState.hoveredNode === node.id;
-
-                const radius = isHovered ? 9 : 6;
-                
-                let fillColor, strokeColor;
-                if (gameState.debugMode) {
-                    if (isActive) {
-                        fillColor = '#10B981';
-                        strokeColor = '#059669';
-                    } else {
-                        fillColor = '#EF4444';
-                        strokeColor = '#DC2626';
-                    }
-                } else {
-                    fillColor = isActive ? '#3B82F6' : '#BDBDBD';
-                    strokeColor = '#FFFFFF';
-                }
-
-                if (isHovered && isActive) {
-                    ctx.shadowColor = gameState.debugMode ? '#10B981' : '#60A5FA';
-                    ctx.shadowBlur = 15;
-                }
-
-                ctx.fillStyle = fillColor;
-                ctx.strokeStyle = strokeColor;
+                ctx.fillStyle = isActive ? '#3B82F6' : '#555';
+                ctx.strokeStyle = '#FFF';
                 ctx.lineWidth = 2;
-
                 ctx.beginPath();
-                ctx.arc(node.position.x, node.position.y, radius, 0, Math.PI * 2);
+                ctx.arc(node.position.x, node.position.y, 8, 0, Math.PI * 2);
                 ctx.fill();
                 ctx.stroke();
-
-                ctx.shadowBlur = 0;
-                
-                if (gameState.debugMode) {
-                    ctx.fillStyle = '#FFFFFF';
-                    ctx.font = 'bold 10px monospace';
-                    ctx.textAlign = 'center';
-                    ctx.textBaseline = 'middle';
-                    ctx.fillText(node.connectionCount.toString(), node.position.x, node.position.y);
-                }
             }
-
-            if (gameState.mode === GameMode.ANIMATING_AI) {
+            if (gameState.mode === GameMode.ANIMATING_AI && gameState.animatingLine) {
                 const anim = gameState.animatingLine;
-                const progress = gameState.animationProgress;
-
-                const visibleLength = Math.floor(progress * anim.path.length);
-                if (visibleLength > 1) {
-                    ctx.strokeStyle = '#EF4444';
-                    ctx.lineWidth = 2.5;
-                    ctx.lineCap = 'round';
-                    ctx.lineJoin = 'round';
-
-                    ctx.beginPath();
-                    ctx.moveTo(anim.path[0].x, anim.path[0].y);
-                    for (let i = 1; i < visibleLength; i++) {
-                        ctx.lineTo(anim.path[i].x, anim.path[i].y);
-                    }
+                const len = Math.floor(gameState.animationProgress * anim.path.length);
+                if (len > 1) {
+                    ctx.strokeStyle = '#EF4444'; ctx.lineWidth = 3;
+                    ctx.beginPath(); ctx.moveTo(anim.path[0].x, anim.path[0].y);
+                    for (let i = 1; i < len; i++) ctx.lineTo(anim.path[i].x, anim.path[i].y);
                     ctx.stroke();
                 }
-
-                if (progress > 0.75) {
-                    const nodeProgress = (progress - 0.75) * 4;
-                    const scale = easeOutElastic(nodeProgress);
-
-                    ctx.globalAlpha = nodeProgress;
-                    ctx.fillStyle = '#EF4444';
-                    ctx.strokeStyle = '#FFFFFF';
-                    ctx.lineWidth = 2;
-
-                    ctx.beginPath();
-                    ctx.arc(anim.newPos.x, anim.newPos.y, 6 * scale, 0, Math.PI * 2);
-                    ctx.fill();
-                    ctx.stroke();
-
-                    ctx.globalAlpha = 1;
-                }
             }
-
-            if (gameState.debugMode) {
-                const debugInfo = document.getElementById('debugInfo');
-                debugInfo.classList.add('visible');
-                
-                const activeCount = gameState.activeNodes.size;
-                const deadCount = gameState.nodes.length - activeCount;
-                const totalConnections = gameState.nodes.reduce((sum, n) => sum + n.connectionCount, 0);
-                
-                debugInfo.textContent = `
-Mode: ${gameState.mode}
-Nodes: ${gameState.nodes.length} (${activeCount} active, ${deadCount} dead)
-Lines: ${gameState.lines.length}
-Total Connections: ${totalConnections}
-
-Node Colors:
-  GREEN = Active (can move)
-  RED = Dead (isolated or 3 connections)
-  Number = Connection count
-                `.trim();
-            } else {
-                document.getElementById('debugInfo').classList.remove('visible');
-            }
-
             requestAnimationFrame(render);
         }
 
-        function easeOutElastic(t) {
-            const c4 = (2 * Math.PI) / 3;
-            return t === 0 ? 0 : t === 1 ? 1
-                : Math.pow(2, -10 * t) * Math.sin((t * 10 - 0.75) * c4) + 1;
-        }
-
-        function toggleDebug() {
-            gameState.debugMode = !gameState.debugMode;
-            if (gameState.debugMode) {
-                refreshSkeletonDebug();
-            } else {
-                skeletonDebugCache = null;
-            }
+        function setStatus(msg, type = '') {
+            const el = document.getElementById('status');
+            el.textContent = msg; el.className = type;
         }
 
         function showGameOver() {
-            const modal = document.getElementById('gameOverModal');
-            const winnerText = document.getElementById('winnerText');
-
             const lastMove = gameState.lines[gameState.lines.length - 1];
-            const winner = lastMove ? (lastMove.player === 0 ? 'YOU WIN' : 'AI WINS') : 'DRAW';
-
-            winnerText.textContent = winner;
-            modal.classList.add('visible');
+            document.getElementById('winnerText').textContent = lastMove?.player === 0 ? 'YOU WIN' : 'AI WINS';
+            document.getElementById('gameOverModal').classList.add('visible');
         }
 
         function closeModal() {
             document.getElementById('gameOverModal').classList.remove('visible');
         }
 
-        window.newGame = newGame;
-        window.toggleDebug = toggleDebug;
-        window.closeModal = closeModal;
+        window.newGame = (n) => {
+            workerCall('init', { nodeCount: n }).then(() => {
+                updateGameState();
+                gameState.mode = GameMode.IDLE;
+                gameState.gameOver = false;
+                closeModal();
+                setStatus('Connect two nodes');
+            });
+        };
 
+        window.closeModal = closeModal;
         init();
     </script>
 </body>
