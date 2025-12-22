@@ -59,6 +59,7 @@ pub fn classify_nodes(state: &mut GameState) -> NodeClassification {
 
         let mut can_reach_other = false;
 
+        // First try component-based analysis (fast)
         if let Some(node_comps) = node_to_components.get(&node.id) {
             for &comp_id in node_comps {
                 if let Some(meta) = components.get(&comp_id) {
@@ -74,16 +75,21 @@ pub fn classify_nodes(state: &mut GameState) -> NodeClassification {
                         }
                     }
                 }
+                if can_reach_other {
+                    break;
+                }
             }
-        } else {
-            // Node not assigned to any component - this could be a bug in component labeling
-            // Try to verify by checking if we can find a path to any other active node
+        }
+        
+        // If component analysis didn't find reachability, verify with pathfinding
+        // This is crucial for tight spaces where skeleton might fragment
+        if !can_reach_other {
             for other_node in &state.nodes {
                 if other_node.id == node.id || other_node.connection_count >= 3 || dead_nodes.contains(&other_node.id) {
                     continue;
                 }
                 
-                // Try pathfinding as a fallback
+                // Try pathfinding to verify reachability
                 if let Some(_path) = crate::pathfinding::find_path_on_skeleton(state, node.id, other_node.id) {
                     can_reach_other = true;
                     break;
@@ -98,7 +104,7 @@ pub fn classify_nodes(state: &mut GameState) -> NodeClassification {
         }
     }
 
-    // Phase 3: Generate legal pairs
+    // Phase 3: Generate legal pairs with pathfinding verification
     for node_a in &state.nodes {
         if !active_nodes.contains(&node_a.id) {
             continue;
@@ -113,19 +119,23 @@ pub fn classify_nodes(state: &mut GameState) -> NodeClassification {
             }
 
             // Check if nodes share a component
-            if let Some(comps_a) = node_to_components.get(&node_a.id) {
+            let shares_component = if let Some(comps_a) = node_to_components.get(&node_a.id) {
                 if let Some(comps_b) = node_to_components.get(&node_b.id) {
-                    let mut shares_component = false;
-                    for &comp_a in comps_a {
-                        if comps_b.contains(&comp_a) {
-                            shares_component = true;
-                            break;
-                        }
-                    }
+                    comps_a.iter().any(|comp_a| comps_b.contains(comp_a))
+                } else {
+                    false
+                }
+            } else {
+                false
+            };
 
-                    if shares_component {
-                        legal_pairs.push((node_a.id, node_b.id));
-                    }
+            if shares_component {
+                legal_pairs.push((node_a.id, node_b.id));
+            } else {
+                // In tight spaces, component analysis might be wrong
+                // Verify with actual pathfinding as fallback
+                if let Some(_path) = crate::pathfinding::find_path_on_skeleton(state, node_a.id, node_b.id) {
+                    legal_pairs.push((node_a.id, node_b.id));
                 }
             }
         }
