@@ -3,7 +3,7 @@ use crate::types::{GameState, Grid, Point};
 use std::collections::{BinaryHeap, HashMap, HashSet};
 
 const LINE_WIDTH: f64 = 3.0;
-const DILATION_RADIUS: f64 = 9.0;  // Reduced from 12 to allow tighter gaps
+const DILATION_RADIUS: f64 = 7.0;  // Reduced to allow tighter gaps while preventing line crossings
 const CORRIDOR_LENGTH: f64 = 6.0;
 const BORDER_MARGIN: f64 = 20.0;
 

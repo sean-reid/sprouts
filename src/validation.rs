@@ -1,4 +1,4 @@
-use crate::geometry::{closest_point_on_polyline, distance, polyline_length, segments_intersect};
+use crate::geometry::{closest_point_on_polyline, distance, polyline_length, segments_intersect, smooth_path_chaikin};
 use crate::types::{GameState, Move, Point};
 
 const MIN_PATH_LENGTH: f64 = 15.0;
@@ -57,10 +57,19 @@ fn validate_move_internal(state: &GameState, mov: &Move, is_ai_move: bool) -> Re
         }
     }
     debug_log!("[{}] ✓ Check 3 passed: Node spacing OK", mode);
-    let min_clearance = if is_ai_move { 3.0 } else { 5.0 };
+    
+    // For human moves, use a smoothed version of the path for clearance checking
+    // This prevents jitter in hand-drawn paths from causing false failures
+    let path_for_clearance = if is_ai_move {
+        mov.polyline.clone()
+    } else {
+        smooth_path_chaikin(&mov.polyline, 2)
+    };
+    
+    let min_clearance = if is_ai_move { 3.0 } else { 8.0 }; // More lenient for humans
     for node in &state.nodes {
         if node.id == mov.from_node || node.id == mov.to_node { continue; }
-        let (_, dist) = closest_point_on_polyline(&mov.polyline, &node.position);
+        let (_, dist) = closest_point_on_polyline(&path_for_clearance, &node.position);
         if dist < min_clearance {
             debug_log!("[{}] FAIL: Path too close to node {}: {:.1}px", mode, node.id, dist);
             return Err("Path passes too close to an existing node".to_string());
@@ -68,6 +77,14 @@ fn validate_move_internal(state: &GameState, mov: &Move, is_ai_move: bool) -> Re
     }
     debug_log!("[{}] ✓ Check 4 passed: Path clearance OK", mode);
     debug_log!("[{}] Check 5: Intersection testing ({} existing lines)", mode, state.lines.len());
+    
+    // For intersection testing, also use smoothed path for humans to reduce false positives
+    let path_for_intersect = if is_ai_move {
+        &mov.polyline
+    } else {
+        &path_for_clearance
+    };
+    
     for line in &state.lines {
         let shares_node = 
             line.from_node == mov.from_node || line.from_node == mov.to_node ||
@@ -75,7 +92,7 @@ fn validate_move_internal(state: &GameState, mov: &Move, is_ai_move: bool) -> Re
         let mut geometrically_shares_node = shares_node;
         if !shares_node {
             for node in &state.nodes {
-                let on_move_path = mov.polyline.iter().any(|p| p.distance_to(&node.position) < 10.0);
+                let on_move_path = path_for_intersect.iter().any(|p| p.distance_to(&node.position) < 10.0);
                 let on_line_path = line.polyline.iter().any(|p| p.distance_to(&node.position) < 10.0);
                 if on_move_path && on_line_path {
                     geometrically_shares_node = true;
@@ -85,9 +102,9 @@ fn validate_move_internal(state: &GameState, mov: &Move, is_ai_move: bool) -> Re
                 }
             }
         }
-        for i in 1..mov.polyline.len() {
-            let seg_start = &mov.polyline[i - 1];
-            let seg_end = &mov.polyline[i];
+        for i in 1..path_for_intersect.len() {
+            let seg_start = &path_for_intersect[i - 1];
+            let seg_end = &path_for_intersect[i];
             for j in 1..line.polyline.len() {
                 let line_seg_start = &line.polyline[j - 1];
                 let line_seg_end = &line.polyline[j];
@@ -115,8 +132,8 @@ fn validate_move_internal(state: &GameState, mov: &Move, is_ai_move: bool) -> Re
                         debug_log!("    Distance to to_node ({}): {:.1}px", mov.to_node, dist_to);
                         debug_log!("    Min distance to ANY node: {:.1}px", min_dist_to_any_node);
                         
-                        // AI must be RIGHT AT the node (3px), humans get 50px
-                        let tolerance = if is_ai_move { 5.0 } else { 50.0 };
+                        // AI must be RIGHT AT the node (5px), humans get more tolerance (60px)
+                        let tolerance = if is_ai_move { 5.0 } else { 60.0 };
                         debug_log!("    Tolerance: {:.1}px", tolerance);
                         
                         if min_dist_to_any_node >= tolerance {

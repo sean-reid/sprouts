@@ -41,8 +41,16 @@ pub fn find_path_on_skeleton(
     let start_pixel = find_nearest_skeleton_pixel(skeleton, &from_node.position)?;
     let goal_pixel = find_nearest_skeleton_pixel(skeleton, &to_node.position)?;
 
+    // Identify forbidden regions: areas around intermediate nodes on existing lines
+    // These are nodes that are neither the start nor end of our path
+    let forbidden_nodes: Vec<Point> = state.nodes
+        .iter()
+        .filter(|n| n.id != from_node_id && n.id != to_node_id)
+        .map(|n| n.position)
+        .collect();
+
     // Run A*
-    let path_pixels = astar_search(skeleton, distance_transform, start_pixel, goal_pixel)?;
+    let path_pixels = astar_search(skeleton, distance_transform, start_pixel, goal_pixel, &forbidden_nodes)?;
 
     // Convert pixel path to continuous path
     let mut path_points: Vec<Point> = path_pixels
@@ -69,8 +77,8 @@ pub fn find_path_on_skeleton(
         let py = point.y.round() as i32;
         
         if let Some(&dist) = distance_transform.get(px, py) {
-            // Very permissive - only 2px clearance required
-            if dist < 2 {
+            // Very permissive - only 1px clearance required for tight spaces
+            if dist < 1 {
                 smoothed_is_safe = false;
                 failed_points += 1;
             }
@@ -80,8 +88,8 @@ pub fn find_path_on_skeleton(
         }
     }
     
-    // Use smoothed path if at least 90% of points are safe
-    let final_path = if smoothed_is_safe || (failed_points as f64 / smoothed.len() as f64) < 0.1 {
+    // Use smoothed path if at least 85% of points are safe (more lenient for tight spaces)
+    let final_path = if smoothed_is_safe || (failed_points as f64 / smoothed.len() as f64) < 0.15 {
         smoothed
     } else {
         resampled
@@ -123,6 +131,7 @@ fn astar_search(
     distance_transform: &crate::types::Grid<u8>,
     start: PixelCoord,
     goal: PixelCoord,
+    forbidden_nodes: &[Point],
 ) -> Option<Vec<PixelCoord>> {
     let mut open_set = BinaryHeap::new();
     let mut came_from: HashMap<PixelCoord, PixelCoord> = HashMap::new();
@@ -170,6 +179,24 @@ fn astar_search(
                     continue;
                 }
 
+                // Check if this pixel is too close to a forbidden node (intermediate node)
+                // Use 8px radius - tight enough to prevent cutting through, loose enough for narrow passages
+                let neighbor_point = Point::new(neighbor.x as f64 + 0.5, neighbor.y as f64 + 0.5);
+                let mut too_close_to_forbidden = false;
+                for forbidden in forbidden_nodes {
+                    let dx = neighbor_point.x - forbidden.x;
+                    let dy = neighbor_point.y - forbidden.y;
+                    let dist = (dx * dx + dy * dy).sqrt();
+                    if dist < 8.0 {
+                        too_close_to_forbidden = true;
+                        break;
+                    }
+                }
+                
+                if too_close_to_forbidden {
+                    continue;
+                }
+
                 let move_cost = if dx == 0 || dy == 0 { 1.0 } else { 1.414 };
                 
                 // Prefer paths through wider passages (but don't make this too strong)
@@ -185,8 +212,8 @@ fn astar_search(
                     came_from.insert(neighbor, current);
                     g_score.insert(neighbor, tentative_g);
 
-                    // Increase heuristic weight to prefer shorter paths (2.0x weight)
-                    let h = heuristic(&neighbor, &goal) * 2.0;
+                    // Moderate heuristic weight (1.2x) to find paths in tight spaces while preferring shorter routes
+                    let h = heuristic(&neighbor, &goal) * 1.2;
                     open_set.push(AStarNode {
                         coord: neighbor,
                         g_score: tentative_g,
