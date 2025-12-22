@@ -1,0 +1,15 @@
+{
+  "name": "sprouts",
+  "type": "module",
+  "version": "0.1.0",
+  "files": [
+    "sprouts_bg.wasm",
+    "sprouts.js",
+    "sprouts.d.ts"
+  ],
+  "main": "sprouts.js",
+  "types": "sprouts.d.ts",
+  "sideEffects": [
+    "./snippets/*"
+  ]
+}
