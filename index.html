@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
     <title>Sprouts Game</title>
     <style>
         * {
@@ -19,26 +19,27 @@
             display: flex;
             flex-direction: column;
             align-items: center;
-            height: 100vh; /* Lock body height */
+            /* Use dvh to handle mobile browser toolbars correctly */
+            height: 100vh;
+            height: 100dvh; 
             padding: 10px;
-            overflow: hidden; /* Prevent body scroll */
+            overflow: hidden;
             touch-action: manipulation;
         }
         
         h1 {
-            font-size: clamp(20px, 5vh, 40px);
+            font-size: clamp(20px, 5vh, 32px);
             font-weight: 300;
-            letter-spacing: 8px;
-            margin-bottom: 10px;
-            color: #FFFFFF;
+            letter-spacing: 6px;
+            margin-bottom: 8px;
             flex-shrink: 0;
         }
         
         #status {
-            font-size: 14px;
+            font-size: 13px;
             color: #A0A0A0;
-            margin-bottom: 10px;
-            min-height: 20px;
+            margin-bottom: 8px;
+            min-height: 18px;
             text-align: center;
             flex-shrink: 0;
         }
@@ -49,7 +50,7 @@
         .controls {
             display: flex;
             gap: 8px;
-            margin-bottom: 15px;
+            margin-bottom: 12px;
             flex-wrap: wrap;
             justify-content: center;
             flex-shrink: 0;
@@ -59,14 +60,13 @@
             background: #1A1A1A;
             border: 1px solid #2A2A2A;
             color: #A0A0A0;
-            padding: 8px 16px;
+            padding: 8px 14px;
             border-radius: 4px;
             font-size: 11px;
             font-weight: 500;
             letter-spacing: 1px;
             text-transform: uppercase;
             cursor: pointer;
-            transition: all 150ms ease-in-out;
         }
         
         button:hover:not(:disabled) {
@@ -78,17 +78,19 @@
             background: #10B981;
             color: white;
             border-color: #059669;
+            padding: 12px 24px; /* Larger tap target for mobile */
+            font-weight: 600;
         }
         
-        /* The "Fit to Window" Logic */
         .canvas-container {
             position: relative;
-            flex-grow: 1; /* Take up remaining space */
+            flex-grow: 1;
             display: flex;
             justify-content: center;
             align-items: center;
             width: 100%;
-            min-height: 0; /* Allow container to shrink below content size */
+            min-height: 0;
+            padding-bottom: 20px; /* Space for overlay if absolute */
         }
 
         #canvas {
@@ -96,7 +98,6 @@
             border: 1px solid #2A2A2A;
             display: block;
             touch-action: none;
-            /* Scale based on both width and height constraints */
             max-width: 100%;
             max-height: 100%;
             width: auto;
@@ -104,18 +105,20 @@
             aspect-ratio: 1 / 1;
         }
 
+        /* Fixed positioning ensures it never gets pushed off by container scaling */
         #mobileOverlay {
-            position: absolute;
-            bottom: 20px;
+            position: fixed;
+            bottom: 40px; /* Positioned higher to clear mobile "home" indicators */
             left: 50%;
             transform: translateX(-50%);
             display: none;
             gap: 12px;
-            z-index: 10;
-            background: rgba(10, 10, 10, 0.9);
-            padding: 12px;
-            border-radius: 8px;
-            border: 1px solid #2A2A2A;
+            z-index: 100;
+            background: rgba(20, 20, 20, 0.95);
+            padding: 16px;
+            border-radius: 12px;
+            border: 1px solid #333;
+            box-shadow: 0 10px 25px rgba(0,0,0,0.5);
         }
 
         #mobileOverlay.visible { display: flex; }
@@ -157,10 +160,11 @@
     
     <div class="canvas-container">
         <canvas id="canvas" width="800" height="800"></canvas>
-        <div id="mobileOverlay">
-            <button onclick="cancelPlacement()">Cancel</button>
-            <button class="confirm-btn" onclick="confirmMove()">Confirm Move</button>
-        </div>
+    </div>
+
+    <div id="mobileOverlay">
+        <button onclick="cancelPlacement()">Cancel</button>
+        <button class="confirm-btn" onclick="confirmMove()">Confirm Move</button>
     </div>
 
     <div id="gameOverModal" class="modal">
@@ -224,7 +228,6 @@
             worker = new Worker('./ai-worker.js', { type: 'module' });
             worker.onmessage = handleWorkerMessage;
 
-            // Input handlers
             canvas.addEventListener('mousedown', (e) => {
                 if(gameState.isTouchDevice) return;
                 handleStart(e.clientX, e.clientY);
@@ -297,7 +300,7 @@
                 const { point } = await workerCall('get_closest_point', { pathData, x, y });
                 const closest = { x: point[0], y: point[1] };
                 
-                const snapDist = gameState.isTouchDevice ? 60 : 30;
+                const snapDist = gameState.isTouchDevice ? 80 : 30;
                 if (Math.hypot(x - closest.x, y - closest.y) < snapDist) {
                     const { valid } = await workerCall('validate_placement', { 
                         pathData, newNodeX: closest.x, newNodeY: closest.y 
@@ -326,9 +329,9 @@
             
             if (gameState.isTouchDevice) {
                 document.getElementById('mobileOverlay').classList.add('visible');
-                setStatus('Slide finger along curve to place node');
+                setStatus('Drag along curve to place node');
             } else {
-                setStatus('Click on the curve to place node', 'win');
+                setStatus('Click curve to place node', 'win');
             }
         }
 
@@ -466,7 +469,7 @@
         }
 
         function findNodeAt(x, y) {
-            const threshold = gameState.isTouchDevice ? 25 : 15;
+            const threshold = gameState.isTouchDevice ? 30 : 15;
             return gameState.nodes.find(n => Math.hypot(x - n.position.x, y - n.position.y) < threshold) || null;
         }
 
