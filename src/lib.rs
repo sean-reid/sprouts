@@ -144,7 +144,12 @@ impl SproutsGame {
             new_node_pos: Point::new(new_node_x, new_node_y),
             player: self.state.current_player,
         };
-        if validation::validate_move(&self.state, &mov).is_ok() {
+        // Use AI-level validation when it's the AI's turn, human-level otherwise
+        let valid = match self.state.current_player {
+            Player::AI => validation::validate_ai_move(&self.state, &mov).is_ok(),
+            Player::Human => validation::validate_move(&self.state, &mov).is_ok(),
+        };
+        if valid {
             self.state.apply_move(mov);
             true
         } else {

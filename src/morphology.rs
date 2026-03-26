@@ -1,5 +1,5 @@
 use crate::types::{GameState, Grid, Point};
-use std::collections::{BinaryHeap, HashMap, HashSet};
+use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
 
 const LINE_WIDTH: f64 = 3.0;
 const DILATION_RADIUS: f64 = 7.0;
@@ -93,7 +93,120 @@ pub fn generate_skeleton(state: &GameState) -> (Grid<bool>, Grid<u8>) {
         if node.connection_count >= 3 { continue; }
         ensure_node_connected(&mut connected_skeleton, node.position.x as i32, node.position.y as i32, &dilated, &distance_transform);
     }
+
+    // Bridge disconnected skeleton components that both contain active nodes.
+    // Without this, the skeleton can fragment and falsely declare nodes unreachable.
+    bridge_active_components(&mut connected_skeleton, state, &dilated, &distance_transform);
+
     (connected_skeleton, distance_transform)
+}
+
+/// After connecting individual nodes to the skeleton, there may still be
+/// disconnected skeleton fragments. If two active nodes are on different
+/// fragments, the game would falsely declare them unreachable. This function
+/// BFS-floods from one active node's skeleton pixel and bridges any active
+/// nodes that aren't reachable.
+fn bridge_active_components(skeleton: &mut Grid<bool>, state: &GameState, obstacle_map: &Grid<bool>, distance_transform: &Grid<u8>) {
+    // Find the nearest skeleton pixel for each active node
+    let mut seeds: Vec<(i32, i32)> = Vec::new();
+    for node in &state.nodes {
+        if node.connection_count >= 3 { continue; }
+        let nx = node.position.x.round() as i32;
+        let ny = node.position.y.round() as i32;
+        let mut found = None;
+        'search: for r in 0i32..50 {
+            for dy in -r..=r {
+                for dx in -r..=r {
+                    if r > 0 && dx.abs() != r && dy.abs() != r { continue; }
+                    let sx = nx + dx;
+                    let sy = ny + dy;
+                    if *skeleton.get(sx, sy).unwrap_or(&false) {
+                        found = Some((sx, sy));
+                        break 'search;
+                    }
+                }
+            }
+        }
+        if let Some(s) = found {
+            seeds.push(s);
+        }
+    }
+
+    if seeds.len() < 2 { return; }
+
+    // BFS from the first seed to find all reachable skeleton pixels
+    let mut reachable = Grid::new(800, 800, false);
+    let mut queue = VecDeque::new();
+    queue.push_back(seeds[0]);
+    reachable.set(seeds[0].0, seeds[0].1, true);
+
+    while let Some((cx, cy)) = queue.pop_front() {
+        for dy in -1..=1i32 {
+            for dx in -1..=1i32 {
+                if dx == 0 && dy == 0 { continue; }
+                let nx = cx + dx;
+                let ny = cy + dy;
+                if skeleton.in_bounds(nx, ny)
+                    && *skeleton.get(nx, ny).unwrap_or(&false)
+                    && !*reachable.get(nx, ny).unwrap_or(&true)
+                {
+                    reachable.set(nx, ny, true);
+                    queue.push_back((nx, ny));
+                }
+            }
+        }
+    }
+
+    // For each unreachable seed, bridge it to the nearest reachable skeleton pixel
+    for &(sx, sy) in &seeds[1..] {
+        if *reachable.get(sx, sy).unwrap_or(&false) {
+            continue; // Already connected to the main component
+        }
+
+        // Expanding ring search for nearest reachable pixel
+        let mut target = None;
+        'bridge: for r in 1i32..800 {
+            for dy in -r..=r {
+                for dx in -r..=r {
+                    if dx.abs() != r && dy.abs() != r { continue; }
+                    let tx = sx + dx;
+                    let ty = sy + dy;
+                    if *reachable.get(tx, ty).unwrap_or(&false) {
+                        target = Some((tx, ty));
+                        break 'bridge;
+                    }
+                }
+            }
+        }
+
+        if let Some((tx, ty)) = target {
+            if let Some(path) = astar_connect(sx, sy, tx, ty, obstacle_map, distance_transform) {
+                for &(px, py) in &path {
+                    skeleton.set(px, py, true);
+                    reachable.set(px, py, true);
+                }
+                // BFS from the bridge to mark all newly reachable skeleton pixels
+                let mut bq = VecDeque::new();
+                bq.push_back((sx, sy));
+                while let Some((cx, cy)) = bq.pop_front() {
+                    for dy in -1..=1i32 {
+                        for dx in -1..=1i32 {
+                            if dx == 0 && dy == 0 { continue; }
+                            let nx = cx + dx;
+                            let ny = cy + dy;
+                            if skeleton.in_bounds(nx, ny)
+                                && *skeleton.get(nx, ny).unwrap_or(&false)
+                                && !*reachable.get(nx, ny).unwrap_or(&true)
+                            {
+                                reachable.set(nx, ny, true);
+                                bq.push_back((nx, ny));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 fn repair_skeleton_gaps(skeleton: &Grid<bool>) -> Grid<bool> {

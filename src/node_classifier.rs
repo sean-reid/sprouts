@@ -51,52 +51,14 @@ pub fn classify_nodes(state: &mut GameState) -> NodeClassification {
         }
     }
 
-    // Identify active nodes: can reach at least one other active node
+    // All nodes with < 3 connections are considered active.
+    // The old approach tried to check skeleton-based reachability here, but the
+    // skeleton can fragment and falsely declare nodes dead even when clear open
+    // space exists between them. Legal pairs (below) still require actual
+    // skeleton paths, so only truly reachable pairs will appear as playable.
     for node in &state.nodes {
-        if dead_nodes.contains(&node.id) {
-            continue;
-        }
-
-        let mut can_reach_other = false;
-
-        // First try component-based analysis (fast)
-        if let Some(node_comps) = node_to_components.get(&node.id) {
-            for &comp_id in node_comps {
-                if let Some(meta) = components.get(&comp_id) {
-                    for &other_node_id in &meta.accessible_nodes {
-                        if other_node_id != node.id && !dead_nodes.contains(&other_node_id) {
-                            if let Some(other_node) = state.nodes.iter().find(|n| n.id == other_node_id) {
-                                if other_node.connection_count < 3 {
-                                    can_reach_other = true;
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                }
-                if can_reach_other {
-                    break;
-                }
-            }
-        }
-
-        // Fallback: pathfinding for tight spaces where skeleton might fragment
-        if !can_reach_other {
-            for other_node in &state.nodes {
-                if other_node.id == node.id || other_node.connection_count >= 3 || dead_nodes.contains(&other_node.id) {
-                    continue;
-                }
-                if let Some(_path) = crate::pathfinding::find_path_on_skeleton(state, node.id, other_node.id) {
-                    can_reach_other = true;
-                    break;
-                }
-            }
-        }
-
-        if can_reach_other {
+        if !dead_nodes.contains(&node.id) {
             active_nodes.insert(node.id);
-        } else {
-            dead_nodes.insert(node.id);
         }
     }
 
