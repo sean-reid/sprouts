@@ -1,8 +1,10 @@
+mod abstract_graph;
 mod ai;
 mod components;
 mod geometry;
 mod morphology;
 mod node_classifier;
+mod opening_book;
 mod pathfinding;
 mod types;
 mod validation;

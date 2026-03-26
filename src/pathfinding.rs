@@ -130,48 +130,84 @@ pub fn find_path_on_skeleton(
 }
 
 /// Find a self-loop path: a curve from a node back to itself.
+///
+/// Strategy: find two skeleton pixels near the node in different angular
+/// directions, then A* between them on a skeleton where the node's center
+/// is blocked. This forces the path to arc around the node, creating a
+/// natural loop when combined with the node-to-pixel segments.
 pub fn find_self_loop_on_skeleton(state: &GameState, node_id: usize) -> Option<Vec<Point>> {
     let node = state.find_node(node_id)?;
     let skeleton = &state.skeleton_cache.skeleton;
     let distance_transform = &state.skeleton_cache.distance_transform;
 
-    let start = find_nearest_skeleton_pixel(skeleton, &node.position)?;
     let cx = node.position.x.round() as i32;
     let cy = node.position.y.round() as i32;
 
-    // BFS outward from start to find a waypoint >= 25px away on the skeleton
-    let mut waypoint = None;
-    let mut visited = HashSet::new();
-    let mut queue = VecDeque::new();
-    queue.push_back(start);
-    visited.insert(start);
-
-    while let Some(current) = queue.pop_front() {
-        let dx = current.x - cx;
-        let dy = current.y - cy;
-        let dist = ((dx * dx + dy * dy) as f64).sqrt();
-        if dist >= 25.0 {
-            waypoint = Some(current);
-            break;
-        }
-        for ndy in -1..=1 {
-            for ndx in -1..=1 {
-                if ndx == 0 && ndy == 0 {
+    // Collect skeleton pixels near the node (5–25px away) with their angles
+    let mut by_angle: Vec<(PixelCoord, f64)> = Vec::new();
+    for r in 5i32..30 {
+        for dy in -r..=r {
+            for dx in -r..=r {
+                if dx.abs() != r && dy.abs() != r {
                     continue;
                 }
-                let neighbor = PixelCoord::new(current.x + ndx, current.y + ndy);
-                if !visited.contains(&neighbor)
-                    && skeleton.in_bounds(neighbor.x, neighbor.y)
-                    && *skeleton.get(neighbor.x, neighbor.y).unwrap_or(&false)
-                {
-                    visited.insert(neighbor);
-                    queue.push_back(neighbor);
+                let x = cx + dx;
+                let y = cy + dy;
+                if skeleton.in_bounds(x, y) && *skeleton.get(x, y).unwrap_or(&false) {
+                    let angle = (dy as f64).atan2(dx as f64);
+                    by_angle.push((PixelCoord::new(x, y), angle));
                 }
+            }
+        }
+        if by_angle.len() >= 20 {
+            break;
+        }
+    }
+
+    if by_angle.len() < 2 {
+        return None;
+    }
+
+    // Find the pair with maximum angular separation (ideally ~180 degrees)
+    let mut best_i = 0;
+    let mut best_j = 1;
+    let mut best_diff = 0.0f64;
+    for i in 0..by_angle.len() {
+        for j in (i + 1)..by_angle.len() {
+            let diff = (by_angle[i].1 - by_angle[j].1).abs();
+            let diff = if diff > std::f64::consts::PI {
+                2.0 * std::f64::consts::PI - diff
+            } else {
+                diff
+            };
+            if diff > best_diff {
+                best_diff = diff;
+                best_i = i;
+                best_j = j;
             }
         }
     }
 
-    let waypoint = waypoint?;
+    // Need at least 60 degrees of separation for a meaningful loop
+    if best_diff < std::f64::consts::PI / 3.0 {
+        return None;
+    }
+
+    let pixel_a = by_angle[best_i].0;
+    let pixel_b = by_angle[best_j].0;
+
+    // Block a small area around the node center on a skeleton copy.
+    // This prevents the A* from taking the direct path through the node,
+    // forcing it to go around and form a loop.
+    let mut loop_skeleton = skeleton.clone();
+    let block_radius = 4i32;
+    for dy in -block_radius..=block_radius {
+        for dx in -block_radius..=block_radius {
+            if dx * dx + dy * dy <= block_radius * block_radius {
+                loop_skeleton.set(cx + dx, cy + dy, false);
+            }
+        }
+    }
 
     let forbidden_nodes: Vec<Point> = state
         .nodes
@@ -180,34 +216,22 @@ pub fn find_self_loop_on_skeleton(state: &GameState, node_id: usize) -> Option<V
         .map(|n| n.position)
         .collect();
 
-    // Find outgoing path from start to waypoint
-    let path_out = astar_search(skeleton, distance_transform, start, waypoint, &forbidden_nodes)?;
-
-    // Remove outgoing path interior pixels from a skeleton copy, then A* back
-    let mut modified_skeleton = skeleton.clone();
-    for i in 1..path_out.len().saturating_sub(1) {
-        modified_skeleton.set(path_out[i].x, path_out[i].y, false);
-    }
-
-    let path_back = astar_search(
-        &modified_skeleton,
+    let path_pixels = astar_search(
+        &loop_skeleton,
         distance_transform,
-        waypoint,
-        start,
+        pixel_a,
+        pixel_b,
         &forbidden_nodes,
     )?;
 
-    if path_back.len() < 5 {
+    if path_pixels.len() < 10 {
         return None;
     }
 
-    // Combine: node → outgoing → waypoint → return → node
-    let mut path_points: Vec<Point> = Vec::new();
+    // Build loop: node → pixel_a → path → pixel_b → node
+    let mut path_points = Vec::new();
     path_points.push(node.position);
-    for p in &path_out {
-        path_points.push(Point::new(p.x as f64 + 0.5, p.y as f64 + 0.5));
-    }
-    for p in path_back.iter().skip(1) {
+    for p in &path_pixels {
         path_points.push(Point::new(p.x as f64 + 0.5, p.y as f64 + 0.5));
     }
     path_points.push(node.position);

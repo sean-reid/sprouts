@@ -85,6 +85,7 @@ pub struct GameState {
     pub current_player: Player,
     pub next_node_id: usize,
     pub next_line_id: usize,
+    pub initial_node_count: usize,
 }
 
 impl GameState {
@@ -94,7 +95,7 @@ impl GameState {
         // Place initial nodes in a circle
         let center_x = 400.0;
         let center_y = 400.0;
-        let radius = 100.0;
+        let radius = if initial_nodes <= 4 { 120.0 } else { 160.0 };
 
         for i in 0..initial_nodes {
             let angle = 2.0 * std::f64::consts::PI * (i as f64) / (initial_nodes as f64);
@@ -111,6 +112,7 @@ impl GameState {
             current_player: Player::Human,
             next_node_id: initial_nodes,
             next_line_id: 0,
+            initial_node_count: initial_nodes,
         }
     }
 
@@ -125,6 +127,7 @@ impl GameState {
             current_player: self.current_player,
             next_node_id: self.next_node_id,
             next_line_id: self.next_line_id,
+            initial_node_count: self.initial_node_count,
         }
     }
 

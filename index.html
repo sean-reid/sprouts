@@ -154,9 +154,9 @@
     <h1>SPROUTS</h1>
 
     <div class="controls">
-        <button onclick="newGame(2)">2 Nodes</button>
-        <button onclick="newGame(3)">3 Nodes</button>
         <button onclick="newGame(4)">4 Nodes</button>
+        <button onclick="newGame(5)">5 Nodes</button>
+        <button onclick="newGame(6)">6 Nodes</button>
         <button id="undoBtn" onclick="undoMove()" disabled>Undo</button>
     </div>
 
@@ -175,7 +175,7 @@
         <div class="modal-content">
             <h2 id="winnerText" style="letter-spacing: 4px; margin-bottom: 20px;"></h2>
             <p style="margin-bottom: 30px; color: #A0A0A0;">Game Over</p>
-            <button onclick="closeModal(); newGame(3);">New Game</button>
+            <button onclick="closeModal(); newGame(4);">New Game</button>
         </div>
     </div>
 
@@ -210,6 +210,7 @@
         let pendingCallbacks = new Map();
         let callbackId = 0;
         let thinkingInterval = null;
+        let placingModeEnteredAt = 0;
 
         function workerCall(type, data = {}) {
             return new Promise((resolve, reject) => {
@@ -275,7 +276,18 @@
             });
             canvas.addEventListener('click', (e) => {
                 if(gameState.isTouchDevice) return;
-                handleDesktopClick();
+                handleDesktopClick(e.clientX, e.clientY);
+            });
+            canvas.addEventListener('contextmenu', (e) => {
+                if (gameState.mode === GameMode.PLACING_NODE) {
+                    e.preventDefault();
+                    cancelPlacement();
+                }
+            });
+            document.addEventListener('keydown', (e) => {
+                if (e.key === 'Escape' && gameState.mode === GameMode.PLACING_NODE) {
+                    cancelPlacement();
+                }
             });
 
             canvas.addEventListener('touchstart', (e) => {
@@ -293,7 +305,7 @@
             }, { passive: false });
 
             requestAnimationFrame(render);
-            await workerCall('init', { nodeCount: 3 });
+            await workerCall('init', { nodeCount: 4 });
             await updateGameState();
             setStatus('Draw a line between two nodes');
         }
@@ -377,6 +389,7 @@
             gameState.lockedPath[gameState.lockedPath.length - 1] = { x: endNode.position.x, y: endNode.position.y };
             gameState.dragEndNode = endNode.id;
             gameState.mode = GameMode.PLACING_NODE;
+            placingModeEnteredAt = performance.now();
 
             if (gameState.isTouchDevice) {
                 document.getElementById('mobileOverlay').classList.add('visible');
@@ -386,12 +399,35 @@
             }
         }
 
-        async function handleDesktopClick() {
-            if (gameState.mode === GameMode.PLACING_NODE && !gameState.isTouchDevice) {
-                // Only execute if there's a valid placement — ignore stray clicks
-                if (gameState.placementDot?.valid) {
+        async function handleDesktopClick(clientX, clientY) {
+            if (gameState.mode !== GameMode.PLACING_NODE || gameState.isTouchDevice) return;
+
+            // Ignore the click event that fires as part of the drag-release gesture.
+            // Without this, mouseup → handleEnd (PLACING_NODE) → click → auto-executes.
+            if (performance.now() - placingModeEnteredAt < 300) return;
+
+            // Compute placement at the click position independently of mousemove.
+            // This avoids race conditions where the async mousemove handler hasn't
+            // finished updating placementDot before the click fires.
+            const { x, y } = getCanvasCoords(clientX, clientY);
+            const pathData = gameState.lockedPath.flatMap(p => [p.x, p.y]);
+            const { point } = await workerCall('get_closest_point', { pathData, x, y });
+            const closest = { x: point[0], y: point[1] };
+
+            if (Math.hypot(x - closest.x, y - closest.y) < 40) {
+                const { valid } = await workerCall('validate_placement', {
+                    pathData, newNodeX: closest.x, newNodeY: closest.y
+                });
+                if (valid) {
+                    gameState.placementDot = { position: closest, valid: true };
                     await executeMove();
+                    return;
                 }
+            }
+
+            // Fallback: use the placement dot from the last mousemove if valid
+            if (gameState.placementDot?.valid) {
+                await executeMove();
             }
         }
 
