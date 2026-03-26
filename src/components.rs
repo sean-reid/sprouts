@@ -150,9 +150,9 @@ pub fn label_components(
 
         // Calculate distances to borders
         let dist_to_left = node.position.x;
-        let dist_to_right = 800.0 - node.position.x;
+        let dist_to_right = crate::types::BOARD_SIZE as f64 - node.position.x;
         let dist_to_top = node.position.y;
-        let dist_to_bottom = 800.0 - node.position.y;
+        let dist_to_bottom = crate::types::BOARD_SIZE as f64 - node.position.y;
         let min_border_dist = dist_to_left.min(dist_to_right).min(dist_to_top).min(dist_to_bottom);
         
         // Dynamic search radius based on border proximity

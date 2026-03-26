@@ -1,5 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
+pub const BOARD_SIZE: usize = 1000;
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Point {
     pub x: f64,
@@ -93,8 +95,8 @@ impl GameState {
         let mut nodes = Vec::new();
 
         // Place initial nodes in a circle
-        let center_x = 400.0;
-        let center_y = 400.0;
+        let center_x = BOARD_SIZE as f64 / 2.0;
+        let center_y = BOARD_SIZE as f64 / 2.0;
         let radius = if initial_nodes <= 4 { 120.0 } else { 160.0 };
 
         for i in 0..initial_nodes {
@@ -207,8 +209,8 @@ pub struct SkeletonCache {
 impl SkeletonCache {
     pub fn new() -> Self {
         Self {
-            skeleton: Grid::new(800, 800, false),
-            distance_transform: Grid::new(800, 800, 0),
+            skeleton: Grid::new(BOARD_SIZE, BOARD_SIZE, false),
+            distance_transform: Grid::new(BOARD_SIZE, BOARD_SIZE, 0),
             component_labels: HashMap::new(),
             components: HashMap::new(),
             is_valid: false,

@@ -1,9 +1,9 @@
 use crate::geometry::{closest_point_on_polyline, distance, polyline_length, segments_intersect, smooth_path_chaikin};
 use crate::types::{GameState, Move, Point};
 
-const MIN_PATH_LENGTH: f64 = 15.0;
-const MIN_NODE_SPACING: f64 = 15.0;
-const MIN_NODE_SPACING_AI: f64 = 12.0;
+const MIN_PATH_LENGTH: f64 = 20.0;
+const MIN_NODE_SPACING: f64 = 20.0;
+const MIN_NODE_SPACING_AI: f64 = 16.0;
 
 macro_rules! debug_log {
     ($($arg:tt)*) => {

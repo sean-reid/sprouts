@@ -237,12 +237,13 @@ impl SproutsGame {
         }
 
         let skeleton = &self.state.skeleton_cache.skeleton;
-        let mut data = vec![0u8; 800 * 800 * 4];
+        let bs = types::BOARD_SIZE;
+        let mut data = vec![0u8; bs * bs * 4];
 
-        for y in 0..800 {
-            for x in 0..800 {
-                let idx = (y * 800 + x) * 4;
-                if skeleton.data[y * 800 + x] {
+        for y in 0..bs {
+            for x in 0..bs {
+                let idx = (y * bs + x) * 4;
+                if skeleton.data[y * bs + x] {
                     data[idx] = 255;
                     data[idx + 1] = 255;
                     data[idx + 2] = 255;

@@ -5,7 +5,7 @@ use crate::pathfinding::{find_path_on_skeleton, find_self_loop_on_skeleton};
 use crate::types::{GameState, Move};
 use crate::validation::validate_ai_move;
 
-/// Generate all concrete moves with pixel paths (expensive — called once at root only).
+/// Generate all concrete moves with pixel paths (expensive — called once at root).
 fn generate_concrete_moves(state: &mut GameState) -> Vec<Move> {
     let classification = classify_nodes(state);
     let mut moves = Vec::new();
@@ -52,7 +52,7 @@ fn generate_concrete_moves(state: &mut GameState) -> Vec<Move> {
 }
 
 pub fn find_best_move(state: &mut GameState) -> Option<Move> {
-    // 1. OPENING BOOK — skip search for well-known positions
+    // 1. OPENING BOOK
     if let Some((from, to)) = opening_book::lookup_opening(state) {
         if let Some(path) = find_path_on_skeleton(state, from, to) {
             if path.len() >= 3 {
@@ -71,46 +71,58 @@ pub fn find_best_move(state: &mut GameState) -> Option<Move> {
         }
     }
 
-    // 2. GENERATE CONCRETE MOVES (pixel-level, expensive, only at root)
+    // 2. GENERATE CONCRETE MOVES (pixel-level, once)
     let concrete_moves = generate_concrete_moves(state);
     if concrete_moves.is_empty() {
         return None;
     }
-
-    // 3. BUILD ABSTRACT STATE for fast deep search
-    let abstract_state = AbstractState::from_game_state(state);
-    let depth = abstract_state.choose_depth();
-    let mut tt = TranspositionTable::new();
-
-    // 4. SCORE each concrete move via abstract minimax
-    //    Only the root level uses pixel paths. The entire search tree below
-    //    uses the abstract representation (~1000× faster per node).
-    let mut scored: Vec<(usize, f64)> = Vec::new();
-    for (idx, mov) in concrete_moves.iter().enumerate() {
-        let abstract_mov = AbstractMove {
-            from: mov.from_node,
-            to: mov.to_node,
-        };
-        let mut sim = abstract_state.clone();
-        sim.apply_move(&abstract_mov);
-
-        // After AI's move, it's human's turn → minimizer
-        let score = abstract_minimax(
-            &sim,
-            depth.saturating_sub(1),
-            f64::NEG_INFINITY,
-            f64::INFINITY,
-            false,
-            &mut tt,
-        );
-        scored.push((idx, score));
+    if concrete_moves.len() == 1 {
+        return Some(concrete_moves.into_iter().next().unwrap()); // Only one option
     }
 
-    // 5. RETURN best concrete move that passes final validation
-    scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    // 3. ABSTRACT SEARCH with iterative deepening.
+    //    Each iteration's TT entries improve move ordering for the next.
+    let abstract_state = AbstractState::from_game_state(state);
+    let max_depth = abstract_state.choose_depth();
+    let mut tt = TranspositionTable::new();
 
-    for (idx, _score) in scored {
-        let mov = &concrete_moves[idx];
+    let mut best_idx = 0;
+
+    for depth in 1..=max_depth {
+        let mut best_score = f64::NEG_INFINITY;
+        for (idx, mov) in concrete_moves.iter().enumerate() {
+            let abstract_mov = AbstractMove {
+                from: mov.from_node,
+                to: mov.to_node,
+            };
+            let mut sim = abstract_state.clone();
+            sim.apply_move(&abstract_mov);
+
+            let score = abstract_minimax(
+                &sim,
+                depth.saturating_sub(1),
+                f64::NEG_INFINITY,
+                f64::INFINITY,
+                false, // After AI's move, human minimizes
+                &mut tt,
+            );
+
+            if score > best_score {
+                best_score = score;
+                best_idx = idx;
+            }
+        }
+    }
+
+    // 4. RETURN best concrete move that passes validation
+    // Try the best first, then fall through to others
+    if validate_ai_move(state, &concrete_moves[best_idx]).is_ok() {
+        return Some(concrete_moves[best_idx].clone());
+    }
+    for (idx, mov) in concrete_moves.iter().enumerate() {
+        if idx == best_idx {
+            continue;
+        }
         if validate_ai_move(state, mov).is_ok() {
             return Some(mov.clone());
         }
@@ -124,7 +136,8 @@ pub fn find_optimal_node_placement(
     existing_nodes: &[crate::types::Node],
 ) -> crate::types::Point {
     if path.len() < 3 {
-        return crate::types::Point::new(400.0, 400.0);
+        let c = crate::types::BOARD_SIZE as f64 / 2.0;
+        return crate::types::Point::new(c, c);
     }
     if path.len() == 3 {
         return path[1];
