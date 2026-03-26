@@ -320,19 +320,21 @@ fn astar_search(
     };
 
     let forbidden_radius = if avg_width < 3.0 {
-        5.0
+        6.0
     } else if avg_width < 5.0 {
-        6.5
+        9.0
     } else {
-        8.0
+        12.0
     };
 
+    // Distance penalty: strongly prefer the center of corridors.
+    // Higher values push paths away from obstacles even when the skeleton allows proximity.
     let dist_penalty_strength = if avg_width < 3.0 {
-        0.01
-    } else if avg_width < 5.0 {
-        0.03
-    } else {
         0.05
+    } else if avg_width < 5.0 {
+        0.15
+    } else {
+        0.3
     };
 
     let heuristic_weight = if avg_width < 3.0 {

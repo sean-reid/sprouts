@@ -501,19 +501,22 @@
         }
 
         async function updateGameState() {
+            // Parse state into temps first, then fetch active nodes + game-over
+            // in parallel, and update gameState atomically. This prevents the
+            // render loop from seeing nodes with an empty activeNodes set (grey flash).
             const { state } = await workerCall('get_state');
             let idx = 0;
             const nodeCount = state[idx++];
-            gameState.nodes = [];
+            const newNodes = [];
             for (let i = 0; i < nodeCount; i++) {
-                gameState.nodes.push({
+                newNodes.push({
                     id: state[idx++],
                     position: { x: state[idx++], y: state[idx++] },
                     connectionCount: state[idx++]
                 });
             }
             const lineCount = state[idx++];
-            gameState.lines = [];
+            const newLines = [];
             for (let i = 0; i < lineCount; i++) {
                 const id = state[idx++];
                 const from = state[idx++];
@@ -523,14 +526,23 @@
                 for (let j = 0; j < pointCount; j++) polyline.push({ x: state[idx++], y: state[idx++] });
                 const newNodePos = { x: state[idx++], y: state[idx++] };
                 const player = state[idx++];
-                gameState.lines.push({ id, from, to, polyline, newNodePos, player });
+                newLines.push({ id, from, to, polyline, newNodePos, player });
             }
-            // Current player: 0 = human, 1 = AI
-            gameState.currentPlayer = state[idx++];
+            const newCurrentPlayer = state[idx++];
 
-            const { activeNodes } = await workerCall('get_active_nodes');
+            // Fetch active nodes and game-over status (worker runs these sequentially
+            // but we await both before updating the render state)
+            const [{ activeNodes }, { gameOver }] = await Promise.all([
+                workerCall('get_active_nodes'),
+                workerCall('is_game_over'),
+            ]);
+
+            // Atomic update — render loop never sees partial state
+            gameState.nodes = newNodes;
+            gameState.lines = newLines;
+            gameState.currentPlayer = newCurrentPlayer;
             gameState.activeNodes = new Set(activeNodes);
-            const { gameOver } = await workerCall('is_game_over');
+
             if (gameOver) {
                 gameState.gameOver = true;
                 showGameOver();
@@ -696,9 +708,12 @@
         };
 
         window.newGame = async (n) => {
-            // Reset all state immediately to avoid zombie interactions
+            // Clear ALL visual state immediately so old game doesn't flash
             gameState.mode = GameMode.IDLE;
             gameState.gameOver = false;
+            gameState.nodes = [];
+            gameState.lines = [];
+            gameState.activeNodes = new Set();
             gameState.dragPath = [];
             gameState.lockedPath = [];
             gameState.placementDot = null;

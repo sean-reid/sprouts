@@ -142,9 +142,17 @@ pub fn find_optimal_node_placement(
     if path.len() == 3 {
         return path[1];
     }
-    let mut best_pos = path[1];
+
+    // Only consider the middle 80% of the path (skip endpoints where nodes cluster)
+    let start_idx = (path.len() as f64 * 0.1).ceil() as usize;
+    let end_idx = (path.len() as f64 * 0.9).floor() as usize;
+    let start_idx = start_idx.max(1);
+    let end_idx = end_idx.min(path.len() - 1).max(start_idx + 1);
+
+    let mut best_pos = path[path.len() / 2]; // Default: midpoint
     let mut max_min_distance = 0.0;
-    for i in 1..(path.len() - 1) {
+
+    for i in start_idx..end_idx {
         let candidate = path[i];
         let mut min_dist = f64::INFINITY;
         for node in existing_nodes {
@@ -158,6 +166,7 @@ pub fn find_optimal_node_placement(
             best_pos = candidate;
         }
     }
+
     best_pos
 }
 

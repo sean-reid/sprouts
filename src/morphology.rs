@@ -2,7 +2,7 @@ use crate::types::{GameState, Grid, Point, BOARD_SIZE};
 use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
 
 const LINE_WIDTH: f64 = 3.0;
-const DILATION_RADIUS: f64 = 7.0;
+const DILATION_RADIUS: f64 = 10.0;
 const BS: usize = BOARD_SIZE;
 const BS_I: i32 = BOARD_SIZE as i32;
 const BS_F: f64 = BOARD_SIZE as f64;

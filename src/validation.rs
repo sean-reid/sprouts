@@ -76,7 +76,7 @@ fn validate_move_internal(state: &GameState, mov: &Move, is_ai_move: bool) -> Re
         smooth_path_chaikin(&mov.polyline, 2)
     };
 
-    let min_clearance = if is_ai_move { 3.0 } else { 8.0 };
+    let min_clearance = if is_ai_move { 8.0 } else { 10.0 };
     for node in &state.nodes {
         if node.id == mov.from_node || node.id == mov.to_node { continue; }
         let (_, dist) = closest_point_on_polyline(&path_for_clearance, &node.position);
