@@ -196,19 +196,6 @@ pub fn find_self_loop_on_skeleton(state: &GameState, node_id: usize) -> Option<V
     let pixel_a = by_angle[best_i].0;
     let pixel_b = by_angle[best_j].0;
 
-    // Block a small area around the node center on a skeleton copy.
-    // This prevents the A* from taking the direct path through the node,
-    // forcing it to go around and form a loop.
-    let mut loop_skeleton = skeleton.clone();
-    let block_radius = 4i32;
-    for dy in -block_radius..=block_radius {
-        for dx in -block_radius..=block_radius {
-            if dx * dx + dy * dy <= block_radius * block_radius {
-                loop_skeleton.set(cx + dx, cy + dy, false);
-            }
-        }
-    }
-
     let forbidden_nodes: Vec<Point> = state
         .nodes
         .iter()
@@ -216,17 +203,37 @@ pub fn find_self_loop_on_skeleton(state: &GameState, node_id: usize) -> Option<V
         .map(|n| n.position)
         .collect();
 
-    let path_pixels = astar_search(
-        &loop_skeleton,
-        distance_transform,
-        pixel_a,
-        pixel_b,
-        &forbidden_nodes,
-    )?;
+    // Block a small area around the node center on a skeleton copy.
+    // This prevents the A* from taking the direct path through the node,
+    // forcing it to go around and form a loop.
+    // Try progressively smaller block radii if A* fails (the skeleton
+    // near a node can be thin, so a large block may disconnect it).
+    let mut path_pixels = None;
+    for block_radius in [4i32, 3, 2] {
+        let mut loop_skeleton = skeleton.clone();
+        for dy in -block_radius..=block_radius {
+            for dx in -block_radius..=block_radius {
+                if dx * dx + dy * dy <= block_radius * block_radius {
+                    loop_skeleton.set(cx + dx, cy + dy, false);
+                }
+            }
+        }
 
-    if path_pixels.len() < 10 {
-        return None;
+        if let Some(pixels) = astar_search(
+            &loop_skeleton,
+            distance_transform,
+            pixel_a,
+            pixel_b,
+            &forbidden_nodes,
+        ) {
+            if pixels.len() >= 8 {
+                path_pixels = Some(pixels);
+                break;
+            }
+        }
     }
+
+    let path_pixels = path_pixels?;
 
     // Build loop: node → pixel_a → path → pixel_b → node
     let mut path_points = Vec::new();
@@ -240,7 +247,7 @@ pub fn find_self_loop_on_skeleton(state: &GameState, node_id: usize) -> Option<V
     let smoothed = smooth_path_chaikin(&resampled, 3);
     let decimated = decimate_polyline(&smoothed, 1.0);
 
-    if polyline_length(&decimated) < 30.0 {
+    if polyline_length(&decimated) < 22.0 {
         return None;
     }
 

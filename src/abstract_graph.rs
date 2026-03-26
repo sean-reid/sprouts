@@ -131,9 +131,6 @@ impl AbstractState {
                 score += cc as f64 * 5.0;
             }
         }
-        if mov.from == mov.to {
-            score -= 10.0;
-        }
         score
     }
 
