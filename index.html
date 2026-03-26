@@ -10,23 +10,22 @@
             padding: 0;
             box-sizing: border-box;
         }
-        
+
         body {
             background: #0A0A0A;
             color: #FFFFFF;
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI',
                          Roboto, 'Helvetica Neue', Arial, sans-serif;
             display: flex;
             flex-direction: column;
             align-items: center;
-            /* Use dvh to handle mobile browser toolbars correctly */
             height: 100vh;
-            height: 100dvh; 
+            height: 100dvh;
             padding: 10px;
             overflow: hidden;
             touch-action: manipulation;
         }
-        
+
         h1 {
             font-size: clamp(20px, 5vh, 32px);
             font-weight: 300;
@@ -34,7 +33,7 @@
             margin-bottom: 8px;
             flex-shrink: 0;
         }
-        
+
         #status {
             font-size: 13px;
             color: #A0A0A0;
@@ -43,10 +42,10 @@
             text-align: center;
             flex-shrink: 0;
         }
-        
+
         #status.win { color: #10B981; }
         #status.lose { color: #EF4444; }
-        
+
         .controls {
             display: flex;
             gap: 8px;
@@ -55,7 +54,7 @@
             justify-content: center;
             flex-shrink: 0;
         }
-        
+
         button {
             background: #1A1A1A;
             border: 1px solid #2A2A2A;
@@ -68,20 +67,25 @@
             text-transform: uppercase;
             cursor: pointer;
         }
-        
+
         button:hover:not(:disabled) {
             background: #252525;
             color: #FFFFFF;
+        }
+
+        button:disabled {
+            opacity: 0.4;
+            cursor: default;
         }
 
         button.confirm-btn {
             background: #10B981;
             color: white;
             border-color: #059669;
-            padding: 12px 24px; /* Larger tap target for mobile */
+            padding: 12px 24px;
             font-weight: 600;
         }
-        
+
         .canvas-container {
             position: relative;
             flex-grow: 1;
@@ -90,7 +94,7 @@
             align-items: center;
             width: 100%;
             min-height: 0;
-            padding-bottom: 20px; /* Space for overlay if absolute */
+            padding-bottom: 20px;
         }
 
         #canvas {
@@ -105,10 +109,9 @@
             aspect-ratio: 1 / 1;
         }
 
-        /* Fixed positioning ensures it never gets pushed off by container scaling */
         #mobileOverlay {
             position: fixed;
-            bottom: 40px; /* Positioned higher to clear mobile "home" indicators */
+            bottom: 40px;
             left: 50%;
             transform: translateX(-50%);
             display: none;
@@ -122,7 +125,7 @@
         }
 
         #mobileOverlay.visible { display: flex; }
-        
+
         .modal {
             display: none;
             position: fixed;
@@ -133,9 +136,9 @@
             align-items: center;
             z-index: 1000;
         }
-        
+
         .modal.visible { display: flex; }
-        
+
         .modal-content {
             background: #1A1A1A;
             border: 1px solid #2A2A2A;
@@ -149,15 +152,16 @@
 </head>
 <body>
     <h1>SPROUTS</h1>
-    
+
     <div class="controls">
         <button onclick="newGame(2)">2 Nodes</button>
         <button onclick="newGame(3)">3 Nodes</button>
         <button onclick="newGame(4)">4 Nodes</button>
+        <button id="undoBtn" onclick="undoMove()" disabled>Undo</button>
     </div>
-    
+
     <div id="status">Initializing...</div>
-    
+
     <div class="canvas-container">
         <canvas id="canvas" width="800" height="800"></canvas>
     </div>
@@ -188,6 +192,7 @@
             nodes: [],
             lines: [],
             activeNodes: new Set(),
+            currentPlayer: 0,
             dragPath: [],
             lockedPath: [],
             placementDot: null,
@@ -204,11 +209,16 @@
         let worker = null;
         let pendingCallbacks = new Map();
         let callbackId = 0;
+        let thinkingInterval = null;
 
         function workerCall(type, data = {}) {
-            return new Promise((resolve) => {
+            return new Promise((resolve, reject) => {
                 const id = callbackId++;
-                pendingCallbacks.set(id, { resolve });
+                const timeout = setTimeout(() => {
+                    pendingCallbacks.delete(id);
+                    reject(new Error(`Worker call '${type}' timed out`));
+                }, 30000);
+                pendingCallbacks.set(id, { resolve, timeout });
                 worker.postMessage({ type, data, id });
             });
         }
@@ -216,9 +226,32 @@
         function handleWorkerMessage(e) {
             const { id, ...payload } = e.data;
             if (pendingCallbacks.has(id)) {
-                pendingCallbacks.get(id).resolve(payload);
+                const { resolve, timeout } = pendingCallbacks.get(id);
+                clearTimeout(timeout);
                 pendingCallbacks.delete(id);
+                resolve(payload);
             }
+        }
+
+        function startThinking() {
+            let dots = 0;
+            setStatus('AI is thinking');
+            thinkingInterval = setInterval(() => {
+                dots = (dots + 1) % 4;
+                setStatus('AI is thinking' + '.'.repeat(dots));
+            }, 400);
+        }
+
+        function stopThinking() {
+            if (thinkingInterval) {
+                clearInterval(thinkingInterval);
+                thinkingInterval = null;
+            }
+        }
+
+        function updateUndoButton() {
+            const btn = document.getElementById('undoBtn');
+            btn.disabled = gameState.lines.length === 0 || gameState.mode !== GameMode.IDLE;
         }
 
         async function init() {
@@ -299,13 +332,15 @@
                 const pathData = gameState.lockedPath.flatMap(p => [p.x, p.y]);
                 const { point } = await workerCall('get_closest_point', { pathData, x, y });
                 const closest = { x: point[0], y: point[1] };
-                
+
                 const snapDist = gameState.isTouchDevice ? 80 : 30;
                 if (Math.hypot(x - closest.x, y - closest.y) < snapDist) {
-                    const { valid } = await workerCall('validate_placement', { 
-                        pathData, newNodeX: closest.x, newNodeY: closest.y 
+                    const { valid } = await workerCall('validate_placement', {
+                        pathData, newNodeX: closest.x, newNodeY: closest.y
                     });
                     gameState.placementDot = { position: closest, valid };
+                } else {
+                    gameState.placementDot = null;
                 }
             }
         }
@@ -313,12 +348,28 @@
         function handleEnd(clientX, clientY) {
             if (gameState.mode !== GameMode.DRAGGING) return;
             const { x, y } = getCanvasCoords(clientX, clientY);
-            const endNode = findNodeAt(x, y);
+            let endNode = findNodeAt(x, y);
+
+            // Snap to nearest active node if release was close but not on target
+            if (!endNode || !gameState.activeNodes.has(endNode.id)) {
+                const snapRange = gameState.isTouchDevice ? 60 : 30;
+                let bestDist = snapRange;
+                let bestNode = null;
+                for (const node of gameState.nodes) {
+                    if (!gameState.activeNodes.has(node.id)) continue;
+                    const dist = Math.hypot(x - node.position.x, y - node.position.y);
+                    if (dist < bestDist) {
+                        bestDist = dist;
+                        bestNode = node;
+                    }
+                }
+                if (bestNode) endNode = bestNode;
+            }
 
             if (!endNode || !gameState.activeNodes.has(endNode.id)) {
                 gameState.mode = GameMode.IDLE;
                 gameState.dragPath = [];
-                setStatus('Connect to a valid node', 'lose');
+                setStatus('Release near a node to connect');
                 return;
             }
 
@@ -326,18 +377,21 @@
             gameState.lockedPath[gameState.lockedPath.length - 1] = { x: endNode.position.x, y: endNode.position.y };
             gameState.dragEndNode = endNode.id;
             gameState.mode = GameMode.PLACING_NODE;
-            
+
             if (gameState.isTouchDevice) {
                 document.getElementById('mobileOverlay').classList.add('visible');
                 setStatus('Drag along curve to place node');
             } else {
-                setStatus('Click curve to place node', 'win');
+                setStatus('Click on the curve to place a new node', 'win');
             }
         }
 
         async function handleDesktopClick() {
             if (gameState.mode === GameMode.PLACING_NODE && !gameState.isTouchDevice) {
-                await executeMove();
+                // Only execute if there's a valid placement — ignore stray clicks
+                if (gameState.placementDot?.valid) {
+                    await executeMove();
+                }
             }
         }
 
@@ -353,17 +407,30 @@
             const pathData = gameState.lockedPath.flatMap(p => [p.x, p.y]);
             const newPos = gameState.placementDot.position;
             document.getElementById('mobileOverlay').classList.remove('visible');
-            await workerCall('apply_move', {
+
+            const { success } = await workerCall('apply_move', {
                 fromNode: gameState.dragStartNode, toNode: gameState.dragEndNode,
                 pathData, newNodeX: newPos.x, newNodeY: newPos.y
             });
+
+            if (!success) {
+                setStatus('Move rejected — try a different path', 'lose');
+                gameState.mode = GameMode.IDLE;
+                gameState.dragPath = [];
+                gameState.lockedPath = [];
+                gameState.placementDot = null;
+                return;
+            }
+
             await updateGameState();
             gameState.mode = GameMode.IDLE;
             gameState.dragPath = [];
             gameState.lockedPath = [];
             gameState.placementDot = null;
+            updateUndoButton();
+
             if (!gameState.gameOver) {
-                setStatus('AI is thinking...');
+                startThinking();
                 performAIMove();
             }
         }
@@ -422,6 +489,9 @@
                 const player = state[idx++];
                 gameState.lines.push({ id, from, to, polyline, newNodePos, player });
             }
+            // Current player: 0 = human, 1 = AI
+            gameState.currentPlayer = state[idx++];
+
             const { activeNodes } = await workerCall('get_active_nodes');
             gameState.activeNodes = new Set(activeNodes);
             const { gameOver } = await workerCall('is_game_over');
@@ -429,10 +499,12 @@
                 gameState.gameOver = true;
                 showGameOver();
             }
+            updateUndoButton();
         }
 
         async function performAIMove() {
             const { move: aiMoveData } = await workerCall('get_ai_move');
+            stopThinking();
             if (aiMoveData.length === 0) {
                 gameState.gameOver = true;
                 showGameOver();
@@ -458,13 +530,21 @@
         }
 
         async function finishAIMove(fromNode, toNode, path, newPos) {
-            await workerCall('apply_move', {
+            const { success } = await workerCall('apply_move', {
                 fromNode, toNode, pathData: path.flatMap(p => [p.x, p.y]),
                 newNodeX: newPos.x, newNodeY: newPos.y
             });
+            if (!success) {
+                // AI move was rejected (shouldn't normally happen)
+                gameState.mode = GameMode.IDLE;
+                gameState.animatingLine = null;
+                setStatus('Your turn!');
+                return;
+            }
             await updateGameState();
             gameState.mode = GameMode.IDLE;
             gameState.animatingLine = null;
+            updateUndoButton();
             if (!gameState.gameOver) setStatus('Your turn!');
         }
 
@@ -476,15 +556,19 @@
         function render() {
             ctx.fillStyle = '#1A1A1A';
             ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            // Draw lines — blue for human, red for AI
             for (const line of gameState.lines) {
-                ctx.strokeStyle = line.player === 0 ? '#444' : '#EF4444';
+                ctx.strokeStyle = line.player === 0 ? '#60A5FA' : '#EF4444';
                 ctx.lineWidth = 3;
                 ctx.beginPath();
                 ctx.moveTo(line.polyline[0].x, line.polyline[0].y);
                 for (let i = 1; i < line.polyline.length; i++) ctx.lineTo(line.polyline[i].x, line.polyline[i].y);
                 ctx.stroke();
             }
-            const activePath = gameState.mode === GameMode.DRAGGING ? gameState.dragPath : 
+
+            // Draw active path (dragging or locked)
+            const activePath = gameState.mode === GameMode.DRAGGING ? gameState.dragPath :
                                gameState.mode === GameMode.PLACING_NODE ? gameState.lockedPath : null;
             if (activePath && activePath.length > 1) {
                 ctx.strokeStyle = '#3B82F6';
@@ -494,14 +578,20 @@
                 for (let i = 1; i < activePath.length; i++) ctx.lineTo(activePath[i].x, activePath[i].y);
                 ctx.stroke();
             }
+
+            // Draw placement dot
             if (gameState.mode === GameMode.PLACING_NODE && gameState.placementDot) {
                 ctx.fillStyle = gameState.placementDot.valid ? '#10B981' : '#EF4444';
                 ctx.beginPath();
                 ctx.arc(gameState.placementDot.position.x, gameState.placementDot.position.y, 8, 0, Math.PI * 2);
                 ctx.fill();
             }
+
+            // Draw nodes with connection count
             for (const node of gameState.nodes) {
                 const isActive = gameState.activeNodes.has(node.id);
+                const remaining = 3 - node.connectionCount;
+
                 ctx.fillStyle = isActive ? '#3B82F6' : '#555';
                 ctx.strokeStyle = '#FFF';
                 ctx.lineWidth = 2;
@@ -509,7 +599,16 @@
                 ctx.arc(node.position.x, node.position.y, 8, 0, Math.PI * 2);
                 ctx.fill();
                 ctx.stroke();
+
+                // Show remaining connection count inside node
+                ctx.fillStyle = '#FFF';
+                ctx.font = 'bold 10px sans-serif';
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'middle';
+                ctx.fillText(String(remaining), node.position.x, node.position.y + 0.5);
             }
+
+            // Draw AI move animation
             if (gameState.mode === GameMode.ANIMATING_AI && gameState.animatingLine) {
                 const anim = gameState.animatingLine;
                 const len = Math.floor(gameState.animationProgress * anim.path.length);
@@ -529,8 +628,13 @@
         }
 
         function showGameOver() {
-            const lastMove = gameState.lines[gameState.lines.length - 1];
-            document.getElementById('winnerText').textContent = lastMove?.player === 0 ? 'YOU WIN' : 'AI WINS';
+            stopThinking();
+            // The current player has no moves — they lose
+            // currentPlayer 0 = human's turn (human stuck = AI wins)
+            // currentPlayer 1 = AI's turn (AI stuck = human wins)
+            const humanWins = gameState.currentPlayer === 1;
+            document.getElementById('winnerText').textContent = humanWins ? 'YOU WIN' : 'AI WINS';
+            document.getElementById('winnerText').style.color = humanWins ? '#10B981' : '#EF4444';
             document.getElementById('gameOverModal').classList.add('visible');
         }
 
@@ -538,17 +642,45 @@
             document.getElementById('gameOverModal').classList.remove('visible');
         }
 
-        window.newGame = (n) => {
-            workerCall('init', { nodeCount: n }).then(() => {
-                updateGameState();
-                gameState.mode = GameMode.IDLE;
+        window.undoMove = async () => {
+            if (gameState.mode !== GameMode.IDLE) return;
+            // Undo up to 2 moves (AI response + human move)
+            let undone = false;
+            for (let i = 0; i < 2; i++) {
+                const { success } = await workerCall('undo');
+                if (!success) break;
+                undone = true;
+            }
+            if (undone) {
                 gameState.gameOver = false;
                 closeModal();
-                setStatus('Connect two nodes');
-            });
+                await updateGameState();
+                setStatus('Move undone — your turn');
+            }
+        };
+
+        window.newGame = async (n) => {
+            // Reset all state immediately to avoid zombie interactions
+            gameState.mode = GameMode.IDLE;
+            gameState.gameOver = false;
+            gameState.dragPath = [];
+            gameState.lockedPath = [];
+            gameState.placementDot = null;
+            gameState.animatingLine = null;
+            gameState.hoveredNode = null;
+            gameState.dragStartNode = null;
+            gameState.dragEndNode = null;
+            stopThinking();
+            closeModal();
+
+            await workerCall('init', { nodeCount: n });
+            await updateGameState();
+            setStatus('Draw a line between two nodes');
         };
 
         window.closeModal = closeModal;
+        window.cancelPlacement = window.cancelPlacement;
+        window.confirmMove = window.confirmMove;
         init();
     </script>
 </body>

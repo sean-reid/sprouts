@@ -14,6 +14,7 @@ export const sproutsgame_get_state: (a: number) => [number, number];
 export const sproutsgame_is_game_over: (a: number) => number;
 export const sproutsgame_new: (a: number) => number;
 export const sproutsgame_test_pair: (a: number, b: number, c: number) => [number, number];
+export const sproutsgame_undo: (a: number) => number;
 export const sproutsgame_validate_move_js: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => number;
 export const sproutsgame_validate_placement: (a: number, b: number, c: number, d: number, e: number) => number;
 export const __wbindgen_externrefs: WebAssembly.Table;

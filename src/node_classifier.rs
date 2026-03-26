@@ -63,7 +63,6 @@ pub fn classify_nodes(state: &mut GameState) -> NodeClassification {
         if let Some(node_comps) = node_to_components.get(&node.id) {
             for &comp_id in node_comps {
                 if let Some(meta) = components.get(&comp_id) {
-                    // Check if this component has other active nodes
                     for &other_node_id in &meta.accessible_nodes {
                         if other_node_id != node.id && !dead_nodes.contains(&other_node_id) {
                             if let Some(other_node) = state.nodes.iter().find(|n| n.id == other_node_id) {
@@ -80,16 +79,13 @@ pub fn classify_nodes(state: &mut GameState) -> NodeClassification {
                 }
             }
         }
-        
-        // If component analysis didn't find reachability, verify with pathfinding
-        // This is crucial for tight spaces where skeleton might fragment
+
+        // Fallback: pathfinding for tight spaces where skeleton might fragment
         if !can_reach_other {
             for other_node in &state.nodes {
                 if other_node.id == node.id || other_node.connection_count >= 3 || dead_nodes.contains(&other_node.id) {
                     continue;
                 }
-                
-                // Try pathfinding to verify reachability
                 if let Some(_path) = crate::pathfinding::find_path_on_skeleton(state, node.id, other_node.id) {
                     can_reach_other = true;
                     break;
@@ -104,21 +100,19 @@ pub fn classify_nodes(state: &mut GameState) -> NodeClassification {
         }
     }
 
-    // Phase 3: Generate legal pairs with pathfinding verification
+    // Phase 3: Generate legal pairs
     for node_a in &state.nodes {
         if !active_nodes.contains(&node_a.id) {
             continue;
         }
-
         for node_b in &state.nodes {
             if node_a.id >= node_b.id {
-                continue; // Avoid duplicates and self-pairs
+                continue;
             }
             if !active_nodes.contains(&node_b.id) {
                 continue;
             }
 
-            // Check if nodes share a component
             let shares_component = if let Some(comps_a) = node_to_components.get(&node_a.id) {
                 if let Some(comps_b) = node_to_components.get(&node_b.id) {
                     comps_a.iter().any(|comp_a| comps_b.contains(comp_a))
@@ -132,8 +126,6 @@ pub fn classify_nodes(state: &mut GameState) -> NodeClassification {
             if shares_component {
                 legal_pairs.push((node_a.id, node_b.id));
             } else {
-                // In tight spaces, component analysis might be wrong
-                // Verify with actual pathfinding as fallback
                 if let Some(_path) = crate::pathfinding::find_path_on_skeleton(state, node_a.id, node_b.id) {
                     legal_pairs.push((node_a.id, node_b.id));
                 }
@@ -141,10 +133,19 @@ pub fn classify_nodes(state: &mut GameState) -> NodeClassification {
         }
     }
 
+    // Phase 4: Self-loop candidates — active nodes with <= 1 connections
+    // A self-loop uses 2 connections, so the node needs at least 2 free.
+    let self_loop_candidates: Vec<usize> = state
+        .nodes
+        .iter()
+        .filter(|n| n.connection_count <= 1 && active_nodes.contains(&n.id))
+        .map(|n| n.id)
+        .collect();
+
     NodeClassification {
         active_nodes,
         dead_nodes,
         legal_pairs,
-        self_loop_candidates: Vec::new(),
+        self_loop_candidates,
     }
 }

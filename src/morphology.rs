@@ -1,20 +1,8 @@
-use crate::geometry::extract_line_segment;
 use crate::types::{GameState, Grid, Point};
 use std::collections::{BinaryHeap, HashMap, HashSet};
 
 const LINE_WIDTH: f64 = 3.0;
-const DILATION_RADIUS: f64 = 7.0;  // Reduced to allow tighter gaps while preventing line crossings
-const CORRIDOR_LENGTH: f64 = 6.0;
-const BORDER_MARGIN: f64 = 10.0;  // Reduced to allow paths closer to edges
-
-// Dynamic shrinking margin system:
-// - Divides each edge into 50px segments
-// - Measures distance to nearest content (nodes or lines) in each segment
-// - Margin width shrinks smoothly based on proximity:
-//   * 12px when no content nearby (>40px away)
-//   * 3px when content very close (≤5px away)
-//   * Linear interpolation between (5-40px range)
-// - AI can always path around border-adjacent nodes
+const DILATION_RADIUS: f64 = 7.0;
 
 pub fn generate_skeleton(state: &GameState) -> (Grid<bool>, Grid<u8>) {
     let mut obstacle_map = Grid::new(800, 800, false);
@@ -103,7 +91,6 @@ pub fn generate_skeleton(state: &GameState) -> (Grid<bool>, Grid<u8>) {
     let mut connected_skeleton = repaired_skeleton.clone();
     for node in &state.nodes {
         if node.connection_count >= 3 { continue; }
-        // Pass DILATED map so A* searches in the same space where skeleton exists
         ensure_node_connected(&mut connected_skeleton, node.position.x as i32, node.position.y as i32, &dilated, &distance_transform);
     }
     (connected_skeleton, distance_transform)
@@ -143,11 +130,16 @@ fn ensure_node_connected(skeleton: &mut Grid<bool>, node_x: i32, node_y: i32, ob
             if *skeleton.get(node_x + dx, node_y + dy).unwrap_or(&false) { return; }
         }
     }
-    let mut skeleton_targets = Vec::new();
-    for search_radius in 1..600 {  // Increased from 500 to 600 for nodes near borders
+
+    // Search expanding rings, collect all hits from first ring + one extra ring,
+    // then sort by true Euclidean distance
+    let mut skeleton_targets: Vec<(i32, i32, f64)> = Vec::new();
+    let mut found_ring = false;
+
+    for search_radius in 1i32..600 {
         for dy in -search_radius..=search_radius {
             for dx in -search_radius..=search_radius {
-                if (dx as i32).abs() != search_radius && (dy as i32).abs() != search_radius { continue; }
+                if dx.abs() != search_radius && dy.abs() != search_radius { continue; }
                 let check_x = node_x + dx;
                 let check_y = node_y + dy;
                 if *skeleton.get(check_x, check_y).unwrap_or(&false) {
@@ -156,15 +148,20 @@ fn ensure_node_connected(skeleton: &mut Grid<bool>, node_x: i32, node_y: i32, ob
                 }
             }
         }
-        if skeleton_targets.len() >= 2 { break; }
+        if !skeleton_targets.is_empty() {
+            if found_ring {
+                break; // Searched one extra ring, stop
+            }
+            found_ring = true; // Search one more ring for potentially closer targets
+        }
     }
+
     if skeleton_targets.is_empty() {
-        // No skeleton found anywhere near this node
-        // Node is genuinely isolated - don't create artificial skeleton
-        // Component labeling will correctly mark it as unreachable
         return;
     }
+
     skeleton_targets.sort_by(|a, b| a.2.partial_cmp(&b.2).unwrap());
+
     let mut connections_made = 0;
     for (target_x, target_y, _dist) in skeleton_targets.iter().take(2) {
         if let Some(path) = astar_connect(node_x, node_y, *target_x, *target_y, obstacle_map, distance_transform) {
@@ -174,11 +171,7 @@ fn ensure_node_connected(skeleton: &mut Grid<bool>, node_x: i32, node_y: i32, ob
             connections_made += 1;
         }
     }
-    if connections_made == 0 && !skeleton_targets.is_empty() {
-        // A* failed to connect - node is genuinely isolated
-        // Don't create stubs, let it be properly marked as isolated
-        // Component labeling will handle this correctly
-    }
+    let _ = connections_made;
 }
 
 fn astar_connect(start_x: i32, start_y: i32, goal_x: i32, goal_y: i32, obstacle_map: &Grid<bool>, distance_transform: &Grid<u8>) -> Option<Vec<(i32, i32)>> {
@@ -204,16 +197,16 @@ fn astar_connect(start_x: i32, start_y: i32, goal_x: i32, goal_y: i32, obstacle_
     let mut g_score: HashMap<(i32, i32), i32> = HashMap::new();
     let mut closed_set: HashSet<(i32, i32)> = HashSet::new();
     g_score.insert((start_x, start_y), 0);
-    let h = ((goal_x - start_x).abs() + (goal_y - start_y).abs()) * 5;  // Reduced from 10 - less greedy
+    let h = ((goal_x - start_x).abs() + (goal_y - start_y).abs()) * 5;
     open_set.push(Node { x: start_x, y: start_y, f_score: h });
-    
+
     let mut iterations = 0;
-    const MAX_ITERATIONS: usize = 200000;  // Very high to ensure we always find paths
-    
+    const MAX_ITERATIONS: usize = 200000;
+
     while let Some(current) = open_set.pop() {
         iterations += 1;
-        if iterations > MAX_ITERATIONS { return None; }  // Give up after 50k iterations
-        
+        if iterations > MAX_ITERATIONS { return None; }
+
         let pos = (current.x, current.y);
         if current.x == goal_x && current.y == goal_y {
             let mut path = vec![(goal_x, goal_y)];
@@ -238,20 +231,19 @@ fn astar_connect(start_x: i32, start_y: i32, goal_x: i32, goal_y: i32, obstacle_
                 if closed_set.contains(&neighbor) { continue; }
                 let move_cost = if dx == 0 || dy == 0 { 10 } else { 14 };
                 let dist_to_obstacle = distance_transform.get(nx, ny).copied().unwrap_or(0);
-                // Minimal penalty - A* should ALWAYS find path if one exists
                 let penalty = if dist_to_obstacle < 2 {
-                    100   // 1px away - small penalty
+                    100
                 } else if dist_to_obstacle < 4 {
-                    40   // 2-3px away - tiny penalty
+                    40
                 } else {
-                    0    // 4+ px away - no penalty
+                    0
                 };
                 let total_cost = move_cost + penalty;
                 let tentative_g = g_score.get(&pos).unwrap_or(&i32::MAX).saturating_add(total_cost);
                 if tentative_g < *g_score.get(&neighbor).unwrap_or(&i32::MAX) {
                     came_from.insert(neighbor, pos);
                     g_score.insert(neighbor, tentative_g);
-                    let h = ((goal_x - nx).abs() + (goal_y - ny).abs()) * 5;  // Reduced from 10
+                    let h = ((goal_x - nx).abs() + (goal_y - ny).abs()) * 5;
                     open_set.push(Node { x: nx, y: ny, f_score: tentative_g + h });
                 }
             }
@@ -346,171 +338,118 @@ pub fn chamfer_distance_transform(obstacle_map: &Grid<bool>) -> Grid<u8> {
             if obstacle_map.data[y * 800 + x] { dist.data[y * 800 + x] = 0; }
         }
     }
+    // Forward pass: top-left to bottom-right, including diagonals
     for y in 1..800 {
-        for x in 1..800 {
+        for x in 1..799 {
             let current = dist.data[y * 800 + x];
             let up = dist.data[(y - 1) * 800 + x].saturating_add(1);
             let left = dist.data[y * 800 + (x - 1)].saturating_add(1);
-            dist.data[y * 800 + x] = current.min(up).min(left);
+            let up_left = dist.data[(y - 1) * 800 + (x - 1)].saturating_add(1);
+            let up_right = dist.data[(y - 1) * 800 + (x + 1)].saturating_add(1);
+            dist.data[y * 800 + x] = current.min(up).min(left).min(up_left).min(up_right);
         }
     }
+    // Backward pass: bottom-right to top-left, including diagonals
     for y in (0..799).rev() {
-        for x in (0..799).rev() {
+        for x in (1..799).rev() {
             let current = dist.data[y * 800 + x];
             let down = dist.data[(y + 1) * 800 + x].saturating_add(1);
             let right = dist.data[y * 800 + (x + 1)].saturating_add(1);
-            dist.data[y * 800 + x] = current.min(down).min(right);
+            let down_right = dist.data[(y + 1) * 800 + (x + 1)].saturating_add(1);
+            let down_left = dist.data[(y + 1) * 800 + (x - 1)].saturating_add(1);
+            dist.data[y * 800 + x] = current.min(down).min(right).min(down_right).min(down_left);
         }
     }
     dist
 }
 
+/// Which edge of the canvas we're adding obstacles for.
+enum Edge { Top, Bottom, Left, Right }
+
 fn add_border_obstacles(grid: &mut Grid<bool>, lines: &[crate::types::Line], nodes: &[crate::types::Node]) {
-    // Dynamic margin system - margins shrink based on proximity to content
-    // The closer content is to the edge, the thinner the margin becomes
-    
-    const SEGMENT_SIZE: usize = 50; // Check in 50px segments
-    const MAX_OBSTACLE_WIDTH: usize = 12; // Maximum margin when no content nearby
-    const MIN_OBSTACLE_WIDTH: usize = 3;  // Minimum margin when content very close
-    const DETECTION_RANGE: f64 = 40.0;    // Distance to check for content
-    
-    // Helper function to calculate obstacle width based on nearest content distance
-    let calc_obstacle_width = |min_distance: f64| -> usize {
-        if min_distance >= DETECTION_RANGE {
-            // No content nearby - use full margin
+    add_edge_obstacles(grid, Edge::Top, lines, nodes);
+    add_edge_obstacles(grid, Edge::Bottom, lines, nodes);
+    add_edge_obstacles(grid, Edge::Left, lines, nodes);
+    add_edge_obstacles(grid, Edge::Right, lines, nodes);
+}
+
+fn add_edge_obstacles(grid: &mut Grid<bool>, edge: Edge, lines: &[crate::types::Line], nodes: &[crate::types::Node]) {
+    const SEGMENT_SIZE: usize = 50;
+    const MAX_OBSTACLE_WIDTH: usize = 12;
+    const MIN_OBSTACLE_WIDTH: usize = 3;
+    const DETECTION_RANGE: f64 = 40.0;
+
+    let calc_width = |min_dist: f64| -> usize {
+        if min_dist >= DETECTION_RANGE {
             MAX_OBSTACLE_WIDTH
-        } else if min_distance <= 5.0 {
-            // Content very close - use minimum margin
+        } else if min_dist <= 5.0 {
             MIN_OBSTACLE_WIDTH
         } else {
-            // Linear interpolation between min and max based on distance
-            // Distance 5-40 maps to width 3-12
-            let t = (min_distance - 5.0) / (DETECTION_RANGE - 5.0);
-            let width = MIN_OBSTACLE_WIDTH as f64 + t * (MAX_OBSTACLE_WIDTH - MIN_OBSTACLE_WIDTH) as f64;
-            width.round() as usize
+            let t = (min_dist - 5.0) / (DETECTION_RANGE - 5.0);
+            (MIN_OBSTACLE_WIDTH as f64 + t * (MAX_OBSTACLE_WIDTH - MIN_OBSTACLE_WIDTH) as f64).round() as usize
         }
     };
-    
-    // Top edge - divide into segments
+
     for seg_start in (0..800).step_by(SEGMENT_SIZE) {
         let seg_end = (seg_start + SEGMENT_SIZE).min(800);
         let mut min_distance = DETECTION_RANGE + 1.0;
-        
-        // Find closest node in this segment
+
+        // Measure distance to nearest content along this edge segment
         for node in nodes {
-            if node.position.x >= seg_start as f64 && node.position.x < seg_end as f64 {
-                let dist = node.position.y;
-                min_distance = min_distance.min(dist);
+            let (primary, dist_to_edge) = match edge {
+                Edge::Top    => (node.position.x, node.position.y),
+                Edge::Bottom => (node.position.x, 800.0 - node.position.y),
+                Edge::Left   => (node.position.y, node.position.x),
+                Edge::Right  => (node.position.y, 800.0 - node.position.x),
+            };
+            if primary >= seg_start as f64 && primary < seg_end as f64 {
+                min_distance = min_distance.min(dist_to_edge);
             }
         }
-        
-        // Find closest line point in this segment
         for line in lines {
             for point in &line.polyline {
-                if point.x >= seg_start as f64 && point.x < seg_end as f64 {
-                    let dist = point.y;
-                    min_distance = min_distance.min(dist);
+                let (primary, dist_to_edge) = match edge {
+                    Edge::Top    => (point.x, point.y),
+                    Edge::Bottom => (point.x, 800.0 - point.y),
+                    Edge::Left   => (point.y, point.x),
+                    Edge::Right  => (point.y, 800.0 - point.x),
+                };
+                if primary >= seg_start as f64 && primary < seg_end as f64 {
+                    min_distance = min_distance.min(dist_to_edge);
                 }
             }
         }
-        
-        let obstacle_width = calc_obstacle_width(min_distance);
-        for x in seg_start..seg_end {
-            for y in 0..obstacle_width {
-                grid.set(x as i32, y as i32, true);
-            }
-        }
-    }
-    
-    // Bottom edge - divide into segments
-    for seg_start in (0..800).step_by(SEGMENT_SIZE) {
-        let seg_end = (seg_start + SEGMENT_SIZE).min(800);
-        let mut min_distance = DETECTION_RANGE + 1.0;
-        
-        // Find closest node
-        for node in nodes {
-            if node.position.x >= seg_start as f64 && node.position.x < seg_end as f64 {
-                let dist = 800.0 - node.position.y;
-                min_distance = min_distance.min(dist);
-            }
-        }
-        
-        // Find closest line point
-        for line in lines {
-            for point in &line.polyline {
-                if point.x >= seg_start as f64 && point.x < seg_end as f64 {
-                    let dist = 800.0 - point.y;
-                    min_distance = min_distance.min(dist);
+
+        let width = calc_width(min_distance);
+
+        match edge {
+            Edge::Top => {
+                for x in seg_start..seg_end {
+                    for y in 0..width {
+                        grid.set(x as i32, y as i32, true);
+                    }
                 }
             }
-        }
-        
-        let obstacle_width = calc_obstacle_width(min_distance);
-        for x in seg_start..seg_end {
-            for y in 0..obstacle_width {
-                grid.set(x as i32, (799 - y) as i32, true);
-            }
-        }
-    }
-    
-    // Left edge - divide into segments
-    for seg_start in (0..800).step_by(SEGMENT_SIZE) {
-        let seg_end = (seg_start + SEGMENT_SIZE).min(800);
-        let mut min_distance = DETECTION_RANGE + 1.0;
-        
-        // Find closest node
-        for node in nodes {
-            if node.position.y >= seg_start as f64 && node.position.y < seg_end as f64 {
-                let dist = node.position.x;
-                min_distance = min_distance.min(dist);
-            }
-        }
-        
-        // Find closest line point
-        for line in lines {
-            for point in &line.polyline {
-                if point.y >= seg_start as f64 && point.y < seg_end as f64 {
-                    let dist = point.x;
-                    min_distance = min_distance.min(dist);
+            Edge::Bottom => {
+                for x in seg_start..seg_end {
+                    for y in 0..width {
+                        grid.set(x as i32, (799 - y) as i32, true);
+                    }
                 }
             }
-        }
-        
-        let obstacle_width = calc_obstacle_width(min_distance);
-        for y in seg_start..seg_end {
-            for x in 0..obstacle_width {
-                grid.set(x as i32, y as i32, true);
-            }
-        }
-    }
-    
-    // Right edge - divide into segments
-    for seg_start in (0..800).step_by(SEGMENT_SIZE) {
-        let seg_end = (seg_start + SEGMENT_SIZE).min(800);
-        let mut min_distance = DETECTION_RANGE + 1.0;
-        
-        // Find closest node
-        for node in nodes {
-            if node.position.y >= seg_start as f64 && node.position.y < seg_end as f64 {
-                let dist = 800.0 - node.position.x;
-                min_distance = min_distance.min(dist);
-            }
-        }
-        
-        // Find closest line point
-        for line in lines {
-            for point in &line.polyline {
-                if point.y >= seg_start as f64 && point.y < seg_end as f64 {
-                    let dist = 800.0 - point.x;
-                    min_distance = min_distance.min(dist);
+            Edge::Left => {
+                for y in seg_start..seg_end {
+                    for x in 0..width {
+                        grid.set(x as i32, y as i32, true);
+                    }
                 }
             }
-        }
-        
-        let obstacle_width = calc_obstacle_width(min_distance);
-        for y in seg_start..seg_end {
-            for x in 0..obstacle_width {
-                grid.set((799 - x) as i32, y as i32, true);
+            Edge::Right => {
+                for y in seg_start..seg_end {
+                    for x in 0..width {
+                        grid.set((799 - x) as i32, y as i32, true);
+                    }
+                }
             }
         }
     }

@@ -1,6 +1,8 @@
-use crate::geometry::{decimate_polyline, resample_polyline, smooth_path_chaikin};
-use crate::types::{GameState, Point, PixelCoord};
-use std::collections::{BinaryHeap, HashMap, HashSet};
+use crate::geometry::{decimate_polyline, polyline_length, resample_polyline, smooth_path_chaikin};
+use crate::types::{GameState, Grid, Point, PixelCoord};
+use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
+
+const MAX_ASTAR_ITERATIONS: usize = 100_000;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct AStarNode {
@@ -31,44 +33,42 @@ pub fn find_path_on_skeleton(
     from_node_id: usize,
     to_node_id: usize,
 ) -> Option<Vec<Point>> {
-    let from_node = state.nodes.iter().find(|n| n.id == from_node_id)?;
-    let to_node = state.nodes.iter().find(|n| n.id == to_node_id)?;
+    let from_node = state.find_node(from_node_id)?;
+    let to_node = state.find_node(to_node_id)?;
 
     let skeleton = &state.skeleton_cache.skeleton;
     let distance_transform = &state.skeleton_cache.distance_transform;
 
-    // Find nearest skeleton pixels to start and end
     let start_pixel = find_nearest_skeleton_pixel(skeleton, &from_node.position)?;
     let goal_pixel = find_nearest_skeleton_pixel(skeleton, &to_node.position)?;
 
-    // Identify forbidden regions: areas around intermediate nodes on existing lines
-    // These are nodes that are neither the start nor end of our path
-    let forbidden_nodes: Vec<Point> = state.nodes
+    let forbidden_nodes: Vec<Point> = state
+        .nodes
         .iter()
         .filter(|n| n.id != from_node_id && n.id != to_node_id)
         .map(|n| n.position)
         .collect();
 
-    // Run A*
-    let path_pixels = astar_search(skeleton, distance_transform, start_pixel, goal_pixel, &forbidden_nodes)?;
+    let path_pixels = astar_search(
+        skeleton,
+        distance_transform,
+        start_pixel,
+        goal_pixel,
+        &forbidden_nodes,
+    )?;
 
-    // Convert pixel path to continuous path
     let mut path_points: Vec<Point> = path_pixels
         .iter()
         .map(|p| Point::new(p.x as f64 + 0.5, p.y as f64 + 0.5))
         .collect();
 
-    // Add actual start and end positions
     path_points.insert(0, from_node.position);
     path_points.push(to_node.position);
 
-    // Resample for smoother curve  
     let resampled = resample_polyline(&path_points, 3.0);
-    
-    // Apply Chaikin's corner cutting for smooth organic curves (3 iterations for more smoothness)
     let smoothed = smooth_path_chaikin(&resampled, 3);
-    
-    // Measure path tightness by checking distance transform along the path
+
+    // Measure path tightness
     let mut tightness_sum = 0.0;
     let mut tightness_samples = 0;
     for point in &resampled {
@@ -82,39 +82,29 @@ pub fn find_path_on_skeleton(
     let avg_clearance = if tightness_samples > 0 {
         tightness_sum / tightness_samples as f64
     } else {
-        5.0  // Assume moderate if we can't measure
+        5.0
     };
-    
-    // Dynamic clearance requirement based on path tightness
-    // Very tight paths (avg < 2px) → require 0px clearance (trust the skeleton)
-    // Tight paths (avg < 4px) → require 1px clearance
-    // Normal paths (avg >= 4px) → require 2px clearance
-    let required_clearance = if avg_clearance < 2.0 {
-        0  // Very tight - trust skeleton completely
-    } else if avg_clearance < 4.0 {
-        1  // Tight - minimal clearance
+
+    let required_clearance: u8 = if avg_clearance < 2.0 {
+        0
     } else {
-        1  // Normal - standard clearance (reduced from 2 for better tight space handling)
+        1
     };
-    
-    // Dynamic failure tolerance based on path tightness
-    // Tighter paths get more tolerance for smoothing failures
+
     let failure_tolerance = if avg_clearance < 2.0 {
-        0.30  // Very tight - allow 30% failures
+        0.30
     } else if avg_clearance < 4.0 {
-        0.20  // Tight - allow 20% failures
+        0.20
     } else {
-        0.15  // Normal - allow 15% failures
+        0.15
     };
-    
-    // Validate smoothed path stays within safe distance from obstacles
+
     let mut smoothed_is_safe = true;
     let mut failed_points = 0;
-    
+
     for point in &smoothed {
         let px = point.x.round() as i32;
         let py = point.y.round() as i32;
-        
         if let Some(&dist) = distance_transform.get(px, py) {
             if dist < required_clearance {
                 smoothed_is_safe = false;
@@ -125,56 +115,148 @@ pub fn find_path_on_skeleton(
             failed_points += 1;
         }
     }
-    
-    // Use smoothed path if safe enough given the context
-    let final_path = if smoothed_is_safe || (failed_points as f64 / smoothed.len() as f64) < failure_tolerance {
+
+    let final_path = if smoothed_is_safe
+        || (failed_points as f64 / smoothed.len() as f64) < failure_tolerance
+    {
         smoothed
     } else {
         resampled
     };
 
-    // Light decimation to preserve smooth curves
     let decimated = decimate_polyline(&final_path, 1.0);
 
     Some(decimated)
 }
 
-fn find_nearest_skeleton_pixel(skeleton: &crate::types::Grid<bool>, pos: &Point) -> Option<PixelCoord> {
+/// Find a self-loop path: a curve from a node back to itself.
+pub fn find_self_loop_on_skeleton(state: &GameState, node_id: usize) -> Option<Vec<Point>> {
+    let node = state.find_node(node_id)?;
+    let skeleton = &state.skeleton_cache.skeleton;
+    let distance_transform = &state.skeleton_cache.distance_transform;
+
+    let start = find_nearest_skeleton_pixel(skeleton, &node.position)?;
+    let cx = node.position.x.round() as i32;
+    let cy = node.position.y.round() as i32;
+
+    // BFS outward from start to find a waypoint >= 25px away on the skeleton
+    let mut waypoint = None;
+    let mut visited = HashSet::new();
+    let mut queue = VecDeque::new();
+    queue.push_back(start);
+    visited.insert(start);
+
+    while let Some(current) = queue.pop_front() {
+        let dx = current.x - cx;
+        let dy = current.y - cy;
+        let dist = ((dx * dx + dy * dy) as f64).sqrt();
+        if dist >= 25.0 {
+            waypoint = Some(current);
+            break;
+        }
+        for ndy in -1..=1 {
+            for ndx in -1..=1 {
+                if ndx == 0 && ndy == 0 {
+                    continue;
+                }
+                let neighbor = PixelCoord::new(current.x + ndx, current.y + ndy);
+                if !visited.contains(&neighbor)
+                    && skeleton.in_bounds(neighbor.x, neighbor.y)
+                    && *skeleton.get(neighbor.x, neighbor.y).unwrap_or(&false)
+                {
+                    visited.insert(neighbor);
+                    queue.push_back(neighbor);
+                }
+            }
+        }
+    }
+
+    let waypoint = waypoint?;
+
+    let forbidden_nodes: Vec<Point> = state
+        .nodes
+        .iter()
+        .filter(|n| n.id != node_id)
+        .map(|n| n.position)
+        .collect();
+
+    // Find outgoing path from start to waypoint
+    let path_out = astar_search(skeleton, distance_transform, start, waypoint, &forbidden_nodes)?;
+
+    // Remove outgoing path interior pixels from a skeleton copy, then A* back
+    let mut modified_skeleton = skeleton.clone();
+    for i in 1..path_out.len().saturating_sub(1) {
+        modified_skeleton.set(path_out[i].x, path_out[i].y, false);
+    }
+
+    let path_back = astar_search(
+        &modified_skeleton,
+        distance_transform,
+        waypoint,
+        start,
+        &forbidden_nodes,
+    )?;
+
+    if path_back.len() < 5 {
+        return None;
+    }
+
+    // Combine: node → outgoing → waypoint → return → node
+    let mut path_points: Vec<Point> = Vec::new();
+    path_points.push(node.position);
+    for p in &path_out {
+        path_points.push(Point::new(p.x as f64 + 0.5, p.y as f64 + 0.5));
+    }
+    for p in path_back.iter().skip(1) {
+        path_points.push(Point::new(p.x as f64 + 0.5, p.y as f64 + 0.5));
+    }
+    path_points.push(node.position);
+
+    let resampled = resample_polyline(&path_points, 3.0);
+    let smoothed = smooth_path_chaikin(&resampled, 3);
+    let decimated = decimate_polyline(&smoothed, 1.0);
+
+    if polyline_length(&decimated) < 30.0 {
+        return None;
+    }
+
+    Some(decimated)
+}
+
+/// Find the nearest skeleton pixel to a position.
+/// Searches expanding rings and returns the closest by Euclidean distance.
+fn find_nearest_skeleton_pixel(skeleton: &Grid<bool>, pos: &Point) -> Option<PixelCoord> {
     let cx = pos.x.round() as i32;
     let cy = pos.y.round() as i32;
 
-    // Calculate distance to nearest border
-    let dist_to_left = pos.x;
-    let dist_to_right = 800.0 - pos.x;
-    let dist_to_top = pos.y;
-    let dist_to_bottom = 800.0 - pos.y;
-    let min_border_dist = dist_to_left.min(dist_to_right).min(dist_to_top).min(dist_to_bottom);
-    
-    // Dynamic max search radius based on border proximity
-    // Nodes near borders may need to search further due to thin margins
-    let max_radius = if min_border_dist < 15.0 {
-        350  // Very close to border - search extensively
-    } else if min_border_dist < 30.0 {
-        300  // Near border - increased search
-    } else {
-        250  // Interior - standard search
-    };
+    // Check center
+    if skeleton.in_bounds(cx, cy) && *skeleton.get(cx, cy).unwrap_or(&false) {
+        return Some(PixelCoord::new(cx, cy));
+    }
 
-    // Search in expanding radius
-    for radius in 0..max_radius {
+    let max_radius = 350;
+
+    for radius in 1i32..max_radius {
+        let mut best: Option<(PixelCoord, i32)> = None;
+
         for dy in -radius..=radius {
             for dx in -radius..=radius {
-                if (dx as i32).abs() != radius && (dy as i32).abs() != radius {
-                    continue; // Only check perimeter
+                if dx.abs() != radius && dy.abs() != radius {
+                    continue;
                 }
-
                 let x = cx + dx;
                 let y = cy + dy;
-
                 if skeleton.in_bounds(x, y) && *skeleton.get(x, y).unwrap_or(&false) {
-                    return Some(PixelCoord::new(x, y));
+                    let dist_sq = dx * dx + dy * dy;
+                    if best.is_none() || dist_sq < best.unwrap().1 {
+                        best = Some((PixelCoord::new(x, y), dist_sq));
+                    }
                 }
             }
+        }
+
+        if let Some((coord, _)) = best {
+            return Some(coord);
         }
     }
 
@@ -182,8 +264,8 @@ fn find_nearest_skeleton_pixel(skeleton: &crate::types::Grid<bool>, pos: &Point)
 }
 
 fn astar_search(
-    skeleton: &crate::types::Grid<bool>,
-    distance_transform: &crate::types::Grid<u8>,
+    skeleton: &Grid<bool>,
+    distance_transform: &Grid<u8>,
     start: PixelCoord,
     goal: PixelCoord,
     forbidden_nodes: &[Point],
@@ -193,8 +275,7 @@ fn astar_search(
     let mut g_score: HashMap<PixelCoord, f64> = HashMap::new();
     let mut closed_set: HashSet<PixelCoord> = HashSet::new();
 
-    // Measure available space by sampling the skeleton
-    // This helps us understand if we're in a tight endgame scenario
+    // Measure available space for dynamic parameters
     let mut space_samples = 0;
     let mut total_distance = 0u32;
     for sample in 0..100 {
@@ -207,39 +288,35 @@ fn astar_search(
             }
         }
     }
-    
-    // Calculate average passage width in the search area
+
     let avg_width = if space_samples > 0 {
-        (total_distance as f64 / space_samples as f64)
+        total_distance as f64 / space_samples as f64
     } else {
-        10.0  // Assume moderate space if we can't measure
+        10.0
     };
-    
-    // Dynamic parameters based on available space
-    // Tight spaces (avg_width < 3) → minimal penalties, tight constraints
-    // Open spaces (avg_width > 8) → normal penalties and constraints
+
     let forbidden_radius = if avg_width < 3.0 {
-        5.0  // Very tight - allow closer to nodes
+        5.0
     } else if avg_width < 5.0 {
-        6.5  // Tight - slightly relaxed
+        6.5
     } else {
-        8.0  // Normal - standard constraint
+        8.0
     };
-    
+
     let dist_penalty_strength = if avg_width < 3.0 {
-        0.01  // Very tight - barely prefer wider paths
+        0.01
     } else if avg_width < 5.0 {
-        0.03  // Tight - mild preference
+        0.03
     } else {
-        0.05  // Normal - moderate preference
+        0.05
     };
-    
+
     let heuristic_weight = if avg_width < 3.0 {
-        1.0  // Very tight - pure A* (no bias)
+        1.0
     } else if avg_width < 5.0 {
-        1.1  // Tight - slight preference for directness
+        1.1
     } else {
-        1.2  // Normal - prefer shorter paths
+        1.2
     };
 
     g_score.insert(start, 0.0);
@@ -250,7 +327,14 @@ fn astar_search(
         f_score: h_start,
     });
 
+    let mut iterations = 0;
+
     while let Some(current_node) = open_set.pop() {
+        iterations += 1;
+        if iterations > MAX_ASTAR_ITERATIONS {
+            return None;
+        }
+
         let current = current_node.coord;
 
         if current == goal {
@@ -262,7 +346,6 @@ fn astar_search(
         }
         closed_set.insert(current);
 
-        // Explore neighbors (8-connectivity)
         for dy in -1..=1 {
             for dx in -1..=1 {
                 if dx == 0 && dy == 0 {
@@ -283,40 +366,39 @@ fn astar_search(
                     continue;
                 }
 
-                // Check if this pixel is too close to a forbidden node (intermediate node)
-                // Use dynamic radius based on available space
-                let neighbor_point = Point::new(neighbor.x as f64 + 0.5, neighbor.y as f64 + 0.5);
+                let neighbor_point =
+                    Point::new(neighbor.x as f64 + 0.5, neighbor.y as f64 + 0.5);
                 let mut too_close_to_forbidden = false;
                 for forbidden in forbidden_nodes {
-                    let dx = neighbor_point.x - forbidden.x;
-                    let dy = neighbor_point.y - forbidden.y;
-                    let dist = (dx * dx + dy * dy).sqrt();
+                    let fdx = neighbor_point.x - forbidden.x;
+                    let fdy = neighbor_point.y - forbidden.y;
+                    let dist = (fdx * fdx + fdy * fdy).sqrt();
                     if dist < forbidden_radius {
                         too_close_to_forbidden = true;
                         break;
                     }
                 }
-                
+
                 if too_close_to_forbidden {
                     continue;
                 }
 
                 let move_cost = if dx == 0 || dy == 0 { 1.0 } else { 1.414 };
-                
-                // Prefer paths through wider passages (strength varies with context)
-                let dist_penalty = if let Some(&dist) = distance_transform.get(neighbor.x, neighbor.y) {
-                    1.0 + dist_penalty_strength / (1.0 + dist as f64)
-                } else {
-                    1.5
-                };
 
-                let tentative_g = g_score.get(&current).unwrap_or(&f64::INFINITY) + move_cost * dist_penalty;
+                let dist_penalty =
+                    if let Some(&dist) = distance_transform.get(neighbor.x, neighbor.y) {
+                        1.0 + dist_penalty_strength / (1.0 + dist as f64)
+                    } else {
+                        1.5
+                    };
+
+                let tentative_g = g_score.get(&current).unwrap_or(&f64::INFINITY)
+                    + move_cost * dist_penalty;
 
                 if tentative_g < *g_score.get(&neighbor).unwrap_or(&f64::INFINITY) {
                     came_from.insert(neighbor, current);
                     g_score.insert(neighbor, tentative_g);
 
-                    // Dynamic heuristic weight based on available space
                     let h = heuristic(&neighbor, &goal) * heuristic_weight;
                     open_set.push(AStarNode {
                         coord: neighbor,
@@ -337,7 +419,10 @@ fn heuristic(a: &PixelCoord, b: &PixelCoord) -> f64 {
     (dx * dx + dy * dy).sqrt()
 }
 
-fn reconstruct_path(came_from: &HashMap<PixelCoord, PixelCoord>, mut current: PixelCoord) -> Vec<PixelCoord> {
+fn reconstruct_path(
+    came_from: &HashMap<PixelCoord, PixelCoord>,
+    mut current: PixelCoord,
+) -> Vec<PixelCoord> {
     let mut path = vec![current];
 
     while let Some(&prev) = came_from.get(&current) {

@@ -83,7 +83,6 @@ pub struct GameState {
     pub skeleton_cache: SkeletonCache,
     pub move_history: Vec<Move>,
     pub current_player: Player,
-    pub game_over: bool,
     pub next_node_id: usize,
     pub next_line_id: usize,
 }
@@ -91,29 +90,50 @@ pub struct GameState {
 impl GameState {
     pub fn new(initial_nodes: usize) -> Self {
         let mut nodes = Vec::new();
-        
+
         // Place initial nodes in a circle
         let center_x = 400.0;
         let center_y = 400.0;
         let radius = 100.0;
-        
+
         for i in 0..initial_nodes {
             let angle = 2.0 * std::f64::consts::PI * (i as f64) / (initial_nodes as f64);
             let x = center_x + radius * angle.cos();
             let y = center_y + radius * angle.sin();
             nodes.push(Node::new(i, Point::new(x, y)));
         }
-        
+
         Self {
             nodes,
             lines: Vec::new(),
             skeleton_cache: SkeletonCache::new(),
             move_history: Vec::new(),
             current_player: Player::Human,
-            game_over: false,
             next_node_id: initial_nodes,
             next_line_id: 0,
         }
+    }
+
+    /// Clone without skeleton cache data (for minimax simulation).
+    /// The skeleton is invalidated on every move anyway, so copying it is waste.
+    pub fn clone_for_simulation(&self) -> Self {
+        Self {
+            nodes: self.nodes.clone(),
+            lines: self.lines.clone(),
+            skeleton_cache: SkeletonCache::new(),
+            move_history: Vec::new(),
+            current_player: self.current_player,
+            next_node_id: self.next_node_id,
+            next_line_id: self.next_line_id,
+        }
+    }
+
+    pub fn find_node(&self, id: usize) -> Option<&Node> {
+        self.nodes.iter().find(|n| n.id == id)
+    }
+
+    pub fn find_node_mut(&mut self, id: usize) -> Option<&mut Node> {
+        self.nodes.iter_mut().find(|n| n.id == id)
     }
 
     pub fn lines_connected_to(&self, node_id: usize) -> Vec<&Line> {
@@ -124,19 +144,26 @@ impl GameState {
     }
 
     pub fn apply_move(&mut self, mov: Move) {
-        // Increment connection counts
-        if let Some(from_node) = self.nodes.iter_mut().find(|n| n.id == mov.from_node) {
-            from_node.connection_count += 1;
-        }
-        if let Some(to_node) = self.nodes.iter_mut().find(|n| n.id == mov.to_node) {
-            to_node.connection_count += 1;
+        // Increment connection counts — handle self-loops explicitly
+        if mov.from_node == mov.to_node {
+            // Self-loop: node gets +2 connections
+            if let Some(node) = self.find_node_mut(mov.from_node) {
+                node.connection_count += 2;
+            }
+        } else {
+            if let Some(from_node) = self.nodes.iter_mut().find(|n| n.id == mov.from_node) {
+                from_node.connection_count += 1;
+            }
+            if let Some(to_node) = self.nodes.iter_mut().find(|n| n.id == mov.to_node) {
+                to_node.connection_count += 1;
+            }
         }
 
-        // Add new node - CRITICAL: starts with 2 connections (to both line endpoints)
+        // Add new node — starts with 2 connections (to both line endpoints)
         let new_node_id = self.next_node_id;
         self.next_node_id += 1;
         let mut new_node = Node::new(new_node_id, mov.new_node_pos);
-        new_node.connection_count = 2; // Connected to both ends of the line
+        new_node.connection_count = 2;
         self.nodes.push(new_node);
 
         // Add line

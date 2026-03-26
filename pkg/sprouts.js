@@ -70,7 +70,6 @@ export class SproutsGame {
         wasm.__wbg_sproutsgame_free(ptr, 0);
     }
     /**
-     * Apply a move
      * @param {number} from_node
      * @param {number} to_node
      * @param {Float64Array} path_data
@@ -85,7 +84,6 @@ export class SproutsGame {
         return ret !== 0;
     }
     /**
-     * Get AI move
      * @returns {Float64Array}
      */
     get_ai_move() {
@@ -95,7 +93,6 @@ export class SproutsGame {
         return v1;
     }
     /**
-     * Check if game is over
      * @returns {boolean}
      */
     is_game_over() {
@@ -103,7 +100,6 @@ export class SproutsGame {
         return ret !== 0;
     }
     /**
-     * Get the validation error message for a move
      * @param {number} from_node
      * @param {number} to_node
      * @param {Float64Array} path_data
@@ -126,7 +122,6 @@ export class SproutsGame {
         }
     }
     /**
-     * Get active nodes
      * @returns {Float64Array}
      */
     get_active_nodes() {
@@ -136,7 +131,6 @@ export class SproutsGame {
         return v1;
     }
     /**
-     * Check if a move is valid
      * @param {number} from_node
      * @param {number} to_node
      * @param {Float64Array} path_data
@@ -151,7 +145,6 @@ export class SproutsGame {
         return ret !== 0;
     }
     /**
-     * Get debug skeleton data
      * @returns {Uint8Array}
      */
     get_skeleton_debug() {
@@ -161,7 +154,6 @@ export class SproutsGame {
         return v1;
     }
     /**
-     * Validate new node placement
      * @param {Float64Array} path_data
      * @param {number} new_node_x
      * @param {number} new_node_y
@@ -174,7 +166,6 @@ export class SproutsGame {
         return ret !== 0;
     }
     /**
-     * Get classification debug info
      * @returns {Float64Array}
      */
     get_classification_debug() {
@@ -184,7 +175,6 @@ export class SproutsGame {
         return v1;
     }
     /**
-     * Get closest point on path
      * @param {Float64Array} path_data
      * @param {number} target_x
      * @param {number} target_y
@@ -208,7 +198,14 @@ export class SproutsGame {
         return this;
     }
     /**
-     * Find path between two nodes
+     * Undo the last move by replaying history minus the final move.
+     * @returns {boolean}
+     */
+    undo() {
+        const ret = wasm.sproutsgame_undo(this.__wbg_ptr);
+        return ret !== 0;
+    }
+    /**
      * @param {number} from_node
      * @param {number} to_node
      * @returns {Float64Array}
@@ -220,8 +217,8 @@ export class SproutsGame {
         return v1;
     }
     /**
-     * Get current game state as Float64Array
-     * Format: [node_count, ...nodes (id, x, y, conn_count), line_count, ...lines (id, from, to, point_count, ...points, new_x, new_y, player)]
+     * Get current game state as Float64Array.
+     * Format: [node_count, ...nodes, line_count, ...lines, current_player]
      * @returns {Float64Array}
      */
     get_state() {
@@ -231,7 +228,6 @@ export class SproutsGame {
         return v1;
     }
     /**
-     * Test a specific pair and return why it fails
      * @param {number} from_node
      * @param {number} to_node
      * @returns {string}

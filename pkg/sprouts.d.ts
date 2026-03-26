@@ -4,59 +4,27 @@
 export class SproutsGame {
   free(): void;
   [Symbol.dispose](): void;
-  /**
-   * Apply a move
-   */
   apply_move(from_node: number, to_node: number, path_data: Float64Array, new_node_x: number, new_node_y: number): boolean;
-  /**
-   * Get AI move
-   */
   get_ai_move(): Float64Array;
-  /**
-   * Check if game is over
-   */
   is_game_over(): boolean;
-  /**
-   * Get the validation error message for a move
-   */
   get_move_error(from_node: number, to_node: number, path_data: Float64Array, new_node_x: number, new_node_y: number): string;
-  /**
-   * Get active nodes
-   */
   get_active_nodes(): Float64Array;
-  /**
-   * Check if a move is valid
-   */
   validate_move_js(from_node: number, to_node: number, path_data: Float64Array, new_node_x: number, new_node_y: number): boolean;
-  /**
-   * Get debug skeleton data
-   */
   get_skeleton_debug(): Uint8Array;
-  /**
-   * Validate new node placement
-   */
   validate_placement(path_data: Float64Array, new_node_x: number, new_node_y: number): boolean;
-  /**
-   * Get classification debug info
-   */
   get_classification_debug(): Float64Array;
-  /**
-   * Get closest point on path
-   */
   get_closest_point_on_path(path_data: Float64Array, target_x: number, target_y: number): Float64Array;
   constructor(initial_nodes: number);
   /**
-   * Find path between two nodes
+   * Undo the last move by replaying history minus the final move.
    */
+  undo(): boolean;
   find_path(from_node: number, to_node: number): Float64Array;
   /**
-   * Get current game state as Float64Array
-   * Format: [node_count, ...nodes (id, x, y, conn_count), line_count, ...lines (id, from, to, point_count, ...points, new_x, new_y, player)]
+   * Get current game state as Float64Array.
+   * Format: [node_count, ...nodes, line_count, ...lines, current_player]
    */
   get_state(): Float64Array;
-  /**
-   * Test a specific pair and return why it fails
-   */
   test_pair(from_node: number, to_node: number): string;
 }
 
@@ -77,6 +45,7 @@ export interface InitOutput {
   readonly sproutsgame_is_game_over: (a: number) => number;
   readonly sproutsgame_new: (a: number) => number;
   readonly sproutsgame_test_pair: (a: number, b: number, c: number) => [number, number];
+  readonly sproutsgame_undo: (a: number) => number;
   readonly sproutsgame_validate_move_js: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => number;
   readonly sproutsgame_validate_placement: (a: number, b: number, c: number, d: number, e: number) => number;
   readonly __wbindgen_externrefs: WebAssembly.Table;
