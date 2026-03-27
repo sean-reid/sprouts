@@ -175,7 +175,10 @@
         <div class="modal-content">
             <h2 id="winnerText" style="letter-spacing: 4px; margin-bottom: 20px;"></h2>
             <p style="margin-bottom: 30px; color: #A0A0A0;">Game Over</p>
-            <button onclick="closeModal(); newGame(4);">New Game</button>
+            <div style="display: flex; gap: 12px; justify-content: center;">
+                <button onclick="reviewBoard()">Review Board</button>
+                <button onclick="newGameFromModal()">New Game</button>
+            </div>
         </div>
     </div>
 
@@ -202,9 +205,11 @@
             animatingLine: null,
             animationProgress: 0,
             gameOver: false,
+            reviewing: false,
             isTouchDevice: false
         };
 
+        let lastNodeCount = 4;
         let canvas, ctx;
         let worker = null;
         let pendingCallbacks = new Map();
@@ -319,6 +324,11 @@
         }
 
         function handleStart(clientX, clientY) {
+            if (gameState.reviewing) {
+                gameState.reviewing = false;
+                document.getElementById('gameOverModal').classList.add('visible');
+                return;
+            }
             if (gameState.mode !== GameMode.IDLE || gameState.gameOver) return;
             const { x, y } = getCanvasCoords(clientX, clientY);
             const node = findNodeAt(x, y);
@@ -690,6 +700,15 @@
             document.getElementById('gameOverModal').classList.remove('visible');
         }
 
+        window.reviewBoard = () => {
+            gameState.reviewing = true;
+            closeModal();
+        };
+
+        window.newGameFromModal = () => {
+            window.newGame(lastNodeCount);
+        };
+
         window.undoMove = async () => {
             if (gameState.mode !== GameMode.IDLE) return;
             // Undo up to 2 moves (AI response + human move)
@@ -701,6 +720,7 @@
             }
             if (undone) {
                 gameState.gameOver = false;
+                gameState.reviewing = false;
                 closeModal();
                 await updateGameState();
                 setStatus('Move undone — your turn');
@@ -709,8 +729,10 @@
 
         window.newGame = async (n) => {
             // Clear ALL visual state immediately so old game doesn't flash
+            lastNodeCount = n;
             gameState.mode = GameMode.IDLE;
             gameState.gameOver = false;
+            gameState.reviewing = false;
             gameState.nodes = [];
             gameState.lines = [];
             gameState.activeNodes = new Set();

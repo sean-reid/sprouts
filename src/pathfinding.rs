@@ -324,12 +324,13 @@ fn astar_search(
         10.0
     };
 
+    // Must not exceed validate_ai_move's 8px clearance — a stricter radius
+    // here rejects paths the validator would accept, causing the AI to miss
+    // legal moves.
     let forbidden_radius = if avg_width < 3.0 {
-        6.0
-    } else if avg_width < 5.0 {
-        9.0
+        4.0
     } else {
-        12.0
+        7.0
     };
 
     // Distance penalty: strongly prefer the center of corridors.
