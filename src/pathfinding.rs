@@ -33,6 +33,25 @@ pub fn find_path_on_skeleton(
     from_node_id: usize,
     to_node_id: usize,
 ) -> Option<Vec<Point>> {
+    find_path_on_skeleton_inner(state, from_node_id, to_node_id, false)
+}
+
+/// Relaxed variant: no forbidden node exclusion zones.  Used as a fallback
+/// when the standard pathfinding can't find any move.
+pub fn find_path_relaxed(
+    state: &GameState,
+    from_node_id: usize,
+    to_node_id: usize,
+) -> Option<Vec<Point>> {
+    find_path_on_skeleton_inner(state, from_node_id, to_node_id, true)
+}
+
+fn find_path_on_skeleton_inner(
+    state: &GameState,
+    from_node_id: usize,
+    to_node_id: usize,
+    relaxed: bool,
+) -> Option<Vec<Point>> {
     let from_node = state.find_node(from_node_id)?;
     let to_node = state.find_node(to_node_id)?;
 
@@ -42,12 +61,16 @@ pub fn find_path_on_skeleton(
     let start_pixel = find_nearest_skeleton_pixel(skeleton, &from_node.position)?;
     let goal_pixel = find_nearest_skeleton_pixel(skeleton, &to_node.position)?;
 
-    let forbidden_nodes: Vec<Point> = state
-        .nodes
-        .iter()
-        .filter(|n| n.id != from_node_id && n.id != to_node_id)
-        .map(|n| n.position)
-        .collect();
+    let forbidden_nodes: Vec<Point> = if relaxed {
+        Vec::new()
+    } else {
+        state
+            .nodes
+            .iter()
+            .filter(|n| n.id != from_node_id && n.id != to_node_id)
+            .map(|n| n.position)
+            .collect()
+    };
 
     let path_pixels = astar_search(
         skeleton,

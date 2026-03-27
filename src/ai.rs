@@ -1,7 +1,7 @@
 use crate::abstract_graph::{abstract_minimax, AbstractMove, AbstractState, TranspositionTable};
 use crate::node_classifier::classify_nodes;
 use crate::opening_book;
-use crate::pathfinding::{find_path_on_skeleton, find_self_loop_on_skeleton};
+use crate::pathfinding::{find_path_on_skeleton, find_path_relaxed, find_self_loop_on_skeleton};
 use crate::types::{GameState, Move};
 use crate::validation::validate_ai_move;
 
@@ -9,6 +9,7 @@ use crate::validation::validate_ai_move;
 fn generate_concrete_moves(state: &mut GameState) -> Vec<Move> {
     let classification = classify_nodes(state);
     let mut moves = Vec::new();
+    let mut failed_pairs = Vec::new();
 
     for (from_id, to_id) in &classification.legal_pairs {
         if let Some(path) = find_path_on_skeleton(state, *from_id, *to_id) {
@@ -26,6 +27,8 @@ fn generate_concrete_moves(state: &mut GameState) -> Vec<Move> {
             if validate_ai_move(state, &mov).is_ok() {
                 moves.push(mov);
             }
+        } else {
+            failed_pairs.push((*from_id, *to_id));
         }
     }
 
@@ -44,6 +47,30 @@ fn generate_concrete_moves(state: &mut GameState) -> Vec<Move> {
             };
             if validate_ai_move(state, &mov).is_ok() {
                 moves.push(mov);
+            }
+        }
+    }
+
+    // Fallback: retry failed pairs with relaxed pathfinding (no forbidden
+    // node exclusion zones).  This prevents premature game-over when the
+    // standard pathfinder's generous exclusion radii block all routes.
+    if moves.is_empty() {
+        for (from_id, to_id) in &failed_pairs {
+            if let Some(path) = find_path_relaxed(state, *from_id, *to_id) {
+                if path.len() < 3 {
+                    continue;
+                }
+                let new_node_pos = find_optimal_node_placement(&path, &state.nodes);
+                let mov = Move {
+                    from_node: *from_id,
+                    to_node: *to_id,
+                    polyline: path,
+                    new_node_pos,
+                    player: state.current_player,
+                };
+                if validate_ai_move(state, &mov).is_ok() {
+                    moves.push(mov);
+                }
             }
         }
     }
