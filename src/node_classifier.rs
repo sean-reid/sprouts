@@ -1,6 +1,6 @@
 use crate::components::label_components;
 use crate::morphology::generate_skeleton;
-use crate::types::{GameState, Grid, PixelCoord};
+use crate::types::{GameState, Grid, PixelCoord, Point, BOARD_SIZE};
 use std::collections::{HashMap, HashSet, VecDeque};
 
 #[derive(Debug, Clone)]
@@ -91,6 +91,7 @@ pub fn classify_nodes(state: &mut GameState) -> NodeClassification {
                     &node_a.position,
                     &node_b.position,
                 )
+                || freespace_connected(state, &node_a.position, &node_b.position)
             {
                 legal_pairs.push((node_a.id, node_b.id));
             }
@@ -159,6 +160,101 @@ fn skeleton_connected(skeleton: &Grid<bool>, pos_a: &crate::types::Point, pos_b:
                     && *skeleton.get(nx, ny).unwrap_or(&false)
                     && !visited.contains(&neighbor)
                 {
+                    visited.insert(neighbor);
+                    queue.push_back(neighbor);
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Free-space BFS fallback: rasterize lines with a thin buffer (5px) and
+/// check if two positions are connected through the remaining free space.
+/// This catches cases where the heavily-dilated skeleton (10px) closes gaps
+/// that a real move could pass through.
+fn freespace_connected(state: &GameState, pos_a: &Point, pos_b: &Point) -> bool {
+    let bs = BOARD_SIZE;
+    let bs_i = bs as i32;
+    let mut blocked = Grid::new(bs, bs, false);
+
+    // Rasterize lines with a 5px buffer (much less than the 10px skeleton dilation)
+    let half_width = 5.0;
+    for line in &state.lines {
+        for i in 1..line.polyline.len() {
+            let p1 = &line.polyline[i - 1];
+            let p2 = &line.polyline[i];
+            let min_x = (p1.x.min(p2.x) - half_width).floor().max(0.0) as i32;
+            let max_x = (p1.x.max(p2.x) + half_width).ceil().min(bs as f64 - 1.0) as i32;
+            let min_y = (p1.y.min(p2.y) - half_width).floor().max(0.0) as i32;
+            let max_y = (p1.y.max(p2.y) + half_width).ceil().min(bs as f64 - 1.0) as i32;
+            for y in min_y..=max_y {
+                for x in min_x..=max_x {
+                    let px = x as f64 + 0.5;
+                    let py = y as f64 + 0.5;
+                    let dx = p2.x - p1.x;
+                    let dy = p2.y - p1.y;
+                    let len_sq = dx * dx + dy * dy;
+                    let dist = if len_sq < 1e-10 {
+                        ((px - p1.x).powi(2) + (py - p1.y).powi(2)).sqrt()
+                    } else {
+                        let t = ((px - p1.x) * dx + (py - p1.y) * dy) / len_sq;
+                        let t = t.clamp(0.0, 1.0);
+                        let cx = p1.x + t * dx;
+                        let cy = p1.y + t * dy;
+                        ((px - cx).powi(2) + (py - cy).powi(2)).sqrt()
+                    };
+                    if dist <= half_width {
+                        blocked.set(x, y, true);
+                    }
+                }
+            }
+        }
+    }
+
+    // Block nodes (except the two we're connecting) with a small radius
+    for node in &state.nodes {
+        if (node.position.x - pos_a.x).abs() < 1.0 && (node.position.y - pos_a.y).abs() < 1.0 {
+            continue;
+        }
+        if (node.position.x - pos_b.x).abs() < 1.0 && (node.position.y - pos_b.y).abs() < 1.0 {
+            continue;
+        }
+        let nx = node.position.x.round() as i32;
+        let ny = node.position.y.round() as i32;
+        let r = 4i32;
+        for dy in -r..=r {
+            for dx in -r..=r {
+                if dx * dx + dy * dy <= r * r {
+                    blocked.set(nx + dx, ny + dy, true);
+                }
+            }
+        }
+    }
+
+    // BFS from pos_a to pos_b through free space
+    let ax = pos_a.x.round() as i32;
+    let ay = pos_a.y.round() as i32;
+    let bx = pos_b.x.round() as i32;
+    let by = pos_b.y.round() as i32;
+
+    let mut visited = HashSet::new();
+    let mut queue = VecDeque::new();
+    let start = PixelCoord::new(ax, ay);
+    let goal = PixelCoord::new(bx, by);
+    visited.insert(start);
+    queue.push_back(start);
+
+    while let Some(cur) = queue.pop_front() {
+        for dy in -1..=1i32 {
+            for dx in -1..=1i32 {
+                if dx == 0 && dy == 0 { continue; }
+                let nx = cur.x + dx;
+                let ny = cur.y + dy;
+                if nx < 0 || ny < 0 || nx >= bs_i || ny >= bs_i { continue; }
+                let neighbor = PixelCoord::new(nx, ny);
+                if nx == bx && ny == by { return true; }
+                if !*blocked.get(nx, ny).unwrap_or(&true) && !visited.contains(&neighbor) {
                     visited.insert(neighbor);
                     queue.push_back(neighbor);
                 }

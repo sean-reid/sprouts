@@ -216,6 +216,59 @@ pub fn smooth_path_chaikin(points: &[Point], iterations: usize) -> Vec<Point> {
     // Force exact endpoint alignment
     if let Some(first) = current.first_mut() { *first = start_node; }
     if let Some(last) = current.last_mut() { *last = end_node; }
-    
+
     current
+}
+
+/// Remove doublebacks: only shortcut when the direct line saves significant
+/// path length (>40%), preserving intentional curves.
+pub fn shortcut_path(points: &[Point], distance_transform: &crate::types::Grid<u8>, min_clearance: u8) -> Vec<Point> {
+    if points.len() <= 2 {
+        return points.to_vec();
+    }
+    let mut result = vec![points[0]];
+    let mut i = 0;
+    while i < points.len() - 1 {
+        let mut best_j = i + 1;
+        // Try progressively larger skips
+        for j in (i + 2..points.len()).rev() {
+            let direct_dist = distance(&points[i], &points[j]);
+            // Measure the sub-path length from i to j
+            let mut sub_len = 0.0;
+            for k in i..j {
+                sub_len += distance(&points[k], &points[k + 1]);
+            }
+            // Only shortcut if the direct line saves >20% — this preserves
+            // gentle curves (which add ~10% length) while eliminating
+            // doublebacks and jagged detours.
+            if direct_dist < sub_len * 0.8
+                && line_clears_obstacles(&points[i], &points[j], distance_transform, min_clearance)
+            {
+                best_j = j;
+                break;
+            }
+        }
+        result.push(points[best_j]);
+        i = best_j;
+    }
+    result
+}
+
+/// Check that every pixel along a straight line has sufficient clearance.
+fn line_clears_obstacles(a: &Point, b: &Point, distance_transform: &crate::types::Grid<u8>, min_clearance: u8) -> bool {
+    let dx = b.x - a.x;
+    let dy = b.y - a.y;
+    let len = (dx * dx + dy * dy).sqrt();
+    if len < 1.0 { return true; }
+    let steps = (len * 2.0).ceil() as usize; // sample every ~0.5px
+    for s in 0..=steps {
+        let t = s as f64 / steps as f64;
+        let x = (a.x + t * dx).round() as i32;
+        let y = (a.y + t * dy).round() as i32;
+        let dist = distance_transform.get(x, y).copied().unwrap_or(0);
+        if dist < min_clearance {
+            return false;
+        }
+    }
+    true
 }

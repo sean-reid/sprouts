@@ -1,4 +1,4 @@
-use crate::geometry::{decimate_polyline, polyline_length, resample_polyline, smooth_path_chaikin};
+use crate::geometry::{decimate_polyline, polyline_length, resample_polyline, shortcut_path, smooth_path_chaikin};
 use crate::types::{GameState, Grid, Point, PixelCoord};
 use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
 
@@ -55,6 +55,7 @@ pub fn find_path_on_skeleton(
         start_pixel,
         goal_pixel,
         &forbidden_nodes,
+        true, // allow off-skeleton for regular paths
     )?;
 
     let mut path_points: Vec<Point> = path_pixels
@@ -65,63 +66,30 @@ pub fn find_path_on_skeleton(
     path_points.insert(0, from_node.position);
     path_points.push(to_node.position);
 
-    let resampled = resample_polyline(&path_points, 3.0);
-    let smoothed = smooth_path_chaikin(&resampled, 3);
+    // 1. Remove doublebacks: shortcut detours, then strip any points that
+    //    move away from the goal (monotonicity filter).
+    let shortcutted = shortcut_path(&path_points, distance_transform, 2);
+    let shortcutted = remove_backtracking(&shortcutted);
 
-    // Measure path tightness
-    let mut tightness_sum = 0.0;
-    let mut tightness_samples = 0;
-    for point in &resampled {
-        let px = point.x.round() as i32;
-        let py = point.y.round() as i32;
-        if let Some(&dist) = distance_transform.get(px, py) {
-            tightness_sum += dist as f64;
-            tightness_samples += 1;
-        }
-    }
-    let avg_clearance = if tightness_samples > 0 {
-        tightness_sum / tightness_samples as f64
-    } else {
-        5.0
-    };
+    // 2. Resample → Smooth (single clean pass)
+    let resampled = resample_polyline(&shortcutted, 2.0);
+    let smoothed = smooth_path_chaikin(&resampled, 4);
 
-    let required_clearance: u8 = if avg_clearance < 2.0 {
-        0
-    } else {
-        1
-    };
-
-    let failure_tolerance = if avg_clearance < 2.0 {
-        0.30
-    } else if avg_clearance < 4.0 {
-        0.20
-    } else {
-        0.15
-    };
-
-    let mut smoothed_is_safe = true;
+    // 3. Clearance check — fall back to resampled (unsmoothed) if needed
     let mut failed_points = 0;
-
     for point in &smoothed {
         let px = point.x.round() as i32;
         let py = point.y.round() as i32;
-        if let Some(&dist) = distance_transform.get(px, py) {
-            if dist < required_clearance {
-                smoothed_is_safe = false;
-                failed_points += 1;
-            }
-        } else {
-            smoothed_is_safe = false;
+        let dist = distance_transform.get(px, py).copied().unwrap_or(0);
+        if dist < 1 {
             failed_points += 1;
         }
     }
 
-    let final_path = if smoothed_is_safe
-        || (failed_points as f64 / smoothed.len() as f64) < failure_tolerance
-    {
+    let final_path = if failed_points as f64 / smoothed.len().max(1) as f64 <= 0.20 {
         smoothed
     } else {
-        resampled
+        resample_polyline(&shortcutted, 2.0)
     };
 
     let decimated = decimate_polyline(&final_path, 1.0);
@@ -223,6 +191,7 @@ pub fn find_self_loop_on_skeleton(state: &GameState, node_id: usize) -> Option<V
             pixel_a,
             pixel_b,
             &no_forbidden,
+            false, // no off-skeleton for self-loops (center is blocked)
         ) {
             if pixels.len() >= 8 {
                 path_pixels = Some(pixels);
@@ -292,12 +261,40 @@ fn find_nearest_skeleton_pixel(skeleton: &Grid<bool>, pos: &Point) -> Option<Pix
     None
 }
 
+/// Remove points where the path backtracks — i.e., moves further from the
+/// goal than a previous point.  Keeps the first and last points intact.
+fn remove_backtracking(points: &[Point]) -> Vec<Point> {
+    if points.len() <= 2 {
+        return points.to_vec();
+    }
+    let goal = points[points.len() - 1];
+    let mut result = vec![points[0]];
+    let mut best_dist_sq = f64::INFINITY;
+
+    for i in 1..points.len() - 1 {
+        let dx = points[i].x - goal.x;
+        let dy = points[i].y - goal.y;
+        let dist_sq = dx * dx + dy * dy;
+        // Only keep points that are making progress toward the goal
+        // (or not moving significantly further away)
+        if dist_sq <= best_dist_sq * 1.15 {
+            result.push(points[i]);
+            if dist_sq < best_dist_sq {
+                best_dist_sq = dist_sq;
+            }
+        }
+    }
+    result.push(goal);
+    result
+}
+
 fn astar_search(
     skeleton: &Grid<bool>,
     distance_transform: &Grid<u8>,
     start: PixelCoord,
     goal: PixelCoord,
     forbidden_nodes: &[Point],
+    allow_off_skeleton: bool,
 ) -> Option<Vec<PixelCoord>> {
     let mut open_set = BinaryHeap::new();
     let mut came_from: HashMap<PixelCoord, PixelCoord> = HashMap::new();
@@ -324,23 +321,25 @@ fn astar_search(
         10.0
     };
 
-    // Must not exceed validate_ai_move's 8px clearance — a stricter radius
-    // here rejects paths the validator would accept, causing the AI to miss
-    // legal moves.
+    // Keep paths aesthetically clear of nodes.  Off-skeleton routing gives
+    // the A* room to swing wide, so we can use generous radii in open areas.
+    // In tight corridors, shrink so valid paths aren't blocked entirely.
     let forbidden_radius = if avg_width < 3.0 {
-        4.0
+        6.0
+    } else if avg_width < 6.0 {
+        10.0
     } else {
-        7.0
+        14.0
     };
 
     // Distance penalty: strongly prefer the center of corridors.
     // Higher values push paths away from obstacles even when the skeleton allows proximity.
     let dist_penalty_strength = if avg_width < 3.0 {
-        0.05
-    } else if avg_width < 5.0 {
-        0.15
-    } else {
         0.3
+    } else if avg_width < 5.0 {
+        1.5
+    } else {
+        4.0
     };
 
     let heuristic_weight = if avg_width < 3.0 {
@@ -390,8 +389,20 @@ fn astar_search(
                     continue;
                 }
 
-                if !skeleton.get(neighbor.x, neighbor.y).unwrap_or(&false) {
-                    continue;
+                let on_skeleton = *skeleton.get(neighbor.x, neighbor.y).unwrap_or(&false);
+                let neighbor_dist = distance_transform
+                    .get(neighbor.x, neighbor.y)
+                    .copied()
+                    .unwrap_or(0) as f64;
+
+                // Allow off-skeleton movement through open space (dist >= 3),
+                // but block movement into or very near obstacles.
+                // Disabled for self-loops where the skeleton center is blocked
+                // to force the path to arc around the node.
+                if !on_skeleton {
+                    if !allow_off_skeleton || neighbor_dist < 3.0 {
+                        continue;
+                    }
                 }
 
                 if closed_set.contains(&neighbor) {
@@ -417,15 +428,14 @@ fn astar_search(
 
                 let move_cost = if dx == 0 || dy == 0 { 1.0 } else { 1.414 };
 
-                let dist_penalty =
-                    if let Some(&dist) = distance_transform.get(neighbor.x, neighbor.y) {
-                        1.0 + dist_penalty_strength / (1.0 + dist as f64)
-                    } else {
-                        1.5
-                    };
+                // Off-skeleton pixels get a base cost premium so the skeleton
+                // is still preferred when it runs through open space.
+                let off_skeleton_cost = if on_skeleton { 1.0 } else { 1.5 };
+
+                let dist_penalty = 1.0 + dist_penalty_strength / (1.0 + neighbor_dist * neighbor_dist);
 
                 let tentative_g = g_score.get(&current).unwrap_or(&f64::INFINITY)
-                    + move_cost * dist_penalty;
+                    + move_cost * dist_penalty * off_skeleton_cost;
 
                 if tentative_g < *g_score.get(&neighbor).unwrap_or(&f64::INFINITY) {
                     came_from.insert(neighbor, current);

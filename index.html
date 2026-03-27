@@ -405,7 +405,7 @@
                 document.getElementById('mobileOverlay').classList.add('visible');
                 setStatus('Drag along curve to place node');
             } else {
-                setStatus('Click on the curve to place a new node', 'win');
+                setStatus('Click on the curve to place a new node (ESC to cancel)', 'win');
             }
         }
 
@@ -611,6 +611,34 @@
             return gameState.nodes.find(n => Math.hypot(x - n.position.x, y - n.position.y) < threshold) || null;
         }
 
+        // Catmull-Rom spline: passes through every point (unlike quadratic
+        // midpoint bezier which skips control points).
+        function drawSmoothPath(ctx, points) {
+            if (!points || points.length < 2) return;
+            ctx.beginPath();
+            ctx.moveTo(points[0].x, points[0].y);
+            if (points.length === 2) {
+                ctx.lineTo(points[1].x, points[1].y);
+            } else {
+                for (let i = 0; i < points.length - 1; i++) {
+                    const p0 = points[Math.max(i - 1, 0)];
+                    const p1 = points[i];
+                    const p2 = points[i + 1];
+                    const p3 = points[Math.min(i + 2, points.length - 1)];
+                    // Convert Catmull-Rom to cubic bezier control points.
+                    // Divisor controls tension: 6=standard, higher=tighter curves
+                    // that resist overshooting at corners.
+                    const t = 8;
+                    const cp1x = p1.x + (p2.x - p0.x) / t;
+                    const cp1y = p1.y + (p2.y - p0.y) / t;
+                    const cp2x = p2.x - (p3.x - p1.x) / t;
+                    const cp2y = p2.y - (p3.y - p1.y) / t;
+                    ctx.bezierCurveTo(cp1x, cp1y, cp2x, cp2y, p2.x, p2.y);
+                }
+            }
+            ctx.stroke();
+        }
+
         function render() {
             ctx.fillStyle = '#1A1A1A';
             ctx.fillRect(0, 0, canvas.width, canvas.height);
@@ -619,10 +647,7 @@
             for (const line of gameState.lines) {
                 ctx.strokeStyle = line.player === 0 ? '#60A5FA' : '#EF4444';
                 ctx.lineWidth = 3;
-                ctx.beginPath();
-                ctx.moveTo(line.polyline[0].x, line.polyline[0].y);
-                for (let i = 1; i < line.polyline.length; i++) ctx.lineTo(line.polyline[i].x, line.polyline[i].y);
-                ctx.stroke();
+                drawSmoothPath(ctx, line.polyline);
             }
 
             // Draw active path (dragging or locked)
@@ -631,10 +656,7 @@
             if (activePath && activePath.length > 1) {
                 ctx.strokeStyle = '#3B82F6';
                 ctx.lineWidth = 3;
-                ctx.beginPath();
-                ctx.moveTo(activePath[0].x, activePath[0].y);
-                for (let i = 1; i < activePath.length; i++) ctx.lineTo(activePath[i].x, activePath[i].y);
-                ctx.stroke();
+                drawSmoothPath(ctx, activePath);
             }
 
             // Draw placement dot
@@ -672,9 +694,7 @@
                 const len = Math.floor(gameState.animationProgress * anim.path.length);
                 if (len > 1) {
                     ctx.strokeStyle = '#EF4444'; ctx.lineWidth = 3;
-                    ctx.beginPath(); ctx.moveTo(anim.path[0].x, anim.path[0].y);
-                    for (let i = 1; i < len; i++) ctx.lineTo(anim.path[i].x, anim.path[i].y);
-                    ctx.stroke();
+                    drawSmoothPath(ctx, anim.path.slice(0, len));
                 }
             }
             requestAnimationFrame(render);
@@ -687,10 +707,8 @@
 
         function showGameOver() {
             stopThinking();
-            // The current player has no moves — they lose
-            // currentPlayer 0 = human's turn (human stuck = AI wins)
-            // currentPlayer 1 = AI's turn (AI stuck = human wins)
             const humanWins = gameState.currentPlayer === 1;
+            setStatus(humanWins ? 'You win!' : 'AI wins', humanWins ? 'win' : 'lose');
             document.getElementById('winnerText').textContent = humanWins ? 'YOU WIN' : 'AI WINS';
             document.getElementById('winnerText').style.color = humanWins ? '#10B981' : '#EF4444';
             document.getElementById('gameOverModal').classList.add('visible');
@@ -744,6 +762,7 @@
             gameState.dragStartNode = null;
             gameState.dragEndNode = null;
             stopThinking();
+            setStatus('Initializing...');
             closeModal();
 
             await workerCall('init', { nodeCount: n });
