@@ -1,7 +1,7 @@
 use crate::components::label_components;
 use crate::morphology::generate_skeleton;
-use crate::types::GameState;
-use std::collections::{HashMap, HashSet};
+use crate::types::{GameState, Grid, PixelCoord};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 #[derive(Debug, Clone)]
 pub struct NodeClassification {
@@ -85,12 +85,14 @@ pub fn classify_nodes(state: &mut GameState) -> NodeClassification {
                 false
             };
 
-            if shares_component {
+            if shares_component
+                || skeleton_connected(
+                    &state.skeleton_cache.skeleton,
+                    &node_a.position,
+                    &node_b.position,
+                )
+            {
                 legal_pairs.push((node_a.id, node_b.id));
-            } else {
-                if let Some(_path) = crate::pathfinding::find_path_on_skeleton(state, node_a.id, node_b.id) {
-                    legal_pairs.push((node_a.id, node_b.id));
-                }
             }
         }
     }
@@ -110,4 +112,58 @@ pub fn classify_nodes(state: &mut GameState) -> NodeClassification {
         legal_pairs,
         self_loop_candidates,
     }
+}
+
+/// BFS on skeleton pixels to check if two positions are connected.
+/// Unlike find_path_on_skeleton, this ignores forbidden node exclusion zones —
+/// we only care whether a connection *exists*, not whether a clean playable
+/// path can be generated right now.
+fn skeleton_connected(skeleton: &Grid<bool>, pos_a: &crate::types::Point, pos_b: &crate::types::Point) -> bool {
+    let find_nearest = |pos: &crate::types::Point| -> Option<PixelCoord> {
+        let cx = pos.x.round() as i32;
+        let cy = pos.y.round() as i32;
+        for r in 0i32..50 {
+            for dy in -r..=r {
+                for dx in -r..=r {
+                    if r > 0 && dx.abs() != r && dy.abs() != r { continue; }
+                    let x = cx + dx;
+                    let y = cy + dy;
+                    if skeleton.in_bounds(x, y) && *skeleton.get(x, y).unwrap_or(&false) {
+                        return Some(PixelCoord::new(x, y));
+                    }
+                }
+            }
+        }
+        None
+    };
+
+    let start = match find_nearest(pos_a) { Some(p) => p, None => return false };
+    let goal = match find_nearest(pos_b) { Some(p) => p, None => return false };
+
+    if start == goal { return true; }
+
+    let mut visited = HashSet::new();
+    let mut queue = VecDeque::new();
+    visited.insert(start);
+    queue.push_back(start);
+
+    while let Some(cur) = queue.pop_front() {
+        for dy in -1..=1i32 {
+            for dx in -1..=1i32 {
+                if dx == 0 && dy == 0 { continue; }
+                let nx = cur.x + dx;
+                let ny = cur.y + dy;
+                let neighbor = PixelCoord::new(nx, ny);
+                if neighbor == goal { return true; }
+                if skeleton.in_bounds(nx, ny)
+                    && *skeleton.get(nx, ny).unwrap_or(&false)
+                    && !visited.contains(&neighbor)
+                {
+                    visited.insert(neighbor);
+                    queue.push_back(neighbor);
+                }
+            }
+        }
+    }
+    false
 }

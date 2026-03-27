@@ -143,107 +143,99 @@ pub fn label_components(
         meta.bounding_box.update(coord.x, coord.y);
     }
 
-    // Assign nodes to components with dynamic search based on border proximity
+    // Assign nodes to the largest nearby component.
+    // bridge_active_components ensures active nodes share one connected skeleton,
+    // but small unbridged fragments can exist closer to a node than the main
+    // skeleton.  Always prefer the largest component to avoid mis-assignment.
     for node in &state.nodes {
         let node_x = node.position.x.round() as i32;
         let node_y = node.position.y.round() as i32;
 
-        // Calculate distances to borders
         let dist_to_left = node.position.x;
         let dist_to_right = crate::types::BOARD_SIZE as f64 - node.position.x;
         let dist_to_top = node.position.y;
         let dist_to_bottom = crate::types::BOARD_SIZE as f64 - node.position.y;
         let min_border_dist = dist_to_left.min(dist_to_right).min(dist_to_top).min(dist_to_bottom);
-        
-        // Dynamic search radius based on border proximity
-        // Nodes near borders need more aggressive searching because margins are thinner
-        let initial_search_radius = if min_border_dist < 15.0 {
-            40  // Very close to border - search widely immediately
+
+        let initial_search_radius: i32 = if min_border_dist < 15.0 {
+            40
         } else if min_border_dist < 30.0 {
-            30  // Near border - increased initial search
+            30
         } else {
-            20  // Interior - standard search
-        };
-        
-        let max_search_radius = if min_border_dist < 20.0 {
-            400  // Near border - search very far if needed
-        } else {
-            300  // Interior - standard max search
+            20
         };
 
-        // Search in progressively larger radii to find any nearby skeleton
-        let mut assigned = false;
-        
-        // First try immediate vicinity (fast) with dynamic radius
+        let max_search_radius: i32 = if min_border_dist < 20.0 {
+            400
+        } else {
+            300
+        };
+
+        // Collect all components found within the search radius, tracking the
+        // closest distance to each.
+        let mut found_components: HashMap<usize, i32> = HashMap::new();
+
+        // Phase 1: initial search box
         for dy in -initial_search_radius..=initial_search_radius {
             for dx in -initial_search_radius..=initial_search_radius {
                 let px = node_x + dx;
                 let py = node_y + dy;
-
                 if let Some(&comp_id) = component_labels.get(&PixelCoord::new(px, py)) {
-                    if let Some(meta) = components.get_mut(&comp_id) {
-                        meta.accessible_nodes.insert(node.id);
-                        assigned = true;
-                        break;
-                    }
+                    let dist = dx.abs().max(dy.abs());
+                    found_components.entry(comp_id).and_modify(|d| *d = (*d).min(dist)).or_insert(dist);
                 }
             }
-            if assigned {
-                break;
-            }
         }
-        
-        // If not found nearby, search in larger radius
-        if !assigned {
+
+        // Phase 2: expand if nothing found
+        if found_components.is_empty() {
             for radius in (initial_search_radius + 1)..=max_search_radius {
                 for dy in -radius..=radius {
                     for dx in -radius..=radius {
-                        // Only check perimeter for efficiency
-                        if (dx as i32).abs() != radius && (dy as i32).abs() != radius {
-                            continue;
-                        }
-                        
+                        if dx.abs() != radius && dy.abs() != radius { continue; }
                         let px = node_x + dx;
                         let py = node_y + dy;
-
                         if let Some(&comp_id) = component_labels.get(&PixelCoord::new(px, py)) {
-                            if let Some(meta) = components.get_mut(&comp_id) {
-                                meta.accessible_nodes.insert(node.id);
-                                assigned = true;
-                                break;
-                            }
+                            found_components.entry(comp_id).or_insert(radius);
                         }
                     }
-                    if assigned {
-                        break;
-                    }
                 }
-                if assigned {
-                    break;
-                }
+                if !found_components.is_empty() { break; }
             }
         }
 
-        // If node not found near skeleton, find closest component
-        if !assigned {
+        // Pick the best component: prefer the largest among those within
+        // reasonable distance of the closest hit.
+        let best_comp = if found_components.is_empty() {
+            // Fallback: closest component by Euclidean distance
             let mut min_dist = f64::INFINITY;
-            let mut closest_comp = None;
-
+            let mut closest = None;
             for (coord, &comp_id) in &component_labels {
                 let dx = coord.x as f64 - node.position.x;
                 let dy = coord.y as f64 - node.position.y;
                 let dist = (dx * dx + dy * dy).sqrt();
-
                 if dist < min_dist {
                     min_dist = dist;
-                    closest_comp = Some(comp_id);
+                    closest = Some(comp_id);
                 }
             }
+            closest
+        } else {
+            // Among found components, pick the largest one that's within
+            // 2x the closest distance (prefer size over proximity).
+            let min_dist = found_components.values().copied().min().unwrap_or(0);
+            let threshold = (min_dist * 2).max(initial_search_radius);
+            found_components.iter()
+                .filter(|(_, &dist)| dist <= threshold)
+                .max_by_key(|(comp_id, _)| {
+                    components.get(comp_id).map(|m| m.pixel_count).unwrap_or(0)
+                })
+                .map(|(&comp_id, _)| comp_id)
+        };
 
-            if let Some(comp_id) = closest_comp {
-                if let Some(meta) = components.get_mut(&comp_id) {
-                    meta.accessible_nodes.insert(node.id);
-                }
+        if let Some(comp_id) = best_comp {
+            if let Some(meta) = components.get_mut(&comp_id) {
+                meta.accessible_nodes.insert(node.id);
             }
         }
     }
