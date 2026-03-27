@@ -196,18 +196,16 @@ pub fn find_self_loop_on_skeleton(state: &GameState, node_id: usize) -> Option<V
     let pixel_a = by_angle[best_i].0;
     let pixel_b = by_angle[best_j].0;
 
-    let forbidden_nodes: Vec<Point> = state
-        .nodes
-        .iter()
-        .filter(|n| n.id != node_id)
-        .map(|n| n.position)
-        .collect();
-
     // Block a small area around the node center on a skeleton copy.
     // This prevents the A* from taking the direct path through the node,
     // forcing it to go around and form a loop.
     // Try progressively smaller block radii if A* fails (the skeleton
     // near a node can be thin, so a large block may disconnect it).
+    // No forbidden_nodes: the self-loop path often must pass near other
+    // nodes in tight positions.  validate_ai_move enforces the real 8px
+    // clearance; duplicating a wider exclusion here causes false negatives
+    // and makes the AI unable to play its only available move.
+    let no_forbidden: Vec<Point> = Vec::new();
     let mut path_pixels = None;
     for block_radius in [4i32, 3, 2] {
         let mut loop_skeleton = skeleton.clone();
@@ -224,7 +222,7 @@ pub fn find_self_loop_on_skeleton(state: &GameState, node_id: usize) -> Option<V
             distance_transform,
             pixel_a,
             pixel_b,
-            &forbidden_nodes,
+            &no_forbidden,
         ) {
             if pixels.len() >= 8 {
                 path_pixels = Some(pixels);
