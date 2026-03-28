@@ -608,7 +608,16 @@
 
         function findNodeAt(x, y) {
             const threshold = gameState.isTouchDevice ? 30 : 15;
-            return gameState.nodes.find(n => Math.hypot(x - n.position.x, y - n.position.y) < threshold) || null;
+            let closest = null;
+            let minDist = threshold;
+            for (const n of gameState.nodes) {
+                const d = Math.hypot(x - n.position.x, y - n.position.y);
+                if (d < minDist) {
+                    minDist = d;
+                    closest = n;
+                }
+            }
+            return closest;
         }
 
         // Catmull-Rom spline: passes through every point (unlike quadratic
@@ -728,7 +737,7 @@
         };
 
         window.undoMove = async () => {
-            if (gameState.mode !== GameMode.IDLE) return;
+            if (gameState.mode !== GameMode.IDLE || thinkingInterval !== null) return;
             // Undo up to 2 moves (AI response + human move)
             let undone = false;
             for (let i = 0; i < 2; i++) {

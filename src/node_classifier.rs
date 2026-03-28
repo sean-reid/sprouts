@@ -212,25 +212,9 @@ fn freespace_connected(state: &GameState, pos_a: &Point, pos_b: &Point) -> bool 
         }
     }
 
-    // Block nodes (except the two we're connecting) with a small radius
-    for node in &state.nodes {
-        if (node.position.x - pos_a.x).abs() < 1.0 && (node.position.y - pos_a.y).abs() < 1.0 {
-            continue;
-        }
-        if (node.position.x - pos_b.x).abs() < 1.0 && (node.position.y - pos_b.y).abs() < 1.0 {
-            continue;
-        }
-        let nx = node.position.x.round() as i32;
-        let ny = node.position.y.round() as i32;
-        let r = 4i32;
-        for dy in -r..=r {
-            for dx in -r..=r {
-                if dx * dx + dy * dy <= r * r {
-                    blocked.set(nx + dx, ny + dy, true);
-                }
-            }
-        }
-    }
+    // Don't block nodes — the only exit from enclosed regions is often
+    // through node junctions where lines meet.  We just need to know
+    // whether ANY free-space path exists; validation handles the rest.
 
     // BFS from pos_a to pos_b through free space
     let ax = pos_a.x.round() as i32;

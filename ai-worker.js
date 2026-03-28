@@ -1,5 +1,6 @@
 let wasmGame = null;
 let wasmReady = false;
+let cachedWasmModule = null;
 
 self.onmessage = async function(e) {
     const { type, data, id } = e.data;
@@ -7,9 +8,11 @@ self.onmessage = async function(e) {
     try {
         switch (type) {
             case 'init': {
-                const wasmModule = await import('./pkg/sprouts.js');
-                await wasmModule.default();
-                wasmGame = new wasmModule.SproutsGame(data.nodeCount);
+                if (!cachedWasmModule) {
+                    cachedWasmModule = await import('./pkg/sprouts.js');
+                    await cachedWasmModule.default();
+                }
+                wasmGame = new cachedWasmModule.SproutsGame(data.nodeCount);
                 wasmReady = true;
                 self.postMessage({ type: 'init', id });
                 break;

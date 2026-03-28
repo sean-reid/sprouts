@@ -20,6 +20,9 @@ pub fn polyline_length(points: &[Point]) -> f64 {
 
 /// Find closest point on a polyline to a given point
 pub fn closest_point_on_polyline(polyline: &[Point], target: &Point) -> (Point, f64) {
+    if polyline.is_empty() {
+        return (*target, 0.0);
+    }
     let mut min_dist = f64::INFINITY;
     let mut closest = polyline[0];
 

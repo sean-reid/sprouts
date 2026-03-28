@@ -30,7 +30,7 @@ pub fn validate_ai_move(state: &GameState, mov: &Move) -> Result<(), String> {
 }
 
 fn validate_move_internal(state: &GameState, mov: &Move, is_ai_move: bool) -> Result<(), String> {
-    let _mode = if is_ai_move { "AI" } else { "HUMAN" };
+    let mode = if is_ai_move { "AI" } else { "HUMAN" };
     let from_node = state.find_node(mov.from_node).ok_or("Source node not found")?;
     let to_node = state.find_node(mov.to_node).ok_or("Target node not found")?;
 

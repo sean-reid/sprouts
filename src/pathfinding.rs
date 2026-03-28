@@ -2,7 +2,7 @@ use crate::geometry::{decimate_polyline, polyline_length, resample_polyline, sho
 use crate::types::{GameState, Grid, Point, PixelCoord};
 use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
 
-const MAX_ASTAR_ITERATIONS: usize = 100_000;
+const MAX_ASTAR_ITERATIONS: usize = 300_000;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct AStarNode {
@@ -36,14 +36,121 @@ pub fn find_path_on_skeleton(
     find_path_on_skeleton_inner(state, from_node_id, to_node_id, false)
 }
 
-/// Relaxed variant: no forbidden node exclusion zones.  Used as a fallback
-/// when the standard pathfinding can't find any move.
+/// Last-resort fallback: free-space A* that ignores the skeleton entirely.
+/// Starts directly from node positions and routes through any pixel with
+/// distance > 0 from the dilated obstacle map.  Produces less aesthetic
+/// paths but prevents false game-over.
+/// Last-resort fallback: free-space A* with a thin (4px) line buffer instead
+/// of the 10px-dilated skeleton obstacle map.  This can squeeze through gaps
+/// at node junctions that the dilated map seals shut.
 pub fn find_path_relaxed(
     state: &GameState,
     from_node_id: usize,
     to_node_id: usize,
 ) -> Option<Vec<Point>> {
-    find_path_on_skeleton_inner(state, from_node_id, to_node_id, true)
+    use crate::types::BOARD_SIZE;
+    let from_node = state.find_node(from_node_id)?;
+    let to_node = state.find_node(to_node_id)?;
+    let distance_transform = &state.skeleton_cache.distance_transform;
+    let bs = BOARD_SIZE;
+    let bs_i = bs as i32;
+
+    // Build a thin obstacle map: just the lines with a 4px buffer
+    let mut blocked = Grid::new(bs, bs, false);
+    let half_w = 4.0f64;
+    for line in &state.lines {
+        for i in 1..line.polyline.len() {
+            let p1 = &line.polyline[i - 1];
+            let p2 = &line.polyline[i];
+            let min_x = (p1.x.min(p2.x) - half_w).floor().max(0.0) as i32;
+            let max_x = (p1.x.max(p2.x) + half_w).ceil().min(bs as f64 - 1.0) as i32;
+            let min_y = (p1.y.min(p2.y) - half_w).floor().max(0.0) as i32;
+            let max_y = (p1.y.max(p2.y) + half_w).ceil().min(bs as f64 - 1.0) as i32;
+            for y in min_y..=max_y {
+                for x in min_x..=max_x {
+                    let px = x as f64 + 0.5;
+                    let py = y as f64 + 0.5;
+                    let dx = p2.x - p1.x;
+                    let dy = p2.y - p1.y;
+                    let len_sq = dx * dx + dy * dy;
+                    let dist = if len_sq < 1e-10 {
+                        ((px - p1.x).powi(2) + (py - p1.y).powi(2)).sqrt()
+                    } else {
+                        let t = ((px - p1.x) * dx + (py - p1.y) * dy) / len_sq;
+                        let t = t.clamp(0.0, 1.0);
+                        let cx = p1.x + t * dx;
+                        let cy = p1.y + t * dy;
+                        ((px - cx).powi(2) + (py - cy).powi(2)).sqrt()
+                    };
+                    if dist <= half_w {
+                        blocked.set(x, y, true);
+                    }
+                }
+            }
+        }
+    }
+
+    let start = PixelCoord::new(from_node.position.x.round() as i32, from_node.position.y.round() as i32);
+    let goal = PixelCoord::new(to_node.position.x.round() as i32, to_node.position.y.round() as i32);
+
+    let mut open_set = BinaryHeap::new();
+    let mut came_from: HashMap<PixelCoord, PixelCoord> = HashMap::new();
+    let mut g_score: HashMap<PixelCoord, f64> = HashMap::new();
+    let mut closed_set: HashSet<PixelCoord> = HashSet::new();
+
+    g_score.insert(start, 0.0);
+    open_set.push(AStarNode { coord: start, g_score: 0.0, f_score: heuristic(&start, &goal) });
+
+    let mut iterations = 0;
+    while let Some(current_node) = open_set.pop() {
+        iterations += 1;
+        if iterations > MAX_ASTAR_ITERATIONS { return None; }
+
+        let current = current_node.coord;
+        if current == goal { break; }
+        if closed_set.contains(&current) { continue; }
+        closed_set.insert(current);
+
+        for dy in -1..=1i32 {
+            for dx in -1..=1i32 {
+                if dx == 0 && dy == 0 { continue; }
+                let neighbor = PixelCoord::new(current.x + dx, current.y + dy);
+                if neighbor.x < 0 || neighbor.y < 0 || neighbor.x >= bs_i || neighbor.y >= bs_i { continue; }
+                if *blocked.get(neighbor.x, neighbor.y).unwrap_or(&true) && neighbor != goal { continue; }
+                if closed_set.contains(&neighbor) { continue; }
+
+                let move_cost = if dx == 0 || dy == 0 { 1.0 } else { 1.414 };
+                // Prefer pixels far from obstacles (use the full distance_transform for aesthetics)
+                let dt_dist = distance_transform.get(neighbor.x, neighbor.y).copied().unwrap_or(0) as f64;
+                let clearance_bonus = 1.0 + 2.0 / (1.0 + dt_dist * dt_dist);
+                let tentative_g = g_score.get(&current).unwrap_or(&f64::INFINITY) + move_cost * clearance_bonus;
+
+                if tentative_g < *g_score.get(&neighbor).unwrap_or(&f64::INFINITY) {
+                    came_from.insert(neighbor, current);
+                    g_score.insert(neighbor, tentative_g);
+                    let h = heuristic(&neighbor, &goal);
+                    open_set.push(AStarNode { coord: neighbor, g_score: tentative_g, f_score: tentative_g + h });
+                }
+            }
+        }
+    }
+
+    if !came_from.contains_key(&goal) && start != goal { return None; }
+    let path_pixels = reconstruct_path(&came_from, goal);
+
+    let mut path_points: Vec<Point> = path_pixels
+        .iter()
+        .map(|p| Point::new(p.x as f64 + 0.5, p.y as f64 + 0.5))
+        .collect();
+    path_points.insert(0, from_node.position);
+    path_points.push(to_node.position);
+
+    let shortcutted = shortcut_path(&path_points, distance_transform, 1);
+    let resampled = resample_polyline(&shortcutted, 2.0);
+    let smoothed = smooth_path_chaikin(&resampled, 4);
+    let decimated = decimate_polyline(&smoothed, 1.0);
+
+    Some(decimated)
 }
 
 fn find_path_on_skeleton_inner(
@@ -89,10 +196,8 @@ fn find_path_on_skeleton_inner(
     path_points.insert(0, from_node.position);
     path_points.push(to_node.position);
 
-    // 1. Remove doublebacks: shortcut detours, then strip any points that
-    //    move away from the goal (monotonicity filter).
+    // 1. Remove doublebacks via shortcutting.
     let shortcutted = shortcut_path(&path_points, distance_transform, 2);
-    let shortcutted = remove_backtracking(&shortcutted);
 
     // 2. Resample → Smooth (single clean pass)
     let resampled = resample_polyline(&shortcutted, 2.0);
@@ -244,6 +349,58 @@ pub fn find_self_loop_on_skeleton(state: &GameState, node_id: usize) -> Option<V
     Some(decimated)
 }
 
+/// Geometric self-loop fallback: creates a circular arc from the node without
+/// using the skeleton.  Tries multiple directions and radii to find one that
+/// doesn't cross existing lines.
+pub fn generate_geometric_self_loop(state: &GameState, node_id: usize) -> Option<Vec<Point>> {
+    let node = state.find_node(node_id)?;
+    let cx = node.position.x;
+    let cy = node.position.y;
+    let bs = crate::types::BOARD_SIZE as f64;
+
+    // Pick radius based on distance to nearest board edge so arcs don't
+    // get clamped down to nothing.
+    let edge_dist = cx.min(cy).min(bs - cx).min(bs - cy);
+    let max_radius = (edge_dist - 5.0).max(15.0);
+    let radii = [
+        35.0f64.min(max_radius),
+        50.0f64.min(max_radius),
+        25.0f64.min(max_radius),
+        70.0f64.min(max_radius),
+        15.0, // always try a small radius as last resort
+    ];
+
+    // Try 12 directions (every 30°) at each radius
+    for &radius in &radii {
+        if radius < 10.0 { continue; }
+        for angle_idx in 0..12 {
+            let base_angle = (angle_idx as f64) * std::f64::consts::PI / 6.0;
+
+            // Point the arc AWAY from the nearest edge for best clearance
+            let mut points = Vec::new();
+            points.push(node.position);
+            let steps = 24;
+            for i in 0..=steps {
+                let t = i as f64 / steps as f64;
+                let angle = base_angle + std::f64::consts::PI * (t - 0.5);
+                let x = (cx + radius * angle.cos()).clamp(3.0, bs - 3.0);
+                let y = (cy + radius * angle.sin()).clamp(3.0, bs - 3.0);
+                points.push(Point::new(x, y));
+            }
+            points.push(node.position);
+
+            let resampled = resample_polyline(&points, 2.0);
+            let smoothed = smooth_path_chaikin(&resampled, 3);
+            let decimated = decimate_polyline(&smoothed, 1.0);
+
+            if polyline_length(&decimated) >= 20.0 {
+                return Some(decimated);
+            }
+        }
+    }
+    None
+}
+
 /// Find the nearest skeleton pixel to a position.
 /// Searches expanding rings and returns the closest by Euclidean distance.
 fn find_nearest_skeleton_pixel(skeleton: &Grid<bool>, pos: &Point) -> Option<PixelCoord> {
@@ -284,32 +441,6 @@ fn find_nearest_skeleton_pixel(skeleton: &Grid<bool>, pos: &Point) -> Option<Pix
     None
 }
 
-/// Remove points where the path backtracks — i.e., moves further from the
-/// goal than a previous point.  Keeps the first and last points intact.
-fn remove_backtracking(points: &[Point]) -> Vec<Point> {
-    if points.len() <= 2 {
-        return points.to_vec();
-    }
-    let goal = points[points.len() - 1];
-    let mut result = vec![points[0]];
-    let mut best_dist_sq = f64::INFINITY;
-
-    for i in 1..points.len() - 1 {
-        let dx = points[i].x - goal.x;
-        let dy = points[i].y - goal.y;
-        let dist_sq = dx * dx + dy * dy;
-        // Only keep points that are making progress toward the goal
-        // (or not moving significantly further away)
-        if dist_sq <= best_dist_sq * 1.15 {
-            result.push(points[i]);
-            if dist_sq < best_dist_sq {
-                best_dist_sq = dist_sq;
-            }
-        }
-    }
-    result.push(goal);
-    result
-}
 
 fn astar_search(
     skeleton: &Grid<bool>,

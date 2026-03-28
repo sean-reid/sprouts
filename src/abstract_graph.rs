@@ -279,12 +279,10 @@ pub fn abstract_minimax(
     }
 
     // Move ordering
-    moves.sort_by(|a, b| {
-        state
-            .quick_move_score(b)
-            .partial_cmp(&state.quick_move_score(a))
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    let scores: Vec<f64> = moves.iter().map(|m| state.quick_move_score(m)).collect();
+    let mut indices: Vec<usize> = (0..moves.len()).collect();
+    indices.sort_by(|&a, &b| scores[b].partial_cmp(&scores[a]).unwrap_or(std::cmp::Ordering::Equal));
+    moves = indices.into_iter().map(|i| moves[i].clone()).collect();
 
     let score = if is_maximizing {
         let mut max_eval = f64::NEG_INFINITY;

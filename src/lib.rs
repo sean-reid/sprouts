@@ -13,11 +13,10 @@ use wasm_bindgen::prelude::*;
 use types::{GameState, Move, Player, Point};
 
 fn parse_polyline(path_data: &[f64]) -> Vec<Point> {
-    let mut polyline = Vec::with_capacity(path_data.len() / 2);
-    for i in (0..path_data.len()).step_by(2) {
-        polyline.push(Point::new(path_data[i], path_data[i + 1]));
-    }
-    polyline
+    path_data
+        .chunks_exact(2)
+        .map(|c| Point::new(c[0], c[1]))
+        .collect()
 }
 
 #[wasm_bindgen]
