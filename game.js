@@ -136,7 +136,13 @@ async function init() {
     canvas.addEventListener('touchstart', (e) => {
         gameState.lastInputWasTouch = true;
         e.preventDefault();
-        handleStart(e.touches[0].clientX, e.touches[0].clientY);
+        const cx = e.touches[0].clientX, cy = e.touches[0].clientY;
+        // During placement mode, a tap on the canvas moves the placement dot
+        if (gameState.mode === GameMode.PLACING_NODE) {
+            handleMove(cx, cy);
+        } else {
+            handleStart(cx, cy);
+        }
     }, { passive: false });
     canvas.addEventListener('touchmove', (e) => {
         e.preventDefault();
@@ -249,9 +255,27 @@ function handleEnd(clientX, clientY) {
 
     if (isTouchActive()) {
         document.getElementById('mobileOverlay').classList.add('visible');
-        setStatus('Drag along curve to place node');
+        setStatus('Tap Confirm to place node, or drag on curve to adjust');
+        // Auto-place dot at midpoint so Confirm works immediately
+        autoPlaceMidpoint();
     } else {
         setStatus('Click on the curve to place a new node (ESC to cancel)', 'win');
+    }
+}
+
+async function autoPlaceMidpoint() {
+    if (gameState.mode !== GameMode.PLACING_NODE || gameState.lockedPath.length < 2) return;
+    const pathData = gameState.lockedPath.flatMap(p => [p.x, p.y]);
+    const midIdx = Math.floor(gameState.lockedPath.length / 2);
+    const mid = gameState.lockedPath[midIdx];
+    const { point } = await workerCall('get_closest_point', { pathData, x: mid.x, y: mid.y });
+    const closest = { x: point[0], y: point[1] };
+    const { valid } = await workerCall('validate_placement', {
+        pathData, newNodeX: closest.x, newNodeY: closest.y
+    });
+    // Only set if user hasn't already moved to pick a different spot
+    if (gameState.mode === GameMode.PLACING_NODE && !gameState.placementDot) {
+        gameState.placementDot = { position: closest, valid };
     }
 }
 
@@ -284,7 +308,25 @@ async function handleDesktopClick(clientX, clientY) {
 }
 
 window.confirmMove = async () => {
-    if (isTouchActive()) await executeMove();
+    if (gameState.mode !== GameMode.PLACING_NODE) return;
+
+    // If no placement dot yet (user didn't drag on curve), auto-place at midpoint
+    if (!gameState.placementDot || !gameState.placementDot.valid) {
+        const pathData = gameState.lockedPath.flatMap(p => [p.x, p.y]);
+        // Find midpoint of the path
+        const midIdx = Math.floor(gameState.lockedPath.length / 2);
+        const mid = gameState.lockedPath[midIdx] || gameState.lockedPath[0];
+        const { point } = await workerCall('get_closest_point', { pathData, x: mid.x, y: mid.y });
+        const closest = { x: point[0], y: point[1] };
+        const { valid } = await workerCall('validate_placement', {
+            pathData, newNodeX: closest.x, newNodeY: closest.y
+        });
+        if (valid) {
+            gameState.placementDot = { position: closest, valid: true };
+        }
+    }
+
+    await executeMove();
 };
 
 async function executeMove() {
