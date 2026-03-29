@@ -69,68 +69,19 @@ pub fn segments_intersect(a1: &Point, a2: &Point, b1: &Point, b2: &Point) -> boo
     ccw(a1, b1, b2) != ccw(a2, b1, b2) && ccw(a1, a2, b1) != ccw(a1, a2, b2)
 }
 
-/// Check if a polyline intersects with any segment in a list
-pub fn polyline_intersects_segments(
-    polyline: &[Point],
-    segments: &[(Point, Point)],
-) -> bool {
-    for i in 1..polyline.len() {
-        let seg_a = &polyline[i - 1];
-        let seg_b = &polyline[i];
-
-        for (other_a, other_b) in segments {
-            if segments_intersect(seg_a, seg_b, other_a, other_b) {
-                return true;
-            }
-        }
+/// Distance from a point (px, py) to a line segment (x1,y1)-(x2,y2).
+pub fn point_to_segment_distance(px: f64, py: f64, x1: f64, y1: f64, x2: f64, y2: f64) -> f64 {
+    let dx = x2 - x1;
+    let dy = y2 - y1;
+    let len_sq = dx * dx + dy * dy;
+    if len_sq < 1e-10 {
+        return ((px - x1).powi(2) + (py - y1).powi(2)).sqrt();
     }
-    false
-}
-
-/// Check if a point is on a polyline within tolerance
-pub fn point_on_polyline(polyline: &[Point], point: &Point, tolerance: f64) -> bool {
-    let (_, dist) = closest_point_on_polyline(polyline, point);
-    dist <= tolerance
-}
-
-/// Extract a segment from a polyline starting at a given position for a given length
-pub fn extract_line_segment(polyline: &[Point], start_pos: Point, length: f64) -> Vec<Point> {
-    let mut result = vec![start_pos];
-    let mut remaining = length;
-    
-    // Find the starting point in the polyline
-    let mut start_idx = 0;
-    let mut min_dist = f64::INFINITY;
-    
-    for i in 0..polyline.len() {
-        let dist = distance(&polyline[i], &start_pos);
-        if dist < min_dist {
-            min_dist = dist;
-            start_idx = i;
-        }
-    }
-    
-    // Walk along the polyline from start
-    let mut current_idx = start_idx;
-    
-    while remaining > 0.0 && current_idx + 1 < polyline.len() {
-        let seg_len = distance(&polyline[current_idx], &polyline[current_idx + 1]);
-        
-        if seg_len <= remaining {
-            result.push(polyline[current_idx + 1]);
-            remaining -= seg_len;
-            current_idx += 1;
-        } else {
-            // Partial segment
-            let t = remaining / seg_len;
-            let x = polyline[current_idx].x + t * (polyline[current_idx + 1].x - polyline[current_idx].x);
-            let y = polyline[current_idx].y + t * (polyline[current_idx + 1].y - polyline[current_idx].y);
-            result.push(Point::new(x, y));
-            break;
-        }
-    }
-    
-    result
+    let t = ((px - x1) * dx + (py - y1) * dy) / len_sq;
+    let t = t.clamp(0.0, 1.0);
+    let cx = x1 + t * dx;
+    let cy = y1 + t * dy;
+    ((px - cx).powi(2) + (py - cy).powi(2)).sqrt()
 }
 
 /// Douglas-Peucker polyline decimation
@@ -258,6 +209,7 @@ pub fn shortcut_path(points: &[Point], distance_transform: &crate::types::Grid<u
 }
 
 /// Check that every pixel along a straight line has sufficient clearance.
+#[allow(dead_code)]
 fn line_clears_obstacles(a: &Point, b: &Point, distance_transform: &crate::types::Grid<u8>, min_clearance: u8) -> bool {
     let dx = b.x - a.x;
     let dy = b.y - a.y;
@@ -274,4 +226,182 @@ fn line_clears_obstacles(a: &Point, b: &Point, distance_transform: &crate::types
         }
     }
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::Point;
+
+    fn p(x: f64, y: f64) -> Point {
+        Point::new(x, y)
+    }
+
+    // --- point_to_segment_distance ---
+
+    #[test]
+    fn point_on_segment() {
+        let d = point_to_segment_distance(5.0, 0.0, 0.0, 0.0, 10.0, 0.0);
+        assert!(d.abs() < 1e-9);
+    }
+
+    #[test]
+    fn point_at_endpoint() {
+        let d = point_to_segment_distance(0.0, 0.0, 0.0, 0.0, 10.0, 0.0);
+        assert!(d.abs() < 1e-9);
+    }
+
+    #[test]
+    fn point_perpendicular() {
+        let d = point_to_segment_distance(5.0, 3.0, 0.0, 0.0, 10.0, 0.0);
+        assert!((d - 3.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn zero_length_segment() {
+        let d = point_to_segment_distance(3.0, 4.0, 0.0, 0.0, 0.0, 0.0);
+        assert!((d - 5.0).abs() < 1e-9);
+    }
+
+    // --- distance / distance_squared ---
+
+    #[test]
+    fn distance_basic() {
+        assert!((distance(&p(0.0, 0.0), &p(3.0, 4.0)) - 5.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn distance_squared_basic() {
+        assert!((distance_squared(&p(0.0, 0.0), &p(3.0, 4.0)) - 25.0).abs() < 1e-9);
+    }
+
+    // --- polyline_length ---
+
+    #[test]
+    fn polyline_length_empty() {
+        assert!(polyline_length(&[]).abs() < 1e-9);
+    }
+
+    #[test]
+    fn polyline_length_single_point() {
+        assert!(polyline_length(&[p(1.0, 1.0)]).abs() < 1e-9);
+    }
+
+    #[test]
+    fn polyline_length_multi_segment() {
+        let pts = vec![p(0.0, 0.0), p(3.0, 0.0), p(3.0, 4.0)];
+        assert!((polyline_length(&pts) - 7.0).abs() < 1e-9);
+    }
+
+    // --- closest_point_on_segment ---
+
+    #[test]
+    fn closest_at_start_endpoint() {
+        let (pt, d) = closest_point_on_segment(&p(0.0, 0.0), &p(10.0, 0.0), &p(-5.0, 0.0));
+        assert!((pt.x - 0.0).abs() < 1e-9);
+        assert!((d - 5.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn closest_at_end_endpoint() {
+        let (pt, d) = closest_point_on_segment(&p(0.0, 0.0), &p(10.0, 0.0), &p(15.0, 0.0));
+        assert!((pt.x - 10.0).abs() < 1e-9);
+        assert!((d - 5.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn closest_midpoint_perpendicular() {
+        let (pt, d) = closest_point_on_segment(&p(0.0, 0.0), &p(10.0, 0.0), &p(5.0, 7.0));
+        assert!((pt.x - 5.0).abs() < 1e-9);
+        assert!((pt.y - 0.0).abs() < 1e-9);
+        assert!((d - 7.0).abs() < 1e-9);
+    }
+
+    // --- segments_intersect ---
+
+    #[test]
+    fn crossing_segments() {
+        assert!(segments_intersect(&p(0.0, 0.0), &p(10.0, 10.0), &p(0.0, 10.0), &p(10.0, 0.0)));
+    }
+
+    #[test]
+    fn parallel_segments() {
+        assert!(!segments_intersect(&p(0.0, 0.0), &p(10.0, 0.0), &p(0.0, 1.0), &p(10.0, 1.0)));
+    }
+
+    #[test]
+    fn non_crossing_segments() {
+        assert!(!segments_intersect(&p(0.0, 0.0), &p(1.0, 0.0), &p(2.0, 0.0), &p(3.0, 0.0)));
+    }
+
+    #[test]
+    fn t_intersection() {
+        // Vertical segment crossing horizontal at midpoint
+        let result = segments_intersect(&p(0.0, 0.0), &p(10.0, 0.0), &p(5.0, -5.0), &p(5.0, 5.0));
+        assert!(result);
+    }
+
+    // --- decimate_polyline ---
+
+    #[test]
+    fn decimate_straight_line() {
+        let pts = vec![p(0.0, 0.0), p(1.0, 0.0), p(2.0, 0.0), p(3.0, 0.0)];
+        let result = decimate_polyline(&pts, 0.1);
+        assert_eq!(result.len(), 2);
+        assert!((result[0].x - 0.0).abs() < 1e-9);
+        assert!((result[1].x - 3.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn decimate_l_shape_keeps_corner() {
+        let pts = vec![p(0.0, 0.0), p(10.0, 0.0), p(10.0, 10.0)];
+        let result = decimate_polyline(&pts, 1.0);
+        assert!(result.len() >= 3); // corner must be kept
+    }
+
+    // --- resample_polyline ---
+
+    #[test]
+    fn resample_uniform_spacing() {
+        let pts = vec![p(0.0, 0.0), p(100.0, 0.0)];
+        let result = resample_polyline(&pts, 25.0);
+        // Should produce approximately 5 points (0, 25, 50, 75, 100)
+        assert!(result.len() >= 4);
+        // Check spacing is roughly uniform
+        for i in 1..result.len() - 1 {
+            let d = distance(&result[i - 1], &result[i]);
+            assert!((d - 25.0).abs() < 1.0);
+        }
+    }
+
+    #[test]
+    fn resample_empty() {
+        assert!(resample_polyline(&[], 10.0).is_empty());
+    }
+
+    // --- smooth_path_chaikin ---
+
+    #[test]
+    fn chaikin_preserves_endpoints() {
+        let pts = vec![p(0.0, 0.0), p(50.0, 50.0), p(100.0, 0.0)];
+        let result = smooth_path_chaikin(&pts, 3);
+        assert!((result.first().unwrap().x - 0.0).abs() < 1e-9);
+        assert!((result.first().unwrap().y - 0.0).abs() < 1e-9);
+        assert!((result.last().unwrap().x - 100.0).abs() < 1e-9);
+        assert!((result.last().unwrap().y - 0.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn chaikin_increases_point_count() {
+        let pts = vec![p(0.0, 0.0), p(50.0, 50.0), p(100.0, 0.0)];
+        let result = smooth_path_chaikin(&pts, 2);
+        assert!(result.len() > pts.len());
+    }
+
+    #[test]
+    fn chaikin_short_path_unchanged() {
+        let pts = vec![p(0.0, 0.0), p(10.0, 10.0)];
+        let result = smooth_path_chaikin(&pts, 3);
+        assert_eq!(result.len(), 2);
+    }
 }

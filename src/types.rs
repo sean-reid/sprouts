@@ -2,6 +2,20 @@ use std::collections::{HashMap, HashSet};
 
 pub const BOARD_SIZE: usize = 1000;
 
+// Validation thresholds
+pub const MIN_PATH_LENGTH: f64 = 20.0;
+pub const MIN_NODE_SPACING: f64 = 20.0;
+pub const MIN_NODE_SPACING_AI: f64 = 20.0;
+pub const MIN_PATH_CLEARANCE: f64 = 10.0;
+pub const MIN_PATH_CLEARANCE_AI: f64 = 10.0;
+pub const HUMAN_INTERSECTION_TOLERANCE: f64 = 30.0;
+pub const AI_INTERSECTION_TOLERANCE: f64 = 5.0;
+
+// Morphology / pathfinding
+pub const LINE_RASTER_WIDTH: f64 = 3.0;
+pub const NODE_PROTECTION_RADIUS: i32 = 6;
+pub const MAX_ASTAR_ITERATIONS: usize = 300_000;
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Point {
     pub x: f64,
@@ -53,10 +67,6 @@ impl Node {
             connection_count: 0,
         }
     }
-
-    pub fn is_active(&self) -> bool {
-        self.connection_count < 3
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -88,16 +98,22 @@ pub struct GameState {
     pub next_node_id: usize,
     pub next_line_id: usize,
     pub initial_node_count: usize,
+    pub board_size: usize,
 }
 
 impl GameState {
     pub fn new(initial_nodes: usize) -> Self {
+        Self::with_board_size(initial_nodes, BOARD_SIZE)
+    }
+
+    pub fn with_board_size(initial_nodes: usize, board_size: usize) -> Self {
         let mut nodes = Vec::new();
 
-        // Place initial nodes in a circle
-        let center_x = BOARD_SIZE as f64 / 2.0;
-        let center_y = BOARD_SIZE as f64 / 2.0;
-        let radius = if initial_nodes <= 4 { 120.0 } else { 160.0 };
+        let center_x = board_size as f64 / 2.0;
+        let center_y = board_size as f64 / 2.0;
+        // Scale placement radius proportionally to board size
+        let base_radius = if initial_nodes <= 4 { 120.0 } else { 160.0 };
+        let radius = base_radius * (board_size as f64 / BOARD_SIZE as f64);
 
         for i in 0..initial_nodes {
             let angle = 2.0 * std::f64::consts::PI * (i as f64) / (initial_nodes as f64);
@@ -109,27 +125,13 @@ impl GameState {
         Self {
             nodes,
             lines: Vec::new(),
-            skeleton_cache: SkeletonCache::new(),
+            skeleton_cache: SkeletonCache::new_with_size(board_size),
             move_history: Vec::new(),
             current_player: Player::Human,
             next_node_id: initial_nodes,
             next_line_id: 0,
             initial_node_count: initial_nodes,
-        }
-    }
-
-    /// Clone without skeleton cache data (for minimax simulation).
-    /// The skeleton is invalidated on every move anyway, so copying it is waste.
-    pub fn clone_for_simulation(&self) -> Self {
-        Self {
-            nodes: self.nodes.clone(),
-            lines: self.lines.clone(),
-            skeleton_cache: SkeletonCache::new(),
-            move_history: Vec::new(),
-            current_player: self.current_player,
-            next_node_id: self.next_node_id,
-            next_line_id: self.next_line_id,
-            initial_node_count: self.initial_node_count,
+            board_size,
         }
     }
 
@@ -195,23 +197,67 @@ impl GameState {
         // Invalidate skeleton cache
         self.skeleton_cache.invalidate();
     }
+
+    /// O(1) undo: directly reverse the last move instead of replaying history.
+    pub fn undo_move(&mut self) -> bool {
+        let mov = match self.move_history.pop() {
+            Some(m) => m,
+            None => return false,
+        };
+
+        // Remove the created node (always the last one added)
+        self.nodes.pop();
+        self.next_node_id -= 1;
+
+        // Remove the line (always the last one added)
+        self.lines.pop();
+        self.next_line_id -= 1;
+
+        // Restore connection counts
+        if mov.from_node == mov.to_node {
+            if let Some(node) = self.find_node_mut(mov.from_node) {
+                node.connection_count -= 2;
+            }
+        } else {
+            if let Some(node) = self.find_node_mut(mov.from_node) {
+                node.connection_count -= 1;
+            }
+            if let Some(node) = self.find_node_mut(mov.to_node) {
+                node.connection_count -= 1;
+            }
+        }
+
+        // Switch player back
+        self.current_player = match self.current_player {
+            Player::Human => Player::AI,
+            Player::AI => Player::Human,
+        };
+
+        self.skeleton_cache.invalidate();
+        true
+    }
 }
 
 #[derive(Clone)]
 pub struct SkeletonCache {
     pub skeleton: Grid<bool>,
     pub distance_transform: Grid<u8>,
-    pub component_labels: HashMap<PixelCoord, usize>,
+    pub component_labels: Grid<u32>,    // 0 = not skeleton, 1+ = component ID
     pub components: HashMap<usize, ComponentMetadata>,
     pub is_valid: bool,
 }
 
 impl SkeletonCache {
+    #[allow(dead_code)]
     pub fn new() -> Self {
+        Self::new_with_size(BOARD_SIZE)
+    }
+
+    pub fn new_with_size(board_size: usize) -> Self {
         Self {
-            skeleton: Grid::new(BOARD_SIZE, BOARD_SIZE, false),
-            distance_transform: Grid::new(BOARD_SIZE, BOARD_SIZE, 0),
-            component_labels: HashMap::new(),
+            skeleton: Grid::new(board_size, board_size, false),
+            distance_transform: Grid::new(board_size, board_size, 0),
+            component_labels: Grid::new(board_size, board_size, 0),
             components: HashMap::new(),
             is_valid: false,
         }
@@ -306,5 +352,203 @@ impl Grid<bool> {
             result.data[i] = !self.data[i];
         }
         result
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_move(from: usize, to: usize) -> Move {
+        Move {
+            from_node: from,
+            to_node: to,
+            polyline: vec![
+                Point::new(100.0, 100.0),
+                Point::new(150.0, 150.0),
+                Point::new(200.0, 200.0),
+            ],
+            new_node_pos: Point::new(150.0, 150.0),
+            player: Player::Human,
+        }
+    }
+
+    // --- GameState::new ---
+
+    #[test]
+    fn new_correct_node_count() {
+        let gs = GameState::new(3);
+        assert_eq!(gs.nodes.len(), 3);
+        assert_eq!(gs.initial_node_count, 3);
+        assert_eq!(gs.next_node_id, 3);
+    }
+
+    #[test]
+    fn new_all_zero_connections() {
+        let gs = GameState::new(4);
+        for node in &gs.nodes {
+            assert_eq!(node.connection_count, 0);
+        }
+    }
+
+    #[test]
+    fn new_positions_around_center() {
+        let gs = GameState::new(2);
+        let center = BOARD_SIZE as f64 / 2.0;
+        // Both nodes should be equidistant from center
+        let d0 = gs.nodes[0].position.distance_to(&Point::new(center, center));
+        let d1 = gs.nodes[1].position.distance_to(&Point::new(center, center));
+        assert!((d0 - d1).abs() < 1e-6);
+    }
+
+    // --- GameState::with_board_size ---
+
+    #[test]
+    fn with_board_size_scales_positions() {
+        let gs = GameState::with_board_size(2, 500);
+        assert_eq!(gs.board_size, 500);
+        let center = 250.0;
+        for node in &gs.nodes {
+            // All nodes should be within the board
+            assert!(node.position.x > 0.0 && node.position.x < 500.0);
+            assert!(node.position.y > 0.0 && node.position.y < 500.0);
+        }
+        let d = gs.nodes[0].position.distance_to(&Point::new(center, center));
+        // Radius scales with board_size: 120 * (500/1000) = 60
+        assert!((d - 60.0).abs() < 1e-6);
+    }
+
+    // --- apply_move ---
+
+    #[test]
+    fn apply_move_increments_connections() {
+        let mut gs = GameState::new(2);
+        let mov = make_move(0, 1);
+        gs.apply_move(mov);
+        assert_eq!(gs.find_node(0).unwrap().connection_count, 1);
+        assert_eq!(gs.find_node(1).unwrap().connection_count, 1);
+    }
+
+    #[test]
+    fn apply_move_adds_node_with_2_connections() {
+        let mut gs = GameState::new(2);
+        let mov = make_move(0, 1);
+        gs.apply_move(mov);
+        assert_eq!(gs.nodes.len(), 3);
+        let new_node = gs.find_node(2).unwrap();
+        assert_eq!(new_node.connection_count, 2);
+    }
+
+    #[test]
+    fn apply_move_adds_line() {
+        let mut gs = GameState::new(2);
+        let mov = make_move(0, 1);
+        gs.apply_move(mov);
+        assert_eq!(gs.lines.len(), 1);
+        assert_eq!(gs.lines[0].from_node, 0);
+        assert_eq!(gs.lines[0].to_node, 1);
+    }
+
+    #[test]
+    fn apply_move_switches_player() {
+        let mut gs = GameState::new(2);
+        assert_eq!(gs.current_player, Player::Human);
+        gs.apply_move(make_move(0, 1));
+        assert_eq!(gs.current_player, Player::AI);
+    }
+
+    #[test]
+    fn apply_move_self_loop_adds_2() {
+        let mut gs = GameState::new(2);
+        let mov = Move {
+            from_node: 0,
+            to_node: 0,
+            polyline: vec![Point::new(100.0, 100.0), Point::new(200.0, 200.0), Point::new(100.0, 100.0)],
+            new_node_pos: Point::new(150.0, 150.0),
+            player: Player::Human,
+        };
+        gs.apply_move(mov);
+        assert_eq!(gs.find_node(0).unwrap().connection_count, 2);
+    }
+
+    // --- undo_move ---
+
+    #[test]
+    fn undo_move_reverses_apply() {
+        let mut gs = GameState::new(2);
+        let orig_nodes: Vec<(usize, u8)> = gs.nodes.iter().map(|n| (n.id, n.connection_count)).collect();
+
+        gs.apply_move(make_move(0, 1));
+        assert_eq!(gs.nodes.len(), 3);
+
+        let undone = gs.undo_move();
+        assert!(undone);
+        assert_eq!(gs.nodes.len(), 2);
+        assert_eq!(gs.lines.len(), 0);
+        assert_eq!(gs.current_player, Player::Human);
+
+        for (id, cc) in &orig_nodes {
+            assert_eq!(gs.find_node(*id).unwrap().connection_count, *cc);
+        }
+    }
+
+    #[test]
+    fn undo_move_empty_history_returns_false() {
+        let mut gs = GameState::new(2);
+        assert!(!gs.undo_move());
+    }
+
+    #[test]
+    fn repeated_apply_undo_identity() {
+        let mut gs = GameState::new(3);
+        let snapshot: Vec<(usize, u8)> = gs.nodes.iter().map(|n| (n.id, n.connection_count)).collect();
+
+        for _ in 0..5 {
+            gs.apply_move(make_move(0, 1));
+            gs.undo_move();
+        }
+
+        assert_eq!(gs.nodes.len(), snapshot.len());
+        assert_eq!(gs.lines.len(), 0);
+        assert_eq!(gs.current_player, Player::Human);
+        for (id, cc) in &snapshot {
+            assert_eq!(gs.find_node(*id).unwrap().connection_count, *cc);
+        }
+    }
+
+    // --- Grid ---
+
+    #[test]
+    fn grid_get_set() {
+        let mut g: Grid<i32> = Grid::new(10, 10, 0);
+        g.set(3, 4, 42);
+        assert_eq!(*g.get(3, 4).unwrap(), 42);
+        assert_eq!(*g.get(0, 0).unwrap(), 0);
+    }
+
+    #[test]
+    fn grid_in_bounds() {
+        let g: Grid<bool> = Grid::new(5, 5, false);
+        assert!(g.in_bounds(0, 0));
+        assert!(g.in_bounds(4, 4));
+        assert!(!g.in_bounds(-1, 0));
+        assert!(!g.in_bounds(5, 0));
+        assert!(!g.in_bounds(0, 5));
+    }
+
+    #[test]
+    fn grid_out_of_bounds_returns_none() {
+        let g: Grid<i32> = Grid::new(5, 5, 0);
+        assert!(g.get(-1, 0).is_none());
+        assert!(g.get(5, 0).is_none());
+    }
+
+    #[test]
+    fn grid_invert() {
+        let mut g: Grid<bool> = Grid::new(3, 3, false);
+        g.set(1, 1, true);
+        let inv = g.invert();
+        assert_eq!(*inv.get(0, 0).unwrap(), true);
+        assert_eq!(*inv.get(1, 1).unwrap(), false);
     }
 }

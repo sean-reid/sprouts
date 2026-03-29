@@ -22,7 +22,6 @@ fn parse_polyline(path_data: &[f64]) -> Vec<Point> {
 #[wasm_bindgen]
 pub struct SproutsGame {
     state: GameState,
-    initial_node_count: usize,
 }
 
 #[wasm_bindgen]
@@ -31,7 +30,13 @@ impl SproutsGame {
     pub fn new(initial_nodes: usize) -> Self {
         Self {
             state: GameState::new(initial_nodes),
-            initial_node_count: initial_nodes,
+        }
+    }
+
+    #[wasm_bindgen]
+    pub fn new_with_board_size(initial_nodes: usize, board_size: usize) -> Self {
+        Self {
+            state: GameState::with_board_size(initial_nodes, board_size),
         }
     }
 
@@ -89,25 +94,6 @@ impl SproutsGame {
     }
 
     #[wasm_bindgen]
-    pub fn validate_move_js(
-        &self,
-        from_node: usize,
-        to_node: usize,
-        path_data: Vec<f64>,
-        new_node_x: f64,
-        new_node_y: f64,
-    ) -> bool {
-        let mov = Move {
-            from_node,
-            to_node,
-            polyline: parse_polyline(&path_data),
-            new_node_pos: Point::new(new_node_x, new_node_y),
-            player: self.state.current_player,
-        };
-        validation::validate_move(&self.state, &mov).is_ok()
-    }
-
-    #[wasm_bindgen]
     pub fn get_move_error(
         &self,
         from_node: usize,
@@ -158,19 +144,9 @@ impl SproutsGame {
         }
     }
 
-    /// Undo the last move by replaying history minus the final move.
     #[wasm_bindgen]
     pub fn undo(&mut self) -> bool {
-        if self.state.move_history.is_empty() {
-            return false;
-        }
-        let mut moves = self.state.move_history.clone();
-        moves.pop();
-        self.state = GameState::new(self.initial_node_count);
-        for mov in moves {
-            self.state.apply_move(mov);
-        }
-        true
+        self.state.undo_move()
     }
 
     #[wasm_bindgen]
@@ -195,9 +171,37 @@ impl SproutsGame {
     #[wasm_bindgen]
     pub fn is_game_over(&mut self) -> bool {
         let classification = node_classifier::classify_nodes(&mut self.state);
-        classification.active_nodes.is_empty()
-            || (classification.legal_pairs.is_empty()
-                && classification.self_loop_candidates.is_empty())
+        if classification.active_nodes.is_empty() {
+            return true;
+        }
+        if classification.legal_pairs.is_empty()
+            && classification.self_loop_candidates.is_empty()
+        {
+            return true;
+        }
+
+        // The classifier says moves exist — but it only checks spatial
+        // connectivity, not whether a valid path can actually be drawn.
+        // Verify at least one concrete path exists to avoid hanging the game
+        // when all "legal" pairs are blocked by tight geometry.
+        for (from_id, to_id) in &classification.legal_pairs {
+            if pathfinding::find_path_on_skeleton(&self.state, *from_id, *to_id).is_some() {
+                return false;
+            }
+            if pathfinding::find_path_relaxed(&self.state, *from_id, *to_id).is_some() {
+                return false;
+            }
+        }
+        for &node_id in &classification.self_loop_candidates {
+            if pathfinding::find_self_loop_on_skeleton(&self.state, node_id).is_some() {
+                return false;
+            }
+            if pathfinding::generate_geometric_self_loop(&self.state, node_id).is_some() {
+                return false;
+            }
+        }
+        // No concrete path found for any pair — game is over
+        true
     }
 
     #[wasm_bindgen]
@@ -220,113 +224,4 @@ impl SproutsGame {
         validation::validate_new_node_placement(&polyline, &new_node_pos, &self.state.nodes).is_ok()
     }
 
-    #[wasm_bindgen]
-    pub fn get_skeleton_debug(&mut self) -> Vec<u8> {
-        if !self.state.skeleton_cache.is_valid {
-            let (skeleton, distance_transform) = morphology::generate_skeleton(&self.state);
-            self.state.skeleton_cache.skeleton = skeleton;
-            self.state.skeleton_cache.distance_transform = distance_transform;
-
-            let (labels, components) =
-                components::label_components(&self.state.skeleton_cache.skeleton, &self.state);
-            self.state.skeleton_cache.component_labels = labels;
-            self.state.skeleton_cache.components = components;
-
-            self.state.skeleton_cache.is_valid = true;
-        }
-
-        let skeleton = &self.state.skeleton_cache.skeleton;
-        let bs = types::BOARD_SIZE;
-        let mut data = vec![0u8; bs * bs * 4];
-
-        for y in 0..bs {
-            for x in 0..bs {
-                let idx = (y * bs + x) * 4;
-                if skeleton.data[y * bs + x] {
-                    data[idx] = 255;
-                    data[idx + 1] = 255;
-                    data[idx + 2] = 255;
-                    data[idx + 3] = 255;
-                } else {
-                    data[idx + 3] = 0;
-                }
-            }
-        }
-
-        data
-    }
-
-    #[wasm_bindgen]
-    pub fn get_classification_debug(&mut self) -> Vec<f64> {
-        let classification = node_classifier::classify_nodes(&mut self.state);
-
-        let mut data = Vec::new();
-
-        data.push(classification.active_nodes.len() as f64);
-        for node_id in &classification.active_nodes {
-            data.push(*node_id as f64);
-        }
-
-        data.push(classification.legal_pairs.len() as f64);
-        for (from, to) in &classification.legal_pairs {
-            data.push(*from as f64);
-            data.push(*to as f64);
-        }
-
-        data.push(classification.self_loop_candidates.len() as f64);
-        for node_id in &classification.self_loop_candidates {
-            data.push(*node_id as f64);
-        }
-
-        data
-    }
-
-    #[wasm_bindgen]
-    pub fn test_pair(&mut self, from_node: usize, to_node: usize) -> String {
-        match pathfinding::find_path_on_skeleton(&self.state, from_node, to_node) {
-            Some(path) => {
-                if path.len() < 2 {
-                    return format!("Path too short: {} points", path.len());
-                }
-
-                let new_node_pos = ai::find_optimal_node_placement(&path, &self.state.nodes);
-
-                let mut min_node_dist = f64::INFINITY;
-                for node in &self.state.nodes {
-                    let dx = new_node_pos.x - node.position.x;
-                    let dy = new_node_pos.y - node.position.y;
-                    let dist = (dx * dx + dy * dy).sqrt();
-                    min_node_dist = min_node_dist.min(dist);
-                }
-
-                let mov = types::Move {
-                    from_node,
-                    to_node,
-                    polyline: path.clone(),
-                    new_node_pos,
-                    player: self.state.current_player,
-                };
-
-                match validation::validate_ai_move(&self.state, &mov) {
-                    Ok(_) => format!("Valid! (path: {} pts, placement dist: {:.1}px)", path.len(), min_node_dist),
-                    Err(e) => format!("Failed: {} (path: {} pts, placement dist: {:.1}px)", e, path.len(), min_node_dist),
-                }
-            }
-            None => "No path found on skeleton".to_string(),
-        }
-    }
-
-    #[wasm_bindgen]
-    pub fn find_path(&mut self, from_node: usize, to_node: usize) -> Vec<f64> {
-        if let Some(path) = pathfinding::find_path_on_skeleton(&self.state, from_node, to_node) {
-            let mut data = Vec::new();
-            for point in path {
-                data.push(point.x);
-                data.push(point.y);
-            }
-            data
-        } else {
-            vec![]
-        }
-    }
 }

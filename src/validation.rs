@@ -1,9 +1,10 @@
 use crate::geometry::{closest_point_on_polyline, distance, polyline_length, segments_intersect, smooth_path_chaikin};
-use crate::types::{GameState, Move, Point};
-
-const MIN_PATH_LENGTH: f64 = 20.0;
-const MIN_NODE_SPACING: f64 = 20.0;
-const MIN_NODE_SPACING_AI: f64 = 16.0;
+use crate::types::{
+    GameState, Move, Point,
+    MIN_PATH_LENGTH, MIN_NODE_SPACING, MIN_NODE_SPACING_AI,
+    MIN_PATH_CLEARANCE, MIN_PATH_CLEARANCE_AI,
+    HUMAN_INTERSECTION_TOLERANCE, AI_INTERSECTION_TOLERANCE,
+};
 
 macro_rules! debug_log {
     ($($arg:tt)*) => {
@@ -30,6 +31,7 @@ pub fn validate_ai_move(state: &GameState, mov: &Move) -> Result<(), String> {
 }
 
 fn validate_move_internal(state: &GameState, mov: &Move, is_ai_move: bool) -> Result<(), String> {
+    #[cfg(feature = "debug_validation")]
     let mode = if is_ai_move { "AI" } else { "HUMAN" };
     let from_node = state.find_node(mov.from_node).ok_or("Source node not found")?;
     let to_node = state.find_node(mov.to_node).ok_or("Target node not found")?;
@@ -76,7 +78,7 @@ fn validate_move_internal(state: &GameState, mov: &Move, is_ai_move: bool) -> Re
         smooth_path_chaikin(&mov.polyline, 2)
     };
 
-    let min_clearance = if is_ai_move { 8.0 } else { 10.0 };
+    let min_clearance = if is_ai_move { MIN_PATH_CLEARANCE_AI } else { MIN_PATH_CLEARANCE };
     for node in &state.nodes {
         if node.id == mov.from_node || node.id == mov.to_node { continue; }
         let (_, dist) = closest_point_on_polyline(&path_for_clearance, &node.position);
@@ -101,8 +103,8 @@ fn validate_move_internal(state: &GameState, mov: &Move, is_ai_move: bool) -> Re
         let mut geometrically_shares_node = shares_node;
         if !shares_node {
             for node in &state.nodes {
-                let on_move_path = path_for_intersect.iter().any(|p| p.distance_to(&node.position) < 10.0);
-                let on_line_path = line.polyline.iter().any(|p| p.distance_to(&node.position) < 10.0);
+                let on_move_path = path_for_intersect.iter().any(|p| p.distance_to(&node.position) < MIN_PATH_CLEARANCE);
+                let on_line_path = line.polyline.iter().any(|p| p.distance_to(&node.position) < MIN_PATH_CLEARANCE);
                 if on_move_path && on_line_path {
                     geometrically_shares_node = true;
                     debug_log!("[{}]   Line {}: geometrically shares node {} at ({:.1},{:.1})",
@@ -133,8 +135,7 @@ fn validate_move_internal(state: &GameState, mov: &Move, is_ai_move: bool) -> Re
                             min_dist_to_any_node = min_dist_to_any_node.min(dist);
                         }
 
-                        // AI must be right at the node (5px), humans get tolerance (30px)
-                        let tolerance = if is_ai_move { 5.0 } else { 30.0 };
+                        let tolerance = if is_ai_move { AI_INTERSECTION_TOLERANCE } else { HUMAN_INTERSECTION_TOLERANCE };
                         debug_log!("    Min dist to node: {:.1}px, tolerance: {:.1}px", min_dist_to_any_node, tolerance);
 
                         if min_dist_to_any_node >= tolerance {
@@ -203,4 +204,146 @@ pub fn validate_new_node_placement(polyline: &[Point], new_node_pos: &Point, exi
     }
     debug_log!("[PLACEMENT] Placement valid at {:.0}%", position_ratio * 100.0);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::*;
+
+    fn p(x: f64, y: f64) -> Point {
+        Point::new(x, y)
+    }
+
+    /// Build a simple 2-node game and a valid-looking move between them.
+    fn setup_valid_move() -> (GameState, Move) {
+        let mut gs = GameState::with_board_size(2, 1000);
+        // Place nodes far apart so we have room
+        gs.nodes[0].position = p(200.0, 500.0);
+        gs.nodes[1].position = p(800.0, 500.0);
+
+        let polyline: Vec<Point> = (0..=20)
+            .map(|i| {
+                let t = i as f64 / 20.0;
+                p(200.0 + t * 600.0, 500.0 + 80.0 * (t * std::f64::consts::PI).sin())
+            })
+            .collect();
+        let new_node_pos = p(500.0, 500.0 + 80.0 * (0.5 * std::f64::consts::PI).sin());
+
+        let mov = Move {
+            from_node: 0,
+            to_node: 1,
+            polyline,
+            new_node_pos,
+            player: Player::Human,
+        };
+        (gs, mov)
+    }
+
+    #[test]
+    fn valid_move_passes() {
+        let (gs, mov) = setup_valid_move();
+        assert!(validate_move(&gs, &mov).is_ok());
+    }
+
+    #[test]
+    fn connection_limit_rejected() {
+        let (mut gs, mut mov) = setup_valid_move();
+        // Saturate node 0 to 3 connections
+        gs.nodes[0].connection_count = 3;
+        mov.from_node = 0;
+        mov.to_node = 1;
+        let result = validate_move(&gs, &mov);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("3 connections"));
+    }
+
+    #[test]
+    fn self_loop_needs_low_connections() {
+        let (mut gs, _) = setup_valid_move();
+        gs.nodes[0].connection_count = 2; // needs <= 1 for self-loop
+
+        let polyline: Vec<Point> = (0..=20)
+            .map(|i| {
+                let t = i as f64 / 20.0;
+                let angle = t * 2.0 * std::f64::consts::PI;
+                p(200.0 + 50.0 * angle.cos(), 500.0 + 50.0 * angle.sin())
+            })
+            .collect();
+
+        let mov = Move {
+            from_node: 0,
+            to_node: 0,
+            polyline,
+            new_node_pos: p(250.0, 500.0),
+            player: Player::Human,
+        };
+        let result = validate_move(&gs, &mov);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("self-loop"));
+    }
+
+    #[test]
+    fn path_too_short_rejected() {
+        let (gs, _) = setup_valid_move();
+        // Very short path (< MIN_PATH_LENGTH = 20px)
+        let mov = Move {
+            from_node: 0,
+            to_node: 1,
+            polyline: vec![p(200.0, 500.0), p(205.0, 500.0)],
+            new_node_pos: p(202.5, 500.0),
+            player: Player::Human,
+        };
+        let result = validate_move(&gs, &mov);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("too short"));
+    }
+
+    #[test]
+    fn new_node_too_close_rejected() {
+        let (gs, _) = setup_valid_move();
+        // Place new node right on top of node 0
+        let polyline: Vec<Point> = (0..=20)
+            .map(|i| {
+                let t = i as f64 / 20.0;
+                p(200.0 + t * 600.0, 500.0 + 80.0 * (t * std::f64::consts::PI).sin())
+            })
+            .collect();
+        let mov = Move {
+            from_node: 0,
+            to_node: 1,
+            polyline,
+            new_node_pos: p(201.0, 500.0), // very close to node 0 at (200, 500)
+            player: Player::Human,
+        };
+        let result = validate_move(&gs, &mov);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("too close"));
+    }
+
+    #[test]
+    fn path_clearance_too_close_to_node() {
+        let (mut gs, _) = setup_valid_move();
+        // Add a third node right in the path
+        gs.nodes.push(Node::new(2, p(500.0, 502.0)));
+        gs.next_node_id = 3;
+
+        // Path goes very close to node 2
+        let polyline: Vec<Point> = (0..=40)
+            .map(|i| {
+                let t = i as f64 / 40.0;
+                p(200.0 + t * 600.0, 500.0) // straight line at y=500, node 2 at y=502
+            })
+            .collect();
+        let mov = Move {
+            from_node: 0,
+            to_node: 1,
+            polyline,
+            new_node_pos: p(400.0, 500.0),
+            player: Player::Human,
+        };
+        let result = validate_move(&gs, &mov);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("too close"));
+    }
 }

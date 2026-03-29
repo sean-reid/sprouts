@@ -5,11 +5,6 @@ function getArrayF64FromWasm0(ptr, len) {
     return getFloat64ArrayMemory0().subarray(ptr / 8, ptr / 8 + len);
 }
 
-function getArrayU8FromWasm0(ptr, len) {
-    ptr = ptr >>> 0;
-    return getUint8ArrayMemory0().subarray(ptr / 1, ptr / 1 + len);
-}
-
 let cachedFloat64ArrayMemory0 = null;
 function getFloat64ArrayMemory0() {
     if (cachedFloat64ArrayMemory0 === null || cachedFloat64ArrayMemory0.byteLength === 0) {
@@ -59,6 +54,13 @@ const SproutsGameFinalization = (typeof FinalizationRegistry === 'undefined')
     : new FinalizationRegistry(ptr => wasm.__wbg_sproutsgame_free(ptr >>> 0, 1));
 
 export class SproutsGame {
+    static __wrap(ptr) {
+        ptr = ptr >>> 0;
+        const obj = Object.create(SproutsGame.prototype);
+        obj.__wbg_ptr = ptr;
+        SproutsGameFinalization.register(obj, obj.__wbg_ptr, obj);
+        return obj;
+    }
     __destroy_into_raw() {
         const ptr = this.__wbg_ptr;
         this.__wbg_ptr = 0;
@@ -131,29 +133,6 @@ export class SproutsGame {
         return v1;
     }
     /**
-     * @param {number} from_node
-     * @param {number} to_node
-     * @param {Float64Array} path_data
-     * @param {number} new_node_x
-     * @param {number} new_node_y
-     * @returns {boolean}
-     */
-    validate_move_js(from_node, to_node, path_data, new_node_x, new_node_y) {
-        const ptr0 = passArrayF64ToWasm0(path_data, wasm.__wbindgen_malloc);
-        const len0 = WASM_VECTOR_LEN;
-        const ret = wasm.sproutsgame_validate_move_js(this.__wbg_ptr, from_node, to_node, ptr0, len0, new_node_x, new_node_y);
-        return ret !== 0;
-    }
-    /**
-     * @returns {Uint8Array}
-     */
-    get_skeleton_debug() {
-        const ret = wasm.sproutsgame_get_skeleton_debug(this.__wbg_ptr);
-        var v1 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
-        wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
-        return v1;
-    }
-    /**
      * @param {Float64Array} path_data
      * @param {number} new_node_x
      * @param {number} new_node_y
@@ -166,13 +145,13 @@ export class SproutsGame {
         return ret !== 0;
     }
     /**
-     * @returns {Float64Array}
+     * @param {number} initial_nodes
+     * @param {number} board_size
+     * @returns {SproutsGame}
      */
-    get_classification_debug() {
-        const ret = wasm.sproutsgame_get_classification_debug(this.__wbg_ptr);
-        var v1 = getArrayF64FromWasm0(ret[0], ret[1]).slice();
-        wasm.__wbindgen_free(ret[0], ret[1] * 8, 8);
-        return v1;
+    static new_with_board_size(initial_nodes, board_size) {
+        const ret = wasm.sproutsgame_new_with_board_size(initial_nodes, board_size);
+        return SproutsGame.__wrap(ret);
     }
     /**
      * @param {Float64Array} path_data
@@ -198,23 +177,11 @@ export class SproutsGame {
         return this;
     }
     /**
-     * Undo the last move by replaying history minus the final move.
      * @returns {boolean}
      */
     undo() {
         const ret = wasm.sproutsgame_undo(this.__wbg_ptr);
         return ret !== 0;
-    }
-    /**
-     * @param {number} from_node
-     * @param {number} to_node
-     * @returns {Float64Array}
-     */
-    find_path(from_node, to_node) {
-        const ret = wasm.sproutsgame_find_path(this.__wbg_ptr, from_node, to_node);
-        var v1 = getArrayF64FromWasm0(ret[0], ret[1]).slice();
-        wasm.__wbindgen_free(ret[0], ret[1] * 8, 8);
-        return v1;
     }
     /**
      * Get current game state as Float64Array.
@@ -226,23 +193,6 @@ export class SproutsGame {
         var v1 = getArrayF64FromWasm0(ret[0], ret[1]).slice();
         wasm.__wbindgen_free(ret[0], ret[1] * 8, 8);
         return v1;
-    }
-    /**
-     * @param {number} from_node
-     * @param {number} to_node
-     * @returns {string}
-     */
-    test_pair(from_node, to_node) {
-        let deferred1_0;
-        let deferred1_1;
-        try {
-            const ret = wasm.sproutsgame_test_pair(this.__wbg_ptr, from_node, to_node);
-            deferred1_0 = ret[0];
-            deferred1_1 = ret[1];
-            return getStringFromWasm0(ret[0], ret[1]);
-        } finally {
-            wasm.__wbindgen_free(deferred1_0, deferred1_1, 1);
-        }
     }
 }
 if (Symbol.dispose) SproutsGame.prototype[Symbol.dispose] = SproutsGame.prototype.free;

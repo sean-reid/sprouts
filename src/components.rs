@@ -1,63 +1,70 @@
-use crate::types::{BoundingBox, ComponentMetadata, GameState, Grid, PixelCoord};
+use crate::types::{BoundingBox, ComponentMetadata, GameState, Grid};
 use std::collections::{HashMap, HashSet};
 
+/// Flat-array union-find for efficient pixel-level component labeling.
 pub struct UnionFind {
-    parent: HashMap<PixelCoord, PixelCoord>,
-    rank: HashMap<PixelCoord, usize>,
+    parent: Vec<u32>,
+    rank: Vec<u8>,
+    width: usize,
 }
 
 impl UnionFind {
-    pub fn new() -> Self {
+    pub fn new(width: usize, height: usize) -> Self {
         Self {
-            parent: HashMap::new(),
-            rank: HashMap::new(),
+            parent: vec![u32::MAX; width * height],
+            rank: vec![0; width * height],
+            width,
         }
     }
 
-    pub fn make_set(&mut self, coord: PixelCoord) {
-        self.parent.insert(coord, coord);
-        self.rank.insert(coord, 0);
+    pub fn make_set(&mut self, x: usize, y: usize) {
+        let i = y * self.width + x;
+        self.parent[i] = i as u32;
     }
 
-    pub fn find(&mut self, coord: PixelCoord) -> Option<PixelCoord> {
-        if !self.parent.contains_key(&coord) {
+    pub fn find(&mut self, x: usize, y: usize) -> Option<u32> {
+        let i = y * self.width + x;
+        if self.parent[i] == u32::MAX {
             return None;
         }
-
-        let parent = *self.parent.get(&coord)?;
-        if parent != coord {
-            let root = self.find(parent)?;
-            self.parent.insert(coord, root);
-            Some(root)
-        } else {
-            Some(coord)
-        }
+        let root = self.find_by_idx(i);
+        Some(root)
     }
 
-    pub fn union(&mut self, a: PixelCoord, b: PixelCoord) {
-        let root_a = match self.find(a) {
-            Some(r) => r,
-            None => return,
-        };
-        let root_b = match self.find(b) {
-            Some(r) => r,
-            None => return,
-        };
+    fn find_by_idx(&mut self, i: usize) -> u32 {
+        // Iterative path compression (avoids stack overflow on long chains)
+        let mut root = i;
+        while self.parent[root] != root as u32 {
+            root = self.parent[root] as usize;
+        }
+        let mut curr = i;
+        while curr != root {
+            let next = self.parent[curr] as usize;
+            self.parent[curr] = root as u32;
+            curr = next;
+        }
+        root as u32
+    }
 
-        if root_a == root_b {
+    pub fn union(&mut self, x1: usize, y1: usize, x2: usize, y2: usize) {
+        let r1 = match self.find(x1, y1) {
+            Some(r) => r as usize,
+            None => return,
+        };
+        let r2 = match self.find(x2, y2) {
+            Some(r) => r as usize,
+            None => return,
+        };
+        if r1 == r2 {
             return;
         }
-
-        let rank_a = *self.rank.get(&root_a).unwrap_or(&0);
-        let rank_b = *self.rank.get(&root_b).unwrap_or(&0);
-
-        if rank_a < rank_b {
-            self.parent.insert(root_a, root_b);
-        } else if rank_a > rank_b {
-            self.parent.insert(root_b, root_a);
+        if self.rank[r1] < self.rank[r2] {
+            self.parent[r1] = r2 as u32;
+        } else if self.rank[r1] > self.rank[r2] {
+            self.parent[r2] = r1 as u32;
         } else {
-            self.parent.insert(root_b, root_a);
-            self.rank.insert(root_a, rank_a + 1);
+            self.parent[r2] = r1 as u32;
+            self.rank[r1] += 1;
         }
     }
 }
@@ -65,65 +72,57 @@ impl UnionFind {
 pub fn label_components(
     skeleton: &Grid<bool>,
     state: &GameState,
-) -> (HashMap<PixelCoord, usize>, HashMap<usize, ComponentMetadata>) {
-    let mut uf = UnionFind::new();
+) -> (Grid<u32>, HashMap<usize, ComponentMetadata>) {
+    let w = skeleton.width;
+    let h = skeleton.height;
+    let mut uf = UnionFind::new(w, h);
 
     // Create sets for all skeleton pixels
-    for y in 0..skeleton.height {
-        for x in 0..skeleton.width {
-            if skeleton.data[y * skeleton.width + x] {
-                let coord = PixelCoord::new(x as i32, y as i32);
-                uf.make_set(coord);
+    for y in 0..h {
+        for x in 0..w {
+            if skeleton.data[y * w + x] {
+                uf.make_set(x, y);
             }
         }
     }
 
-    // Union adjacent skeleton pixels (8-connectivity)
-    for y in 0..skeleton.height {
-        for x in 0..skeleton.width {
-            if !skeleton.data[y * skeleton.width + x] {
+    // Union adjacent skeleton pixels (8-connectivity, only check already-visited neighbors)
+    for y in 0..h {
+        for x in 0..w {
+            if !skeleton.data[y * w + x] {
                 continue;
             }
-
-            let current = PixelCoord::new(x as i32, y as i32);
-
-            // Check 4 already-visited neighbors (top-left, top, top-right, left)
-            let neighbors = [
-                PixelCoord::new(x as i32 - 1, y as i32 - 1),
-                PixelCoord::new(x as i32, y as i32 - 1),
-                PixelCoord::new(x as i32 + 1, y as i32 - 1),
-                PixelCoord::new(x as i32 - 1, y as i32),
-            ];
-
-            for neighbor in &neighbors {
-                if skeleton.in_bounds(neighbor.x, neighbor.y)
-                    && *skeleton.get(neighbor.x, neighbor.y).unwrap()
-                {
-                    uf.union(current, *neighbor);
-                }
+            if x > 0 && y > 0 && skeleton.data[(y - 1) * w + (x - 1)] {
+                uf.union(x, y, x - 1, y - 1);
+            }
+            if y > 0 && skeleton.data[(y - 1) * w + x] {
+                uf.union(x, y, x, y - 1);
+            }
+            if x + 1 < w && y > 0 && skeleton.data[(y - 1) * w + (x + 1)] {
+                uf.union(x, y, x + 1, y - 1);
+            }
+            if x > 0 && skeleton.data[y * w + (x - 1)] {
+                uf.union(x, y, x - 1, y);
             }
         }
     }
 
-    // Build component mapping
-    let mut component_labels: HashMap<PixelCoord, usize> = HashMap::new();
-    let mut root_to_id: HashMap<PixelCoord, usize> = HashMap::new();
-    let mut next_id = 0;
+    // Build component labels grid (0 = not skeleton, 1+ = component ID)
+    let mut component_labels = Grid::new(w, h, 0u32);
+    let mut root_to_id: HashMap<u32, usize> = HashMap::new();
+    let mut next_id = 0usize;
 
-    for y in 0..skeleton.height {
-        for x in 0..skeleton.width {
-            if !skeleton.data[y * skeleton.width + x] {
+    for y in 0..h {
+        for x in 0..w {
+            if !skeleton.data[y * w + x] {
                 continue;
             }
-
-            let coord = PixelCoord::new(x as i32, y as i32);
-            if let Some(root) = uf.find(coord) {
+            if let Some(root) = uf.find(x, y) {
                 let id = *root_to_id.entry(root).or_insert_with(|| {
-                    let id = next_id;
                     next_id += 1;
-                    id
+                    next_id // 1-based
                 });
-                component_labels.insert(coord, id);
+                component_labels.set(x as i32, y as i32, id as u32);
             }
         }
     }
@@ -131,31 +130,37 @@ pub fn label_components(
     // Compute component metadata
     let mut components: HashMap<usize, ComponentMetadata> = HashMap::new();
 
-    for (coord, &comp_id) in &component_labels {
-        let meta = components.entry(comp_id).or_insert_with(|| ComponentMetadata {
-            pixel_count: 0,
-            accessible_nodes: HashSet::new(),
-            bounding_box: BoundingBox::new(),
-            max_internal_distance: 0.0,
-        });
-
-        meta.pixel_count += 1;
-        meta.bounding_box.update(coord.x, coord.y);
+    for y in 0..h {
+        for x in 0..w {
+            let comp_id = component_labels.data[y * w + x] as usize;
+            if comp_id == 0 {
+                continue;
+            }
+            let meta = components.entry(comp_id).or_insert_with(|| ComponentMetadata {
+                pixel_count: 0,
+                accessible_nodes: HashSet::new(),
+                bounding_box: BoundingBox::new(),
+                max_internal_distance: 0.0,
+            });
+            meta.pixel_count += 1;
+            meta.bounding_box.update(x as i32, y as i32);
+        }
     }
 
     // Assign nodes to the largest nearby component.
-    // bridge_active_components ensures active nodes share one connected skeleton,
-    // but small unbridged fragments can exist closer to a node than the main
-    // skeleton.  Always prefer the largest component to avoid mis-assignment.
     for node in &state.nodes {
         let node_x = node.position.x.round() as i32;
         let node_y = node.position.y.round() as i32;
 
+        let board_size_f = state.board_size as f64;
         let dist_to_left = node.position.x;
-        let dist_to_right = crate::types::BOARD_SIZE as f64 - node.position.x;
+        let dist_to_right = board_size_f - node.position.x;
         let dist_to_top = node.position.y;
-        let dist_to_bottom = crate::types::BOARD_SIZE as f64 - node.position.y;
-        let min_border_dist = dist_to_left.min(dist_to_right).min(dist_to_top).min(dist_to_bottom);
+        let dist_to_bottom = board_size_f - node.position.y;
+        let min_border_dist = dist_to_left
+            .min(dist_to_right)
+            .min(dist_to_top)
+            .min(dist_to_bottom);
 
         let initial_search_radius: i32 = if min_border_dist < 15.0 {
             40
@@ -165,14 +170,8 @@ pub fn label_components(
             20
         };
 
-        let max_search_radius: i32 = if min_border_dist < 20.0 {
-            400
-        } else {
-            300
-        };
+        let max_search_radius: i32 = if min_border_dist < 20.0 { 400 } else { 300 };
 
-        // Collect all components found within the search radius, tracking the
-        // closest distance to each.
         let mut found_components: HashMap<usize, i32> = HashMap::new();
 
         // Phase 1: initial search box
@@ -180,9 +179,13 @@ pub fn label_components(
             for dx in -initial_search_radius..=initial_search_radius {
                 let px = node_x + dx;
                 let py = node_y + dy;
-                if let Some(&comp_id) = component_labels.get(&PixelCoord::new(px, py)) {
+                let comp_id = component_labels.get(px, py).copied().unwrap_or(0) as usize;
+                if comp_id > 0 {
                     let dist = dx.abs().max(dy.abs());
-                    found_components.entry(comp_id).and_modify(|d| *d = (*d).min(dist)).or_insert(dist);
+                    found_components
+                        .entry(comp_id)
+                        .and_modify(|d| *d = (*d).min(dist))
+                        .or_insert(dist);
                 }
             }
         }
@@ -192,40 +195,51 @@ pub fn label_components(
             for radius in (initial_search_radius + 1)..=max_search_radius {
                 for dy in -radius..=radius {
                     for dx in -radius..=radius {
-                        if dx.abs() != radius && dy.abs() != radius { continue; }
+                        if dx.abs() != radius && dy.abs() != radius {
+                            continue;
+                        }
                         let px = node_x + dx;
                         let py = node_y + dy;
-                        if let Some(&comp_id) = component_labels.get(&PixelCoord::new(px, py)) {
+                        let comp_id =
+                            component_labels.get(px, py).copied().unwrap_or(0) as usize;
+                        if comp_id > 0 {
                             found_components.entry(comp_id).or_insert(radius);
                         }
                     }
                 }
-                if !found_components.is_empty() { break; }
+                if !found_components.is_empty() {
+                    break;
+                }
             }
         }
 
         // Pick the best component: prefer the largest among those within
         // reasonable distance of the closest hit.
         let best_comp = if found_components.is_empty() {
-            // Fallback: closest component by Euclidean distance
+            // Fallback: scan grid for closest component pixel
             let mut min_dist = f64::INFINITY;
             let mut closest = None;
-            for (coord, &comp_id) in &component_labels {
-                let dx = coord.x as f64 - node.position.x;
-                let dy = coord.y as f64 - node.position.y;
-                let dist = (dx * dx + dy * dy).sqrt();
-                if dist < min_dist {
-                    min_dist = dist;
-                    closest = Some(comp_id);
+            for y in 0..h {
+                for x in 0..w {
+                    let comp_id = component_labels.data[y * w + x] as usize;
+                    if comp_id == 0 {
+                        continue;
+                    }
+                    let dx = x as f64 - node.position.x;
+                    let dy = y as f64 - node.position.y;
+                    let dist = (dx * dx + dy * dy).sqrt();
+                    if dist < min_dist {
+                        min_dist = dist;
+                        closest = Some(comp_id);
+                    }
                 }
             }
             closest
         } else {
-            // Among found components, pick the largest one that's within
-            // 2x the closest distance (prefer size over proximity).
             let min_dist = found_components.values().copied().min().unwrap_or(0);
             let threshold = (min_dist * 2).max(initial_search_radius);
-            found_components.iter()
+            found_components
+                .iter()
                 .filter(|(_, &dist)| dist <= threshold)
                 .max_by_key(|(comp_id, _)| {
                     components.get(comp_id).map(|m| m.pixel_count).unwrap_or(0)
@@ -240,26 +254,13 @@ pub fn label_components(
         }
     }
 
-    // Compute max internal distances for self-loop detection
-    for (comp_id, meta) in &mut components {
+    // Compute max internal distances using bounding box diagonal (O(1) per component)
+    for (_comp_id, meta) in &mut components {
         if meta.accessible_nodes.len() == 1 {
-            // Single node component - compute max internal distance
-            let pixels: Vec<_> = component_labels
-                .iter()
-                .filter(|(_, &id)| id == *comp_id)
-                .map(|(coord, _)| *coord)
-                .collect();
-
-            let mut max_dist: f64 = 0.0;
-            for i in 0..pixels.len() {
-                for j in i + 1..pixels.len() {
-                    let dx = (pixels[i].x - pixels[j].x) as f64;
-                    let dy = (pixels[i].y - pixels[j].y) as f64;
-                    let dist = (dx * dx + dy * dy).sqrt();
-                    max_dist = max_dist.max(dist);
-                }
-            }
-            meta.max_internal_distance = max_dist;
+            let bb = &meta.bounding_box;
+            let dx = (bb.max_x - bb.min_x) as f64;
+            let dy = (bb.max_y - bb.min_y) as f64;
+            meta.max_internal_distance = (dx * dx + dy * dy).sqrt();
         }
     }
 

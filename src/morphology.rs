@@ -1,25 +1,28 @@
-use crate::types::{GameState, Grid, Point, BOARD_SIZE};
+use crate::geometry::point_to_segment_distance;
+use crate::types::{GameState, Grid, Line, Point, LINE_RASTER_WIDTH, NODE_PROTECTION_RADIUS};
 use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
 
-const LINE_WIDTH: f64 = 3.0;
-const DILATION_RADIUS: f64 = 10.0;
-const BS: usize = BOARD_SIZE;
-const BS_I: i32 = BOARD_SIZE as i32;
-const BS_F: f64 = BOARD_SIZE as f64;
-const BM: usize = BOARD_SIZE - 1; // board max index
+// Adaptive dilation: fraction of local corridor width to dilate from each side.
+// 0.35 means 35% from each wall, leaving 30% for the skeleton in the center.
+const DILATION_FRACTION: f64 = 0.35;
+const MIN_DILATION: f64 = 8.0;   // always keep paths clear of obstacles
+const MAX_DILATION: f64 = 50.0;  // cap in huge open areas
+const BLOCK_SIZE: usize = 25;    // resolution for local space estimation
 
 pub fn generate_skeleton(state: &GameState) -> (Grid<bool>, Grid<u8>) {
-    let mut obstacle_map = Grid::new(BS, BS, false);
+    let bs = state.board_size;
+    let bs_f = bs as f64;
+    let mut obstacle_map = Grid::new(bs, bs, false);
     for line in &state.lines {
-        rasterize_polyline(&mut obstacle_map, &line.polyline, LINE_WIDTH);
+        rasterize_polyline(&mut obstacle_map, &line.polyline, LINE_RASTER_WIDTH);
     }
-    add_border_obstacles(&mut obstacle_map, &state.lines, &state.nodes);
-    let mut protected_mask = Grid::new(BS, BS, false);
+    add_border_obstacles(&mut obstacle_map, &state.lines, &state.nodes, bs);
+    let mut protected_mask = Grid::new(bs, bs, false);
     for node in &state.nodes {
         if node.connection_count >= 3 { continue; }
         let node_x = node.position.x as i32;
         let node_y = node.position.y as i32;
-        let node_radius = 6;
+        let node_radius = NODE_PROTECTION_RADIUS;
         for dy in -node_radius..=node_radius {
             for dx in -node_radius..=node_radius {
                 if dx * dx + dy * dy <= node_radius * node_radius {
@@ -37,7 +40,7 @@ pub fn generate_skeleton(state: &GameState) -> (Grid<bool>, Grid<u8>) {
                 for step in 1..=15 {
                     let x = node.position.x + dx * step as f64 * 2.0;
                     let y = node.position.y + dy * step as f64 * 2.0;
-                    if x < 0.0 || x >= BS_F || y < 0.0 || y >= BS_F { break; }
+                    if x < 0.0 || x >= bs_f || y < 0.0 || y >= bs_f { break; }
                     segment.push(Point::new(x, y));
                 }
                 rasterize_corridor(&mut protected_mask, &segment, 6.0);
@@ -69,7 +72,7 @@ pub fn generate_skeleton(state: &GameState) -> (Grid<bool>, Grid<u8>) {
                         for step in 1..=15 {
                             let x = node.position.x + px * step as f64 * 2.0;
                             let y = node.position.y + py * step as f64 * 2.0;
-                            if x < 0.0 || x >= BS_F || y < 0.0 || y >= BS_F { break; }
+                            if x < 0.0 || x >= bs_f || y < 0.0 || y >= bs_f { break; }
                             segment.push(Point::new(x, y));
                         }
                         rasterize_corridor(&mut protected_mask, &segment, 6.0);
@@ -78,16 +81,69 @@ pub fn generate_skeleton(state: &GameState) -> (Grid<bool>, Grid<u8>) {
             }
         }
     }
-    let mut dilated = Grid::new(BS, BS, false);
-    for y in 0..BS {
-        for x in 0..BS {
-            if *protected_mask.get(x as i32, y as i32).unwrap_or(&false) {
-                dilated.set(x as i32, y as i32, false);
-            } else if *obstacle_map.get(x as i32, y as i32).unwrap_or(&false) {
-                dilate_pixel(&mut dilated, x as i32, y as i32, DILATION_RADIUS);
+    // --- Adaptive dilation ---
+    // Instead of a fixed radius, dilate proportionally to local corridor width.
+    // Wide open areas get thick dilation (skeleton forced to center),
+    // narrow corridors get thin dilation (corridor stays passable).
+
+    // Step 1: Distance transform of raw obstacles (before dilation)
+    let raw_dt = chamfer_distance_transform(&obstacle_map);
+
+    // Step 2: Block-level max pooling to estimate local corridor width.
+    // Each block's max dt value ≈ half the width of the widest corridor in that region.
+    let blocks_x = (bs + BLOCK_SIZE - 1) / BLOCK_SIZE;
+    let blocks_y = (bs + BLOCK_SIZE - 1) / BLOCK_SIZE;
+    let mut block_max = vec![0u8; blocks_x * blocks_y];
+    for y in 0..bs {
+        for x in 0..bs {
+            let val = raw_dt.data[y * bs + x];
+            let bi = (y / BLOCK_SIZE) * blocks_x + (x / BLOCK_SIZE);
+            block_max[bi] = block_max[bi].max(val);
+        }
+    }
+
+    // Smooth block_max with a 1-ring max to avoid sharp threshold discontinuities
+    let mut smooth_block_max = block_max.clone();
+    for by in 0..blocks_y {
+        for bx in 0..blocks_x {
+            let mut m = block_max[by * blocks_x + bx];
+            if bx > 0 { m = m.max(block_max[by * blocks_x + (bx - 1)]); }
+            if bx + 1 < blocks_x { m = m.max(block_max[by * blocks_x + (bx + 1)]); }
+            if by > 0 { m = m.max(block_max[(by - 1) * blocks_x + bx]); }
+            if by + 1 < blocks_y { m = m.max(block_max[(by + 1) * blocks_x + bx]); }
+            smooth_block_max[by * blocks_x + bx] = m;
+        }
+    }
+
+    // Step 3: Adaptive dilation — block pixel if it's within a fraction of
+    // the local corridor width from the nearest obstacle.
+    let mut dilated = Grid::new(bs, bs, false);
+    for y in 0..bs {
+        for x in 0..bs {
+            let raw_dist = raw_dt.data[y * bs + x] as f64;
+            if raw_dist == 0.0 {
+                // Obstacle pixel itself — always blocked
+                dilated.data[y * bs + x] = true;
+                continue;
+            }
+            let bi = (y / BLOCK_SIZE) * blocks_x + (x / BLOCK_SIZE);
+            let local_space = smooth_block_max[bi] as f64;
+            let threshold = (local_space * DILATION_FRACTION).clamp(MIN_DILATION, MAX_DILATION);
+            if raw_dist < threshold {
+                dilated.data[y * bs + x] = true;
             }
         }
     }
+
+    // Step 4: Clear protected pixels (active node zones must stay free)
+    for y in 0..bs {
+        for x in 0..bs {
+            if protected_mask.data[y * bs + x] {
+                dilated.data[y * bs + x] = false;
+            }
+        }
+    }
+
     let free_space = dilated.invert();
     let distance_transform = chamfer_distance_transform(&dilated);
     let skeleton = zhang_suen_thinning(&free_space);
@@ -102,6 +158,8 @@ pub fn generate_skeleton(state: &GameState) -> (Grid<bool>, Grid<u8>) {
 }
 
 fn bridge_active_components(skeleton: &mut Grid<bool>, state: &GameState, obstacle_map: &Grid<bool>, distance_transform: &Grid<u8>) {
+    let bs = state.board_size;
+    let bs_i = bs as i32;
     let mut seeds: Vec<(i32, i32)> = Vec::new();
     for node in &state.nodes {
         if node.connection_count >= 3 { continue; }
@@ -124,7 +182,7 @@ fn bridge_active_components(skeleton: &mut Grid<bool>, state: &GameState, obstac
         if let Some(s) = found { seeds.push(s); }
     }
     if seeds.len() < 2 { return; }
-    let mut reachable = Grid::new(BS, BS, false);
+    let mut reachable = Grid::new(bs, bs, false);
     let mut queue = VecDeque::new();
     queue.push_back(seeds[0]);
     reachable.set(seeds[0].0, seeds[0].1, true);
@@ -147,7 +205,7 @@ fn bridge_active_components(skeleton: &mut Grid<bool>, state: &GameState, obstac
     for &(sx, sy) in &seeds[1..] {
         if *reachable.get(sx, sy).unwrap_or(&false) { continue; }
         let mut target = None;
-        'bridge: for r in 1i32..BS_I {
+        'bridge: for r in 1i32..bs_i {
             for dy in -r..=r {
                 for dx in -r..=r {
                     if dx.abs() != r && dy.abs() != r { continue; }
@@ -190,11 +248,13 @@ fn bridge_active_components(skeleton: &mut Grid<bool>, state: &GameState, obstac
 }
 
 fn repair_skeleton_gaps(skeleton: &Grid<bool>) -> Grid<bool> {
+    let bs = skeleton.width;
+    let bm = bs - 1;
     let mut repaired = skeleton.clone();
     let mut endpoints = Vec::new();
-    for y in 1..BM {
-        for x in 1..BM {
-            if !skeleton.data[y * BS + x] { continue; }
+    for y in 1..bm {
+        for x in 1..bm {
+            if !skeleton.data[y * bs + x] { continue; }
             let neighbors = get_neighbors(skeleton, x, y);
             let count = neighbors.iter().filter(|&&n| n).count();
             if count == 1 { endpoints.push((x as i32, y as i32)); }
@@ -280,7 +340,7 @@ fn astar_connect(start_x: i32, start_y: i32, goal_x: i32, goal_y: i32, obstacle_
                 if dx == 0 && dy == 0 { continue; }
                 let nx = current.x + dx;
                 let ny = current.y + dy;
-                if nx < 0 || ny < 0 || nx >= BS_I || ny >= BS_I { continue; }
+                if !obstacle_map.in_bounds(nx, ny) { continue; }
                 if *obstacle_map.get(nx, ny).unwrap_or(&true) { continue; }
                 let neighbor = (nx, ny);
                 if closed_set.contains(&neighbor) { continue; }
@@ -302,32 +362,34 @@ fn astar_connect(start_x: i32, start_y: i32, goal_x: i32, goal_y: i32, obstacle_
 }
 
 pub fn zhang_suen_thinning(input: &Grid<bool>) -> Grid<bool> {
+    let bs = input.width;
+    let bm = bs - 1;
     let mut current = input.clone();
     let mut changed = true;
     while changed {
         changed = false;
         let mut to_delete = Vec::new();
-        for y in 1..BM {
-            for x in 1..BM {
-                if !current.data[y * BS + x] { continue; }
+        for y in 1..bm {
+            for x in 1..bm {
+                if !current.data[y * bs + x] { continue; }
                 let neighbors = get_neighbors(&current, x, y);
                 if zhang_suen_condition(&neighbors, true) { to_delete.push((x, y)); }
             }
         }
         if !to_delete.is_empty() {
-            for (x, y) in to_delete { current.data[y * BS + x] = false; }
+            for (x, y) in to_delete { current.data[y * bs + x] = false; }
             changed = true;
         }
         let mut to_delete = Vec::new();
-        for y in 1..BM {
-            for x in 1..BM {
-                if !current.data[y * BS + x] { continue; }
+        for y in 1..bm {
+            for x in 1..bm {
+                if !current.data[y * bs + x] { continue; }
                 let neighbors = get_neighbors(&current, x, y);
                 if zhang_suen_condition(&neighbors, false) { to_delete.push((x, y)); }
             }
         }
         if !to_delete.is_empty() {
-            for (x, y) in to_delete { current.data[y * BS + x] = false; }
+            for (x, y) in to_delete { current.data[y * bs + x] = false; }
             changed = true;
         }
     }
@@ -379,30 +441,32 @@ fn bresenham_line(grid: &mut Grid<bool>, x0: i32, y0: i32, x1: i32, y1: i32) {
 }
 
 pub fn chamfer_distance_transform(obstacle_map: &Grid<bool>) -> Grid<u8> {
-    let mut dist = Grid::new(BS, BS, 255u8);
-    for y in 0..BS {
-        for x in 0..BS {
-            if obstacle_map.data[y * BS + x] { dist.data[y * BS + x] = 0; }
+    let bs = obstacle_map.width;
+    let bm = bs - 1;
+    let mut dist = Grid::new(bs, bs, 255u8);
+    for y in 0..bs {
+        for x in 0..bs {
+            if obstacle_map.data[y * bs + x] { dist.data[y * bs + x] = 0; }
         }
     }
-    for y in 1..BS {
-        for x in 1..BM {
-            let current = dist.data[y * BS + x];
-            let up = dist.data[(y - 1) * BS + x].saturating_add(1);
-            let left = dist.data[y * BS + (x - 1)].saturating_add(1);
-            let up_left = dist.data[(y - 1) * BS + (x - 1)].saturating_add(1);
-            let up_right = dist.data[(y - 1) * BS + (x + 1)].saturating_add(1);
-            dist.data[y * BS + x] = current.min(up).min(left).min(up_left).min(up_right);
+    for y in 1..bs {
+        for x in 1..bm {
+            let current = dist.data[y * bs + x];
+            let up = dist.data[(y - 1) * bs + x].saturating_add(1);
+            let left = dist.data[y * bs + (x - 1)].saturating_add(1);
+            let up_left = dist.data[(y - 1) * bs + (x - 1)].saturating_add(1);
+            let up_right = dist.data[(y - 1) * bs + (x + 1)].saturating_add(1);
+            dist.data[y * bs + x] = current.min(up).min(left).min(up_left).min(up_right);
         }
     }
-    for y in (0..BM).rev() {
-        for x in (1..BM).rev() {
-            let current = dist.data[y * BS + x];
-            let down = dist.data[(y + 1) * BS + x].saturating_add(1);
-            let right = dist.data[y * BS + (x + 1)].saturating_add(1);
-            let down_right = dist.data[(y + 1) * BS + (x + 1)].saturating_add(1);
-            let down_left = dist.data[(y + 1) * BS + (x - 1)].saturating_add(1);
-            dist.data[y * BS + x] = current.min(down).min(right).min(down_right).min(down_left);
+    for y in (0..bm).rev() {
+        for x in (1..bm).rev() {
+            let current = dist.data[y * bs + x];
+            let down = dist.data[(y + 1) * bs + x].saturating_add(1);
+            let right = dist.data[y * bs + (x + 1)].saturating_add(1);
+            let down_right = dist.data[(y + 1) * bs + (x + 1)].saturating_add(1);
+            let down_left = dist.data[(y + 1) * bs + (x - 1)].saturating_add(1);
+            dist.data[y * bs + x] = current.min(down).min(right).min(down_right).min(down_left);
         }
     }
     dist
@@ -410,38 +474,46 @@ pub fn chamfer_distance_transform(obstacle_map: &Grid<bool>) -> Grid<u8> {
 
 enum Edge { Top, Bottom, Left, Right }
 
-fn add_border_obstacles(grid: &mut Grid<bool>, lines: &[crate::types::Line], nodes: &[crate::types::Node]) {
-    add_edge_obstacles(grid, Edge::Top, lines, nodes);
-    add_edge_obstacles(grid, Edge::Bottom, lines, nodes);
-    add_edge_obstacles(grid, Edge::Left, lines, nodes);
-    add_edge_obstacles(grid, Edge::Right, lines, nodes);
+fn add_border_obstacles(grid: &mut Grid<bool>, lines: &[crate::types::Line], nodes: &[crate::types::Node], board_size: usize) {
+    add_edge_obstacles(grid, Edge::Top, lines, nodes, board_size);
+    add_edge_obstacles(grid, Edge::Bottom, lines, nodes, board_size);
+    add_edge_obstacles(grid, Edge::Left, lines, nodes, board_size);
+    add_edge_obstacles(grid, Edge::Right, lines, nodes, board_size);
 }
 
-fn add_edge_obstacles(grid: &mut Grid<bool>, edge: Edge, lines: &[crate::types::Line], nodes: &[crate::types::Node]) {
+fn add_edge_obstacles(grid: &mut Grid<bool>, edge: Edge, lines: &[crate::types::Line], nodes: &[crate::types::Node], board_size: usize) {
     const SEGMENT_SIZE: usize = 50;
-    const MAX_OBSTACLE_WIDTH: usize = 14;
-    const MIN_OBSTACLE_WIDTH: usize = 3;
-    const DETECTION_RANGE: f64 = 40.0;
+    const DETECTION_RANGE: f64 = 80.0;
+
+    let bs = board_size;
+    let bs_f = bs as f64;
+    let bm = bs - 1;
+
+    // Scale border width proportionally to board size.
+    // Thick borders push the skeleton inward so paths use open space
+    // rather than hugging existing structures near the center.
+    let max_width = (bs as f64 * 0.08).round() as usize;  // 8% of board (80px @ 1000)
+    let min_width = (bs as f64 * 0.01).round().max(3.0) as usize;  // 1% of board
 
     let calc_width = |min_dist: f64| -> usize {
-        if min_dist >= DETECTION_RANGE { MAX_OBSTACLE_WIDTH }
-        else if min_dist <= 5.0 { MIN_OBSTACLE_WIDTH }
+        if min_dist >= DETECTION_RANGE { max_width }
+        else if min_dist <= 10.0 { min_width }
         else {
-            let t = (min_dist - 5.0) / (DETECTION_RANGE - 5.0);
-            (MIN_OBSTACLE_WIDTH as f64 + t * (MAX_OBSTACLE_WIDTH - MIN_OBSTACLE_WIDTH) as f64).round() as usize
+            let t = (min_dist - 10.0) / (DETECTION_RANGE - 10.0);
+            (min_width as f64 + t * (max_width - min_width) as f64).round() as usize
         }
     };
 
-    for seg_start in (0..BS).step_by(SEGMENT_SIZE) {
-        let seg_end = (seg_start + SEGMENT_SIZE).min(BS);
+    for seg_start in (0..bs).step_by(SEGMENT_SIZE) {
+        let seg_end = (seg_start + SEGMENT_SIZE).min(bs);
         let mut min_distance = DETECTION_RANGE + 1.0;
 
         for node in nodes {
             let (primary, dist_to_edge) = match edge {
                 Edge::Top    => (node.position.x, node.position.y),
-                Edge::Bottom => (node.position.x, BS_F - node.position.y),
+                Edge::Bottom => (node.position.x, bs_f - node.position.y),
                 Edge::Left   => (node.position.y, node.position.x),
-                Edge::Right  => (node.position.y, BS_F - node.position.x),
+                Edge::Right  => (node.position.y, bs_f - node.position.x),
             };
             if primary >= seg_start as f64 && primary < seg_end as f64 {
                 min_distance = min_distance.min(dist_to_edge);
@@ -451,9 +523,9 @@ fn add_edge_obstacles(grid: &mut Grid<bool>, edge: Edge, lines: &[crate::types::
             for point in &line.polyline {
                 let (primary, dist_to_edge) = match edge {
                     Edge::Top    => (point.x, point.y),
-                    Edge::Bottom => (point.x, BS_F - point.y),
+                    Edge::Bottom => (point.x, bs_f - point.y),
                     Edge::Left   => (point.y, point.x),
-                    Edge::Right  => (point.y, BS_F - point.x),
+                    Edge::Right  => (point.y, bs_f - point.x),
                 };
                 if primary >= seg_start as f64 && primary < seg_end as f64 {
                     min_distance = min_distance.min(dist_to_edge);
@@ -467,13 +539,13 @@ fn add_edge_obstacles(grid: &mut Grid<bool>, edge: Edge, lines: &[crate::types::
                 for x in seg_start..seg_end { for y in 0..width { grid.set(x as i32, y as i32, true); } }
             }
             Edge::Bottom => {
-                for x in seg_start..seg_end { for y in 0..width { grid.set(x as i32, (BM - y) as i32, true); } }
+                for x in seg_start..seg_end { for y in 0..width { grid.set(x as i32, (bm - y) as i32, true); } }
             }
             Edge::Left => {
                 for y in seg_start..seg_end { for x in 0..width { grid.set(x as i32, y as i32, true); } }
             }
             Edge::Right => {
-                for y in seg_start..seg_end { for x in 0..width { grid.set((BM - x) as i32, y as i32, true); } }
+                for y in seg_start..seg_end { for x in 0..width { grid.set((bm - x) as i32, y as i32, true); } }
             }
         }
     }
@@ -499,18 +571,14 @@ fn rasterize_segment(grid: &mut Grid<bool>, p1: &Point, p2: &Point, half_width: 
     }
 }
 
-fn point_to_segment_distance(px: f64, py: f64, x1: f64, y1: f64, x2: f64, y2: f64) -> f64 {
-    let dx = x2 - x1;
-    let dy = y2 - y1;
-    let len_sq = dx * dx + dy * dy;
-    if len_sq < 1e-10 { let dpx = px - x1; let dpy = py - y1; return (dpx * dpx + dpy * dpy).sqrt(); }
-    let t = ((px - x1) * dx + (py - y1) * dy) / len_sq;
-    let t = t.clamp(0.0, 1.0);
-    let closest_x = x1 + t * dx;
-    let closest_y = y1 + t * dy;
-    let dpx = px - closest_x;
-    let dpy = py - closest_y;
-    (dpx * dpx + dpy * dpy).sqrt()
+/// Build a grid marking pixels within `buffer_radius` of any existing line.
+/// Shared by node_classifier (freespace connectivity) and pathfinding (relaxed A*).
+pub fn build_line_buffer_grid(lines: &[Line], buffer_radius: f64, board_size: usize) -> Grid<bool> {
+    let mut grid = Grid::new(board_size, board_size, false);
+    for line in lines {
+        rasterize_polyline(&mut grid, &line.polyline, buffer_radius * 2.0);
+    }
+    grid
 }
 
 fn rasterize_corridor(grid: &mut Grid<bool>, segment: &[Point], width: f64) {
@@ -527,12 +595,3 @@ fn rasterize_corridor(grid: &mut Grid<bool>, segment: &[Point], width: f64) {
     }
 }
 
-fn dilate_pixel(grid: &mut Grid<bool>, cx: i32, cy: i32, radius: f64) {
-    let r = radius.ceil() as i32;
-    for dy in -r..=r {
-        for dx in -r..=r {
-            let dist = ((dx * dx + dy * dy) as f64).sqrt();
-            if dist <= radius { grid.set(cx + dx, cy + dy, true); }
-        }
-    }
-}

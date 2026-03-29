@@ -6,8 +6,10 @@ use crate::types::{GameState, Move};
 use crate::validation::validate_ai_move;
 
 /// Generate all concrete moves with pixel paths (expensive — called once at root).
-fn generate_concrete_moves(state: &mut GameState) -> Vec<Move> {
-    let classification = classify_nodes(state);
+fn generate_concrete_moves_from_classification(
+    state: &mut GameState,
+    classification: &crate::node_classifier::NodeClassification,
+) -> Vec<Move> {
     let mut moves = Vec::new();
     let mut failed_pairs = Vec::new();
 
@@ -15,7 +17,7 @@ fn generate_concrete_moves(state: &mut GameState) -> Vec<Move> {
         let mut found = false;
         if let Some(path) = find_path_on_skeleton(state, *from_id, *to_id) {
             if path.len() >= 3 {
-                let new_node_pos = find_optimal_node_placement(&path, &state.nodes);
+                let new_node_pos = find_optimal_node_placement(&path, state);
                 let mov = Move {
                     from_node: *from_id,
                     to_node: *to_id,
@@ -42,7 +44,7 @@ fn generate_concrete_moves(state: &mut GameState) -> Vec<Move> {
             if path.len() < 5 {
                 continue;
             }
-            let new_node_pos = find_optimal_node_placement(&path, &state.nodes);
+            let new_node_pos = find_optimal_node_placement(&path, state);
             let mov = Move {
                 from_node: node_id,
                 to_node: node_id,
@@ -65,7 +67,7 @@ fn generate_concrete_moves(state: &mut GameState) -> Vec<Move> {
                 if path.len() < 3 {
                     continue;
                 }
-                let new_node_pos = find_optimal_node_placement(&path, &state.nodes);
+                let new_node_pos = find_optimal_node_placement(&path, state);
                 let mov = Move {
                     from_node: *from_id,
                     to_node: *to_id,
@@ -88,7 +90,7 @@ pub fn find_best_move(state: &mut GameState) -> Option<Move> {
     if let Some((from, to)) = opening_book::lookup_opening(state) {
         if let Some(path) = find_path_on_skeleton(state, from, to) {
             if path.len() >= 3 {
-                let new_node_pos = find_optimal_node_placement(&path, &state.nodes);
+                let new_node_pos = find_optimal_node_placement(&path, state);
                 let mov = Move {
                     from_node: from,
                     to_node: to,
@@ -104,17 +106,23 @@ pub fn find_best_move(state: &mut GameState) -> Option<Move> {
     }
 
     // 2. GENERATE CONCRETE MOVES (pixel-level, once)
-    let concrete_moves = generate_concrete_moves(state);
+    //    classify_nodes() gives us the real spatial connectivity — we pass
+    //    it to the abstract model so it doesn't hallucinate impossible moves.
+    let classification = classify_nodes(state);
+    let concrete_moves = generate_concrete_moves_from_classification(state, &classification);
     if concrete_moves.is_empty() {
         return None;
     }
     if concrete_moves.len() == 1 {
-        return Some(concrete_moves.into_iter().next().unwrap()); // Only one option
+        return Some(concrete_moves.into_iter().next().unwrap());
     }
 
-    // 3. ABSTRACT SEARCH with iterative deepening.
-    //    Each iteration's TT entries improve move ordering for the next.
-    let abstract_state = AbstractState::from_game_state(state);
+    // 3. ABSTRACT SEARCH seeded with real topology.
+    let abstract_state = AbstractState::from_game_state_with_classification(
+        state,
+        &classification.legal_pairs,
+        &classification.self_loop_candidates,
+    );
     let max_depth = abstract_state.choose_depth();
     let mut tt = TranspositionTable::new();
 
@@ -146,28 +154,23 @@ pub fn find_best_move(state: &mut GameState) -> Option<Move> {
         }
     }
 
-    // 4. RETURN best concrete move that passes validation
-    // Try the best first, then fall through to others
-    if validate_ai_move(state, &concrete_moves[best_idx]).is_ok() {
-        return Some(concrete_moves[best_idx].clone());
-    }
-    for (idx, mov) in concrete_moves.iter().enumerate() {
-        if idx == best_idx {
-            continue;
-        }
-        if validate_ai_move(state, mov).is_ok() {
-            return Some(mov.clone());
-        }
-    }
-
-    None
+    // 4. RETURN best concrete move (already validated during generation)
+    Some(concrete_moves.into_iter().nth(best_idx).unwrap())
 }
 
 pub fn find_optimal_node_placement(
     path: &[crate::types::Point],
-    existing_nodes: &[crate::types::Node],
+    state: &crate::types::GameState,
 ) -> crate::types::Point {
+    use crate::geometry::point_to_segment_distance;
+
     if path.len() < 3 {
+        if path.len() == 2 {
+            return crate::types::Point::new(
+                (path[0].x + path[1].x) / 2.0,
+                (path[0].y + path[1].y) / 2.0,
+            );
+        }
         let c = crate::types::BOARD_SIZE as f64 / 2.0;
         return crate::types::Point::new(c, c);
     }
@@ -181,18 +184,34 @@ pub fn find_optimal_node_placement(
     let start_idx = start_idx.max(1);
     let end_idx = end_idx.min(path.len() - 1).max(start_idx + 1);
 
-    let mut best_pos = path[path.len() / 2]; // Default: midpoint
+    let mut best_pos = path[path.len() / 2];
     let mut max_min_distance = 0.0;
 
     for i in start_idx..end_idx {
         let candidate = path[i];
         let mut min_dist = f64::INFINITY;
-        for node in existing_nodes {
+
+        // Distance to existing nodes
+        for node in &state.nodes {
             let dx = candidate.x - node.position.x;
             let dy = candidate.y - node.position.y;
             let dist = (dx * dx + dy * dy).sqrt();
             min_dist = min_dist.min(dist);
         }
+
+        // Distance to existing lines (prevents placing nodes right next to lines)
+        for line in &state.lines {
+            for seg_idx in 1..line.polyline.len() {
+                let p1 = &line.polyline[seg_idx - 1];
+                let p2 = &line.polyline[seg_idx];
+                let dist = point_to_segment_distance(
+                    candidate.x, candidate.y,
+                    p1.x, p1.y, p2.x, p2.y,
+                );
+                min_dist = min_dist.min(dist);
+            }
+        }
+
         if min_dist > max_min_distance {
             max_min_distance = min_dist;
             best_pos = candidate;

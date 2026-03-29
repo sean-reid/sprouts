@@ -1,8 +1,7 @@
 use crate::geometry::{decimate_polyline, polyline_length, resample_polyline, shortcut_path, smooth_path_chaikin};
-use crate::types::{GameState, Grid, Point, PixelCoord};
-use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
-
-const MAX_ASTAR_ITERATIONS: usize = 300_000;
+use crate::morphology::build_line_buffer_grid;
+use crate::types::{GameState, Grid, Point, PixelCoord, MAX_ASTAR_ITERATIONS};
+use std::collections::{BinaryHeap, HashMap, HashSet};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct AStarNode {
@@ -36,59 +35,20 @@ pub fn find_path_on_skeleton(
     find_path_on_skeleton_inner(state, from_node_id, to_node_id, false)
 }
 
-/// Last-resort fallback: free-space A* that ignores the skeleton entirely.
-/// Starts directly from node positions and routes through any pixel with
-/// distance > 0 from the dilated obstacle map.  Produces less aesthetic
-/// paths but prevents false game-over.
 /// Last-resort fallback: free-space A* with a thin (4px) line buffer instead
-/// of the 10px-dilated skeleton obstacle map.  This can squeeze through gaps
+/// of the 10px-dilated skeleton obstacle map. This can squeeze through gaps
 /// at node junctions that the dilated map seals shut.
 pub fn find_path_relaxed(
     state: &GameState,
     from_node_id: usize,
     to_node_id: usize,
 ) -> Option<Vec<Point>> {
-    use crate::types::BOARD_SIZE;
     let from_node = state.find_node(from_node_id)?;
     let to_node = state.find_node(to_node_id)?;
     let distance_transform = &state.skeleton_cache.distance_transform;
-    let bs = BOARD_SIZE;
-    let bs_i = bs as i32;
+    let bs_i = state.board_size as i32;
 
-    // Build a thin obstacle map: just the lines with a 4px buffer
-    let mut blocked = Grid::new(bs, bs, false);
-    let half_w = 4.0f64;
-    for line in &state.lines {
-        for i in 1..line.polyline.len() {
-            let p1 = &line.polyline[i - 1];
-            let p2 = &line.polyline[i];
-            let min_x = (p1.x.min(p2.x) - half_w).floor().max(0.0) as i32;
-            let max_x = (p1.x.max(p2.x) + half_w).ceil().min(bs as f64 - 1.0) as i32;
-            let min_y = (p1.y.min(p2.y) - half_w).floor().max(0.0) as i32;
-            let max_y = (p1.y.max(p2.y) + half_w).ceil().min(bs as f64 - 1.0) as i32;
-            for y in min_y..=max_y {
-                for x in min_x..=max_x {
-                    let px = x as f64 + 0.5;
-                    let py = y as f64 + 0.5;
-                    let dx = p2.x - p1.x;
-                    let dy = p2.y - p1.y;
-                    let len_sq = dx * dx + dy * dy;
-                    let dist = if len_sq < 1e-10 {
-                        ((px - p1.x).powi(2) + (py - p1.y).powi(2)).sqrt()
-                    } else {
-                        let t = ((px - p1.x) * dx + (py - p1.y) * dy) / len_sq;
-                        let t = t.clamp(0.0, 1.0);
-                        let cx = p1.x + t * dx;
-                        let cy = p1.y + t * dy;
-                        ((px - cx).powi(2) + (py - cy).powi(2)).sqrt()
-                    };
-                    if dist <= half_w {
-                        blocked.set(x, y, true);
-                    }
-                }
-            }
-        }
-    }
+    let blocked = build_line_buffer_grid(&state.lines, 4.0, state.board_size);
 
     let start = PixelCoord::new(from_node.position.x.round() as i32, from_node.position.y.round() as i32);
     let goal = PixelCoord::new(to_node.position.x.round() as i32, to_node.position.y.round() as i32);
@@ -146,9 +106,10 @@ pub fn find_path_relaxed(
     path_points.push(to_node.position);
 
     let shortcutted = shortcut_path(&path_points, distance_transform, 1);
-    let resampled = resample_polyline(&shortcutted, 2.0);
+    let sparse = decimate_polyline(&shortcutted, 12.0);
+    let resampled = resample_polyline(&sparse, 15.0);
     let smoothed = smooth_path_chaikin(&resampled, 4);
-    let decimated = decimate_polyline(&smoothed, 1.0);
+    let decimated = decimate_polyline(&smoothed, 6.0);
 
     Some(decimated)
 }
@@ -196,14 +157,24 @@ fn find_path_on_skeleton_inner(
     path_points.insert(0, from_node.position);
     path_points.push(to_node.position);
 
-    // 1. Remove doublebacks via shortcutting.
-    let shortcutted = shortcut_path(&path_points, distance_transform, 2);
+    // Post-processing: convert pixel-grid A* path into smooth curves.
+    // The JS renderer uses Catmull-Rom splines, so we want FEW widely-spaced
+    // control points — the spline fills in smooth curves between them.
 
-    // 2. Resample → Smooth (single clean pass)
-    let resampled = resample_polyline(&shortcutted, 2.0);
+    // 1. Shortcut doublebacks
+    let shortcutted = shortcut_path(&path_points, distance_transform, 3);
+
+    // 2. Aggressive decimation to extract just the meaningful shape.
+    //    12px epsilon: only keep points where the path genuinely changes direction.
+    let sparse = decimate_polyline(&shortcutted, 12.0);
+
+    // 3. Coarse resampling for uniform input to the smoother
+    let resampled = resample_polyline(&sparse, 15.0);
+
+    // 4. Chaikin smoothing rounds off any remaining angular turns
     let smoothed = smooth_path_chaikin(&resampled, 4);
 
-    // 3. Clearance check — fall back to resampled (unsmoothed) if needed
+    // 5. Clearance check — fall back if smoothing pushed into obstacles
     let mut failed_points = 0;
     for point in &smoothed {
         let px = point.x.round() as i32;
@@ -217,20 +188,24 @@ fn find_path_on_skeleton_inner(
     let final_path = if failed_points as f64 / smoothed.len().max(1) as f64 <= 0.20 {
         smoothed
     } else {
-        resample_polyline(&shortcutted, 2.0)
+        // Fallback: less aggressive but still smooth
+        let sparse2 = decimate_polyline(&shortcutted, 6.0);
+        let resampled2 = resample_polyline(&sparse2, 10.0);
+        smooth_path_chaikin(&resampled2, 3)
     };
 
-    let decimated = decimate_polyline(&final_path, 1.0);
+    // Loose final decimation — let Catmull-Rom do the work
+    let decimated = decimate_polyline(&final_path, 6.0);
 
     Some(decimated)
 }
 
 /// Find a self-loop path: a curve from a node back to itself.
 ///
-/// Strategy: find two skeleton pixels near the node in different angular
-/// directions, then A* between them on a skeleton where the node's center
-/// is blocked. This forces the path to arc around the node, creating a
-/// natural loop when combined with the node-to-pixel segments.
+/// Strategy: find skeleton pixel pairs near the node at different angles,
+/// then A* between them on a skeleton where the node center is blocked.
+/// Tries multiple pairs, block radii, and allows off-skeleton movement
+/// as a last resort.
 pub fn find_self_loop_on_skeleton(state: &GameState, node_id: usize) -> Option<Vec<Point>> {
     let node = state.find_node(node_id)?;
     let skeleton = &state.skeleton_cache.skeleton;
@@ -239,35 +214,31 @@ pub fn find_self_loop_on_skeleton(state: &GameState, node_id: usize) -> Option<V
     let cx = node.position.x.round() as i32;
     let cy = node.position.y.round() as i32;
 
-    // Collect skeleton pixels near the node (5–25px away) with their angles
-    let mut by_angle: Vec<(PixelCoord, f64)> = Vec::new();
-    for r in 5i32..30 {
+    // Collect skeleton pixels near the node — search wider (up to 60px)
+    let mut by_angle: Vec<(PixelCoord, f64, i32)> = Vec::new(); // (coord, angle, distance)
+    for r in 3i32..60 {
         for dy in -r..=r {
             for dx in -r..=r {
-                if dx.abs() != r && dy.abs() != r {
-                    continue;
-                }
+                if dx.abs() != r && dy.abs() != r { continue; }
                 let x = cx + dx;
                 let y = cy + dy;
                 if skeleton.in_bounds(x, y) && *skeleton.get(x, y).unwrap_or(&false) {
                     let angle = (dy as f64).atan2(dx as f64);
-                    by_angle.push((PixelCoord::new(x, y), angle));
+                    by_angle.push((PixelCoord::new(x, y), angle, r));
                 }
             }
         }
-        if by_angle.len() >= 20 {
-            break;
-        }
+        if by_angle.len() >= 40 { break; }
     }
 
     if by_angle.len() < 2 {
         return None;
     }
 
-    // Find the pair with maximum angular separation (ideally ~180 degrees)
-    let mut best_i = 0;
-    let mut best_j = 1;
-    let mut best_diff = 0.0f64;
+    // Build candidate pairs sorted by angular separation (best first).
+    // Try multiple pairs, not just the single best — the best angular pair
+    // might fail in tight topologies where the skeleton is fragmented.
+    let mut pairs: Vec<(usize, usize, f64)> = Vec::new();
     for i in 0..by_angle.len() {
         for j in (i + 1)..by_angle.len() {
             let diff = (by_angle[i].1 - by_angle[j].1).abs();
@@ -276,129 +247,172 @@ pub fn find_self_loop_on_skeleton(state: &GameState, node_id: usize) -> Option<V
             } else {
                 diff
             };
-            if diff > best_diff {
-                best_diff = diff;
-                best_i = i;
-                best_j = j;
+            // Accept any pair with >= 30° separation (was 60°)
+            if diff >= std::f64::consts::PI / 6.0 {
+                pairs.push((i, j, diff));
             }
         }
     }
+    // Sort: prefer larger angular separation, then closer pixels
+    pairs.sort_by(|a, b| {
+        b.2.partial_cmp(&a.2)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| {
+                let dist_a = by_angle[a.0].2 + by_angle[a.1].2;
+                let dist_b = by_angle[b.0].2 + by_angle[b.1].2;
+                dist_a.cmp(&dist_b)
+            })
+    });
 
-    // Need at least 60 degrees of separation for a meaningful loop
-    if best_diff < std::f64::consts::PI / 3.0 {
-        return None;
-    }
-
-    let pixel_a = by_angle[best_i].0;
-    let pixel_b = by_angle[best_j].0;
-
-    // Block a small area around the node center on a skeleton copy.
-    // This prevents the A* from taking the direct path through the node,
-    // forcing it to go around and form a loop.
-    // Try progressively smaller block radii if A* fails (the skeleton
-    // near a node can be thin, so a large block may disconnect it).
-    // No forbidden_nodes: the self-loop path often must pass near other
-    // nodes in tight positions.  validate_ai_move enforces the real 8px
-    // clearance; duplicating a wider exclusion here causes false negatives
-    // and makes the AI unable to play its only available move.
+    // Try top candidate pairs with various block radii and off-skeleton options
     let no_forbidden: Vec<Point> = Vec::new();
-    let mut path_pixels = None;
-    for block_radius in [4i32, 3, 2] {
-        let mut loop_skeleton = skeleton.clone();
-        for dy in -block_radius..=block_radius {
-            for dx in -block_radius..=block_radius {
-                if dx * dx + dy * dy <= block_radius * block_radius {
-                    loop_skeleton.set(cx + dx, cy + dy, false);
+    let max_pairs_to_try = pairs.len().min(6);
+
+    for &(pi, pj, _) in pairs.iter().take(max_pairs_to_try) {
+        let pixel_a = by_angle[pi].0;
+        let pixel_b = by_angle[pj].0;
+
+        // Try progressively smaller block radii, then allow off-skeleton
+        for (block_radius, allow_off) in [(5i32, false), (3, false), (2, false), (2, true)] {
+            let mut loop_skeleton = skeleton.clone();
+            for dy in -block_radius..=block_radius {
+                for dx in -block_radius..=block_radius {
+                    if dx * dx + dy * dy <= block_radius * block_radius {
+                        loop_skeleton.set(cx + dx, cy + dy, false);
+                    }
+                }
+            }
+
+            if let Some(pixels) = astar_search(
+                &loop_skeleton,
+                distance_transform,
+                pixel_a,
+                pixel_b,
+                &no_forbidden,
+                allow_off,
+            ) {
+                if pixels.len() >= 5 {
+                    // Build loop: node → path → node
+                    let mut path_points = Vec::new();
+                    path_points.push(node.position);
+                    for p in &pixels {
+                        path_points.push(Point::new(p.x as f64 + 0.5, p.y as f64 + 0.5));
+                    }
+                    path_points.push(node.position);
+
+                    let sparse = decimate_polyline(&path_points, 10.0);
+                    let resampled = resample_polyline(&sparse, 12.0);
+                    let smoothed = smooth_path_chaikin(&resampled, 4);
+                    let decimated = decimate_polyline(&smoothed, 5.0);
+
+                    if polyline_length(&decimated) >= 22.0 {
+                        return Some(decimated);
+                    }
                 }
             }
         }
-
-        if let Some(pixels) = astar_search(
-            &loop_skeleton,
-            distance_transform,
-            pixel_a,
-            pixel_b,
-            &no_forbidden,
-            false, // no off-skeleton for self-loops (center is blocked)
-        ) {
-            if pixels.len() >= 8 {
-                path_pixels = Some(pixels);
-                break;
-            }
-        }
     }
 
-    let path_pixels = path_pixels?;
-
-    // Build loop: node → pixel_a → path → pixel_b → node
-    let mut path_points = Vec::new();
-    path_points.push(node.position);
-    for p in &path_pixels {
-        path_points.push(Point::new(p.x as f64 + 0.5, p.y as f64 + 0.5));
-    }
-    path_points.push(node.position);
-
-    let resampled = resample_polyline(&path_points, 3.0);
-    let smoothed = smooth_path_chaikin(&resampled, 3);
-    let decimated = decimate_polyline(&smoothed, 1.0);
-
-    if polyline_length(&decimated) < 22.0 {
-        return None;
-    }
-
-    Some(decimated)
+    None
 }
 
-/// Geometric self-loop fallback: creates a circular arc from the node without
-/// using the skeleton.  Tries multiple directions and radii to find one that
-/// doesn't cross existing lines.
+/// Geometric self-loop fallback: creates circular/elliptical arcs from the
+/// node without using the skeleton.  Validates against existing lines and
+/// the distance transform for clearance.
 pub fn generate_geometric_self_loop(state: &GameState, node_id: usize) -> Option<Vec<Point>> {
+    use crate::geometry::point_to_segment_distance;
+
     let node = state.find_node(node_id)?;
     let cx = node.position.x;
     let cy = node.position.y;
-    let bs = crate::types::BOARD_SIZE as f64;
+    let bs = state.board_size as f64;
+    let dt = &state.skeleton_cache.distance_transform;
 
-    // Pick radius based on distance to nearest board edge so arcs don't
-    // get clamped down to nothing.
     let edge_dist = cx.min(cy).min(bs - cx).min(bs - cy);
-    let max_radius = (edge_dist - 5.0).max(15.0);
-    let radii = [
-        35.0f64.min(max_radius),
-        50.0f64.min(max_radius),
-        25.0f64.min(max_radius),
-        70.0f64.min(max_radius),
-        15.0, // always try a small radius as last resort
-    ];
+    let max_radius = (edge_dist - 5.0).max(12.0);
 
-    // Try 12 directions (every 30°) at each radius
+    // Try many radii from small to large
+    let radii: [f64; 6] = [15.0, 20.0, 25.0, 35.0, 50.0, 70.0];
+
+    // 24 directions (every 15°) at each radius, plus elliptical stretches
+    let mut best_path: Option<Vec<Point>> = None;
+    let mut best_clearance = 0.0f64;
+
     for &radius in &radii {
-        if radius < 10.0 { continue; }
-        for angle_idx in 0..12 {
-            let base_angle = (angle_idx as f64) * std::f64::consts::PI / 6.0;
+        let r = radius.min(max_radius);
+        if r < 10.0 { continue; }
 
-            // Point the arc AWAY from the nearest edge for best clearance
-            let mut points = Vec::new();
-            points.push(node.position);
-            let steps = 24;
-            for i in 0..=steps {
-                let t = i as f64 / steps as f64;
-                let angle = base_angle + std::f64::consts::PI * (t - 0.5);
-                let x = (cx + radius * angle.cos()).clamp(3.0, bs - 3.0);
-                let y = (cy + radius * angle.sin()).clamp(3.0, bs - 3.0);
-                points.push(Point::new(x, y));
-            }
-            points.push(node.position);
+        for angle_idx in 0..24 {
+            let base_angle = (angle_idx as f64) * std::f64::consts::PI / 12.0;
 
-            let resampled = resample_polyline(&points, 2.0);
-            let smoothed = smooth_path_chaikin(&resampled, 3);
-            let decimated = decimate_polyline(&smoothed, 1.0);
+            // Try circular and two elliptical stretches (wider/narrower)
+            for &stretch in &[1.0, 0.6, 1.5] {
+                let mut points = Vec::new();
+                points.push(node.position);
+                let steps = 28;
+                for i in 0..=steps {
+                    let t = i as f64 / steps as f64;
+                    let angle = base_angle + std::f64::consts::PI * (t - 0.5);
+                    // Elliptical: stretch perpendicular to base direction
+                    let local_r_x = r;
+                    let local_r_y = r * stretch;
+                    let lx = local_r_x * angle.cos();
+                    let ly = local_r_y * angle.sin();
+                    // Rotate by base_angle
+                    let rx = lx * base_angle.cos() - ly * base_angle.sin();
+                    let ry = lx * base_angle.sin() + ly * base_angle.cos();
+                    let x = (cx + rx).clamp(5.0, bs - 5.0);
+                    let y = (cy + ry).clamp(5.0, bs - 5.0);
+                    points.push(Point::new(x, y));
+                }
+                points.push(node.position);
 
-            if polyline_length(&decimated) >= 20.0 {
-                return Some(decimated);
+                // Validate: check clearance against dt and existing lines
+                let mut min_clearance = f64::INFINITY;
+                let mut valid = true;
+
+                for pt in &points[1..points.len() - 1] {
+                    let ipx = pt.x.round() as i32;
+                    let ipy = pt.y.round() as i32;
+                    let d = dt.get(ipx, ipy).copied().unwrap_or(0) as f64;
+                    min_clearance = min_clearance.min(d);
+                    if d < 3.0 { valid = false; break; }
+
+                    // Check distance to existing lines
+                    for line in &state.lines {
+                        for si in 1..line.polyline.len() {
+                            let p1 = &line.polyline[si - 1];
+                            let p2 = &line.polyline[si];
+                            let ld = point_to_segment_distance(
+                                pt.x, pt.y, p1.x, p1.y, p2.x, p2.y,
+                            );
+                            min_clearance = min_clearance.min(ld);
+                            if ld < 6.0 { valid = false; break; }
+                        }
+                        if !valid { break; }
+                    }
+                    if !valid { break; }
+                }
+
+                if valid && polyline_length(&points) >= 20.0 && min_clearance > best_clearance {
+                    best_clearance = min_clearance;
+                    best_path = Some(points);
+                }
             }
         }
     }
-    None
+
+    let path = best_path?;
+    let sparse = decimate_polyline(&path, 8.0);
+    let resampled = resample_polyline(&sparse, 10.0);
+    let smoothed = smooth_path_chaikin(&resampled, 3);
+    let decimated = decimate_polyline(&smoothed, 5.0);
+
+    if polyline_length(&decimated) >= 20.0 {
+        Some(decimated)
+    } else {
+        None
+    }
 }
 
 /// Find the nearest skeleton pixel to a position.
@@ -479,21 +493,21 @@ fn astar_search(
     // the A* room to swing wide, so we can use generous radii in open areas.
     // In tight corridors, shrink so valid paths aren't blocked entirely.
     let forbidden_radius = if avg_width < 3.0 {
-        6.0
-    } else if avg_width < 6.0 {
         10.0
-    } else {
+    } else if avg_width < 6.0 {
         14.0
+    } else {
+        18.0
     };
 
     // Distance penalty: strongly prefer the center of corridors.
     // Higher values push paths away from obstacles even when the skeleton allows proximity.
     let dist_penalty_strength = if avg_width < 3.0 {
-        0.3
+        2.0
     } else if avg_width < 5.0 {
-        1.5
+        3.0
     } else {
-        4.0
+        6.0
     };
 
     let heuristic_weight = if avg_width < 3.0 {
