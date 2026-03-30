@@ -182,25 +182,53 @@ impl SproutsGame {
 
         // The classifier says moves exist — but it only checks spatial
         // connectivity, not whether a valid path can actually be drawn.
-        // Verify at least one concrete path exists to avoid hanging the game
-        // when all "legal" pairs are blocked by tight geometry.
+        // Build actual candidate moves and validate them to be sure.
         for (from_id, to_id) in &classification.legal_pairs {
-            if pathfinding::find_path_on_skeleton(&self.state, *from_id, *to_id).is_some() {
-                return false;
-            }
-            if pathfinding::find_path_relaxed(&self.state, *from_id, *to_id).is_some() {
-                return false;
+            let paths: [Option<Vec<types::Point>>; 3] = [
+                pathfinding::find_path_on_skeleton(&self.state, *from_id, *to_id),
+                pathfinding::find_path_relaxed(&self.state, *from_id, *to_id),
+                pathfinding::find_path_tight(&self.state, *from_id, *to_id),
+            ];
+            for path in paths.into_iter().flatten() {
+                if path.len() < 3 { continue; }
+                let new_node_pos = ai::find_optimal_node_placement(&path, &self.state);
+                let mov = types::Move {
+                    from_node: *from_id,
+                    to_node: *to_id,
+                    polyline: path,
+                    new_node_pos,
+                    player: self.state.current_player,
+                };
+                if validation::validate_ai_move(&self.state, &mov).is_ok()
+                    || validation::validate_ai_move_tight(&self.state, &mov).is_ok()
+                {
+                    return false;
+                }
             }
         }
         for &node_id in &classification.self_loop_candidates {
-            if pathfinding::find_self_loop_on_skeleton(&self.state, node_id).is_some() {
-                return false;
-            }
-            if pathfinding::generate_geometric_self_loop(&self.state, node_id).is_some() {
-                return false;
+            let paths: [Option<Vec<types::Point>>; 2] = [
+                pathfinding::find_self_loop_on_skeleton(&self.state, node_id),
+                pathfinding::generate_geometric_self_loop(&self.state, node_id),
+            ];
+            for path in paths.into_iter().flatten() {
+                if path.len() < 5 { continue; }
+                let new_node_pos = ai::find_optimal_node_placement(&path, &self.state);
+                let mov = types::Move {
+                    from_node: node_id,
+                    to_node: node_id,
+                    polyline: path,
+                    new_node_pos,
+                    player: self.state.current_player,
+                };
+                if validation::validate_ai_move(&self.state, &mov).is_ok()
+                    || validation::validate_ai_move_tight(&self.state, &mov).is_ok()
+                {
+                    return false;
+                }
             }
         }
-        // No concrete path found for any pair — game is over
+        // No validated move found — game is over
         true
     }
 
@@ -221,7 +249,7 @@ impl SproutsGame {
     ) -> bool {
         let polyline = parse_polyline(&path_data);
         let new_node_pos = Point::new(new_node_x, new_node_y);
-        validation::validate_new_node_placement(&polyline, &new_node_pos, &self.state.nodes).is_ok()
+        validation::validate_new_node_placement(&polyline, &new_node_pos, &self.state.nodes, self.state.board_size).is_ok()
     }
 
 }

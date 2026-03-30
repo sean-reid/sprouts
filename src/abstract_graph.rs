@@ -86,43 +86,6 @@ impl AbstractState {
         }
     }
 
-    /// Build from game state without classification (assumes all active pairs
-    /// are reachable). Used by tests; the AI uses from_game_state_with_classification.
-    #[cfg(test)]
-    pub fn from_game_state(state: &crate::types::GameState) -> Self {
-        let nodes: Vec<(usize, u8)> = state
-            .nodes
-            .iter()
-            .map(|n| (n.id, n.connection_count))
-            .collect();
-        let is_ai_turn = state.current_player == crate::types::Player::AI;
-
-        let active: Vec<usize> = nodes
-            .iter()
-            .filter(|(_, cc)| *cc < 3)
-            .map(|(id, _)| *id)
-            .collect();
-
-        let mut adjacency = HashSet::new();
-        for i in 0..active.len() {
-            for j in (i + 1)..active.len() {
-                adjacency.insert(pair_key(active[i], active[j]));
-            }
-        }
-        for &(id, cc) in &nodes {
-            if cc <= 1 {
-                adjacency.insert((id, id));
-            }
-        }
-
-        Self {
-            nodes,
-            is_ai_turn,
-            next_node_id: state.next_node_id,
-            adjacency,
-        }
-    }
-
     pub fn generate_moves(&self) -> Vec<AbstractMove> {
         let active: HashSet<usize> = self
             .nodes
@@ -253,7 +216,7 @@ impl AbstractState {
 
     pub fn hash_key(&self) -> u64 {
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        let mut node_data: Vec<(usize, u8)> = self.nodes.iter().copied().collect();
+        let mut node_data: Vec<(usize, u8)> = self.nodes.to_vec();
         node_data.sort_unstable();
         node_data.hash(&mut hasher);
         self.is_ai_turn.hash(&mut hasher);
@@ -422,7 +385,7 @@ pub fn abstract_minimax(
             .partial_cmp(&scores[a])
             .unwrap_or(std::cmp::Ordering::Equal)
     });
-    moves = indices.into_iter().map(|i| moves[i].clone()).collect();
+    moves = indices.into_iter().map(|i| moves[i]).collect();
 
     let score = if is_maximizing {
         let mut max_eval = f64::NEG_INFINITY;

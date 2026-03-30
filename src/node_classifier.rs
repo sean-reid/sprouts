@@ -1,6 +1,6 @@
 use crate::components::label_components;
 use crate::morphology::{build_line_buffer_grid, generate_skeleton};
-use crate::types::{GameState, Grid, Point};
+use crate::types::{GameState, Grid, Point, scale};
 use std::collections::{HashMap, HashSet, VecDeque};
 
 #[derive(Debug, Clone)]
@@ -49,7 +49,8 @@ pub fn classify_nodes(state: &mut GameState) -> NodeClassification {
 
     // Phase 3: Freespace connected components — single O(N) flood fill
     // replaces O(n²) per-pair BFS calls.
-    let freespace_blocked = build_line_buffer_grid(&state.lines, 5.0, state.board_size);
+    let s = scale(state.board_size);
+    let freespace_blocked = build_line_buffer_grid(&state.lines, 3.0 * s, state.board_size);
     let freespace_labels = label_freespace_components(&freespace_blocked);
 
     // Assign each active node to its freespace component
@@ -165,7 +166,7 @@ fn find_nearest_free_component(
 ) -> Option<u32> {
     let cx = pos.x.round() as i32;
     let cy = pos.y.round() as i32;
-    for r in 0i32..30 {
+    for r in 0i32..40 {
         for dy in -r..=r {
             for dx in -r..=r {
                 if r > 0 && dx.abs() != r && dy.abs() != r {

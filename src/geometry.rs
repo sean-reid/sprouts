@@ -138,7 +138,7 @@ pub fn resample_polyline(points: &[Point], target_spacing: f64) -> Vec<Point> {
     }
 
     // Ensure last point is included
-    if result.last().map_or(true, |p| distance(p, &points[points.len() - 1]) > 1.0) {
+    if result.last().is_none_or(|p| distance(p, &points[points.len() - 1]) > 1.0) {
         result.push(points[points.len() - 1]);
     }
 
@@ -209,7 +209,6 @@ pub fn shortcut_path(points: &[Point], distance_transform: &crate::types::Grid<u
 }
 
 /// Check that every pixel along a straight line has sufficient clearance.
-#[allow(dead_code)]
 fn line_clears_obstacles(a: &Point, b: &Point, distance_transform: &crate::types::Grid<u8>, min_clearance: u8) -> bool {
     let dx = b.x - a.x;
     let dy = b.y - a.y;

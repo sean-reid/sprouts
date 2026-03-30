@@ -1,17 +1,22 @@
 use crate::geometry::point_to_segment_distance;
-use crate::types::{GameState, Grid, Line, Point, LINE_RASTER_WIDTH, NODE_PROTECTION_RADIUS};
+use crate::types::{GameState, Grid, Line, Point, LINE_RASTER_WIDTH, NODE_PROTECTION_RADIUS, scale};
 use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
 
 // Adaptive dilation: fraction of local corridor width to dilate from each side.
 // 0.35 means 35% from each wall, leaving 30% for the skeleton in the center.
 const DILATION_FRACTION: f64 = 0.35;
-const MIN_DILATION: f64 = 8.0;   // always keep paths clear of obstacles
-const MAX_DILATION: f64 = 50.0;  // cap in huge open areas
-const BLOCK_SIZE: usize = 25;    // resolution for local space estimation
+// Base values for 1000px board — scaled in generate_skeleton.
+const MIN_DILATION_BASE: f64 = 3.0;
+const MAX_DILATION_BASE: f64 = 50.0;
+const BLOCK_SIZE_BASE: usize = 25;
 
 pub fn generate_skeleton(state: &GameState) -> (Grid<bool>, Grid<u8>) {
     let bs = state.board_size;
     let bs_f = bs as f64;
+    let s = scale(bs);
+    let min_dilation = MIN_DILATION_BASE * s;
+    let max_dilation = MAX_DILATION_BASE * s;
+    let block_size = (BLOCK_SIZE_BASE as f64 * s).round().max(8.0) as usize;
     let mut obstacle_map = Grid::new(bs, bs, false);
     for line in &state.lines {
         rasterize_polyline(&mut obstacle_map, &line.polyline, LINE_RASTER_WIDTH);
@@ -22,7 +27,7 @@ pub fn generate_skeleton(state: &GameState) -> (Grid<bool>, Grid<u8>) {
         if node.connection_count >= 3 { continue; }
         let node_x = node.position.x as i32;
         let node_y = node.position.y as i32;
-        let node_radius = NODE_PROTECTION_RADIUS;
+        let node_radius = (NODE_PROTECTION_RADIUS as f64 * s).round() as i32;
         for dy in -node_radius..=node_radius {
             for dx in -node_radius..=node_radius {
                 if dx * dx + dy * dy <= node_radius * node_radius {
@@ -91,13 +96,13 @@ pub fn generate_skeleton(state: &GameState) -> (Grid<bool>, Grid<u8>) {
 
     // Step 2: Block-level max pooling to estimate local corridor width.
     // Each block's max dt value ≈ half the width of the widest corridor in that region.
-    let blocks_x = (bs + BLOCK_SIZE - 1) / BLOCK_SIZE;
-    let blocks_y = (bs + BLOCK_SIZE - 1) / BLOCK_SIZE;
+    let blocks_x = bs.div_ceil(block_size);
+    let blocks_y = bs.div_ceil(block_size);
     let mut block_max = vec![0u8; blocks_x * blocks_y];
     for y in 0..bs {
         for x in 0..bs {
             let val = raw_dt.data[y * bs + x];
-            let bi = (y / BLOCK_SIZE) * blocks_x + (x / BLOCK_SIZE);
+            let bi = (y / block_size) * blocks_x + (x / block_size);
             block_max[bi] = block_max[bi].max(val);
         }
     }
@@ -126,9 +131,9 @@ pub fn generate_skeleton(state: &GameState) -> (Grid<bool>, Grid<u8>) {
                 dilated.data[y * bs + x] = true;
                 continue;
             }
-            let bi = (y / BLOCK_SIZE) * blocks_x + (x / BLOCK_SIZE);
+            let bi = (y / block_size) * blocks_x + (x / block_size);
             let local_space = smooth_block_max[bi] as f64;
-            let threshold = (local_space * DILATION_FRACTION).clamp(MIN_DILATION, MAX_DILATION);
+            let threshold = (local_space * DILATION_FRACTION).clamp(min_dilation, max_dilation);
             if raw_dist < threshold {
                 dilated.data[y * bs + x] = true;
             }
@@ -267,7 +272,7 @@ fn repair_skeleton_gaps(skeleton: &Grid<bool>) -> Grid<bool> {
             let dx = x2 - x1;
             let dy = y2 - y1;
             let dist = ((dx * dx + dy * dy) as f64).sqrt();
-            if dist <= 15.0 { bresenham_line(&mut repaired, x1, y1, x2, y2); }
+            if dist <= 25.0 { bresenham_line(&mut repaired, x1, y1, x2, y2); }
         }
     }
     repaired
@@ -409,7 +414,7 @@ fn get_neighbors(grid: &Grid<bool>, x: usize, y: usize) -> [bool; 8] {
 
 fn zhang_suen_condition(neighbors: &[bool; 8], first_subiteration: bool) -> bool {
     let b = neighbors.iter().filter(|&&n| n).count();
-    if b < 2 || b > 6 { return false; }
+    if !(2..=6).contains(&b) { return false; }
     let mut a = 0;
     for i in 0..8 { if !neighbors[i] && neighbors[(i + 1) % 8] { a += 1; } }
     if a != 1 { return false; }

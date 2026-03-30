@@ -32,7 +32,6 @@ pub fn lookup_opening(state: &GameState) -> Option<(usize, usize)> {
 }
 
 /// Find an untouched node (0 connections) and connect it to a node the human used (1 connection).
-#[allow(dead_code)]
 fn find_untouched_to_connected(state: &GameState, initial_count: usize) -> Option<(usize, usize)> {
     let untouched = state
         .nodes

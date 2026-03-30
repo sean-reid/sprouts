@@ -1,9 +1,9 @@
 use crate::abstract_graph::{abstract_minimax, AbstractMove, AbstractState, TranspositionTable};
 use crate::node_classifier::classify_nodes;
 use crate::opening_book;
-use crate::pathfinding::{find_path_on_skeleton, find_path_relaxed, find_self_loop_on_skeleton, generate_geometric_self_loop};
+use crate::pathfinding::{find_path_on_skeleton, find_path_relaxed, find_path_tight, find_self_loop_on_skeleton, generate_geometric_self_loop};
 use crate::types::{GameState, Move};
-use crate::validation::validate_ai_move;
+use crate::validation::{validate_ai_move, validate_ai_move_tight};
 
 /// Generate all concrete moves with pixel paths (expensive — called once at root).
 fn generate_concrete_moves_from_classification(
@@ -52,7 +52,7 @@ fn generate_concrete_moves_from_classification(
                 new_node_pos,
                 player: state.current_player,
             };
-            if validate_ai_move(state, &mov).is_ok() {
+            if validate_ai_move(state, &mov).is_ok() || validate_ai_move_tight(state, &mov).is_ok() {
                 moves.push(mov);
             }
         }
@@ -62,9 +62,11 @@ fn generate_concrete_moves_from_classification(
     // free-space A*.  No `moves.is_empty()` guard — a pair that failed the
     // skeleton pathfinder might succeed with the relaxed one.
     if !failed_pairs.is_empty() {
+        let mut still_failed = Vec::new();
         for (from_id, to_id) in &failed_pairs {
             if let Some(path) = find_path_relaxed(state, *from_id, *to_id) {
                 if path.len() < 3 {
+                    still_failed.push((*from_id, *to_id));
                     continue;
                 }
                 let new_node_pos = find_optimal_node_placement(&path, state);
@@ -77,6 +79,34 @@ fn generate_concrete_moves_from_classification(
                 };
                 if validate_ai_move(state, &mov).is_ok() {
                     moves.push(mov);
+                } else {
+                    still_failed.push((*from_id, *to_id));
+                }
+            } else {
+                still_failed.push((*from_id, *to_id));
+            }
+        }
+        // Last resort: tightest buffer + tightest validation for narrow corridors
+        for (from_id, to_id) in &still_failed {
+            // Try all pathfinding methods with tight validation
+            let paths: Vec<Option<Vec<crate::types::Point>>> = vec![
+                find_path_tight(state, *from_id, *to_id),
+                find_path_relaxed(state, *from_id, *to_id),
+                find_path_on_skeleton(state, *from_id, *to_id),
+            ];
+            for path_opt in paths.into_iter().flatten() {
+                if path_opt.len() < 3 { continue; }
+                let new_node_pos = find_optimal_node_placement(&path_opt, state);
+                let mov = Move {
+                    from_node: *from_id,
+                    to_node: *to_id,
+                    polyline: path_opt,
+                    new_node_pos,
+                    player: state.current_player,
+                };
+                if validate_ai_move(state, &mov).is_ok() || validate_ai_move_tight(state, &mov).is_ok() {
+                    moves.push(mov);
+                    break;
                 }
             }
         }
@@ -187,8 +217,8 @@ pub fn find_optimal_node_placement(
     let mut best_pos = path[path.len() / 2];
     let mut max_min_distance = 0.0;
 
-    for i in start_idx..end_idx {
-        let candidate = path[i];
+    for candidate in path.iter().take(end_idx).skip(start_idx) {
+        let candidate = *candidate;
         let mut min_dist = f64::INFINITY;
 
         // Distance to existing nodes

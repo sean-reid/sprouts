@@ -255,7 +255,7 @@ pub fn label_components(
     }
 
     // Compute max internal distances using bounding box diagonal (O(1) per component)
-    for (_comp_id, meta) in &mut components {
+    for meta in components.values_mut() {
         if meta.accessible_nodes.len() == 1 {
             let bb = &meta.bounding_box;
             let dx = (bb.max_x - bb.min_x) as f64;

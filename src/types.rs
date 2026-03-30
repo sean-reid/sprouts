@@ -2,14 +2,20 @@ use std::collections::{HashMap, HashSet};
 
 pub const BOARD_SIZE: usize = 1000;
 
-// Validation thresholds
+// All spatial constants are tuned for a 1000px board.
+// Use scale(board_size) to adapt them to smaller boards (e.g. 500px mobile).
+pub fn scale(board_size: usize) -> f64 {
+    board_size as f64 / BOARD_SIZE as f64
+}
+
+// Validation thresholds (base values for 1000px board)
 pub const MIN_PATH_LENGTH: f64 = 20.0;
 pub const MIN_NODE_SPACING: f64 = 20.0;
-pub const MIN_NODE_SPACING_AI: f64 = 20.0;
+pub const MIN_NODE_SPACING_AI: f64 = 15.0;
 pub const MIN_PATH_CLEARANCE: f64 = 10.0;
-pub const MIN_PATH_CLEARANCE_AI: f64 = 10.0;
+pub const MIN_PATH_CLEARANCE_AI: f64 = 6.0;
 pub const HUMAN_INTERSECTION_TOLERANCE: f64 = 30.0;
-pub const AI_INTERSECTION_TOLERANCE: f64 = 5.0;
+pub const AI_INTERSECTION_TOLERANCE: f64 = 8.0;
 
 // Morphology / pathfinding
 pub const LINE_RASTER_WIDTH: f64 = 3.0;
@@ -248,11 +254,6 @@ pub struct SkeletonCache {
 }
 
 impl SkeletonCache {
-    #[allow(dead_code)]
-    pub fn new() -> Self {
-        Self::new_with_size(BOARD_SIZE)
-    }
-
     pub fn new_with_size(board_size: usize) -> Self {
         Self {
             skeleton: Grid::new(board_size, board_size, false),
