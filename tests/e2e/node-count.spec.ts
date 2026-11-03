@@ -1,3 +1,4 @@
+import { mkdir, writeFile } from "node:fs/promises";
 import { expect, test, type Page } from "@playwright/test";
 import {
   clickAway,
@@ -31,10 +32,12 @@ async function replyTime(page: Page, count: number): Promise<number> {
   await clickAway(page);
   await expect(page.locator("#status")).toHaveText("Your turn!", { timeout: REPLY_MS });
   const took = Date.now() - started;
-  await test.info().attach(`ai-reply-${count}-nodes`, {
-    body: `${took} ms`,
-    contentType: "text/plain",
-  });
+  // The fixtures directory is what CI uploads, so the runner's time can be read.
+  await mkdir("test-results/fixtures", { recursive: true });
+  await writeFile(
+    `test-results/fixtures/${test.info().project.name}-reply-${count}-nodes.txt`,
+    `${took} ms\n`,
+  );
   return took;
 }
 
