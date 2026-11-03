@@ -88,10 +88,7 @@ function invalidate(): void {
 
 const view = new View(BOARD_SIZE);
 const loupe = new Loupe();
-const inputOptions: InputOptions = {
-  minStrokeLength: minStrokeLength(view.boardSize),
-  surface: boardEl,
-};
+const inputOptions: InputOptions = { minStrokeLength: minStrokeLength(view.boardSize) };
 const motionQuery = window.matchMedia("(prefers-reduced-motion: reduce)");
 const state: GameState = watched(
   { ...freshBoard(), reducedMotion: motionQuery.matches },
@@ -276,6 +273,12 @@ function showGameOver(): void {
   updateTurn();
   const humanWins = winner(state) === "human";
   setStatus(humanWins ? "You win!" : "AI wins", humanWins ? "win" : "lose");
+  openDialog();
+}
+
+// The heading names the dialog, so it is filled whenever the dialog opens.
+function openDialog(): void {
+  const humanWins = winner(state) === "human";
   winnerText.textContent = humanWins ? "YOU WIN" : "AI WINS";
   winnerText.style.color = humanWins ? "#10B981" : "#EF4444";
   dialog.show();
@@ -346,7 +349,7 @@ function overDot(world: Point): boolean {
 
 function handleStart(world: Point, kind: PointerKind): boolean {
   if (state.reviewing) {
-    if (state.gameOver && timeline.atEnd) dialog.show();
+    if (state.gameOver && timeline.atEnd) openDialog();
     return false;
   }
   if (state.mode !== "idle" || state.thinking || state.gameOver || seeking) return false;

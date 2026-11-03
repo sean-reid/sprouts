@@ -300,8 +300,8 @@ button:disabled {
   touch-action: none;
 }
 
-#board:focus {
-  outline-color: #2a2a2a;
+#board:focus-visible {
+  outline-color: #60a5fa;
 }
 
 #canvas {
@@ -312,9 +312,11 @@ button:disabled {
   height: min(100cqw, 100cqh);
 }
 
+/* Presses go to the canvas; the buttons are the keyboard path. */
 #nodeTargets {
   position: absolute;
   inset: 0;
+  pointer-events: none;
 }
 
 #nodeTargets button {
@@ -326,7 +328,6 @@ button:disabled {
   border: 0;
   border-radius: 50%;
   background: transparent;
-  cursor: inherit;
 }
 
 #nodeTargets button:focus {

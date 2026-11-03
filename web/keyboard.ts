@@ -144,7 +144,15 @@ export class KeyboardPlay {
       }
       if (ticket !== this.ticket) return;
       if (reply.kind !== "routed") continue;
-      this.phase = { kind: "shown", ...picked, partner, candidates, index };
+      this.phase = {
+        kind: "shown",
+        start: picked.start,
+        moves: picked.moves,
+        partners: picked.partners,
+        partner,
+        candidates,
+        index,
+      };
       this.table.lock(picked.start, partner, reply);
       this.table.status(this.describe(picked.start, partner, index, count));
       return;

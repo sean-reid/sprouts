@@ -13,8 +13,8 @@ export interface TargetHandlers {
   focus(id: number | null): void;
 }
 
-// One button per active node, over its disc, so Tab reaches the board and
-// a finger has a 44 px target. Pointer events pass through to the canvas.
+// One focusable 44 px button per active node, over its disc, so Tab and
+// assistive technology reach the board. Presses pass through to the canvas.
 export class NodeTargets {
   private readonly buttons = new Map<number, HTMLButtonElement>();
   private partners: Set<number> | null = null;
@@ -28,9 +28,7 @@ export class NodeTargets {
   ) {
     container.addEventListener("click", (e) => {
       const id = this.idOf(e.target);
-      // A pointer press is captured by the canvas; a click reaching the
-      // button itself comes from a key or assistive technology.
-      if (id !== null && e.detail === 0) handlers.activate(id);
+      if (id !== null) handlers.activate(id);
     });
     container.addEventListener("focusin", (e) => {
       const target = e.target instanceof HTMLElement ? e.target : null;

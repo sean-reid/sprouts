@@ -45,7 +45,8 @@ export class Dialog {
   hide(fallback: HTMLElement): void {
     if (!this.open) return;
     this.element.classList.remove("visible");
-    const back = this.opener?.isConnected ? this.opener : fallback;
+    const opener = this.opener;
+    const back = opener?.isConnected && opener !== document.body ? opener : fallback;
     this.opener = null;
     back.focus({ preventScroll: true });
   }
