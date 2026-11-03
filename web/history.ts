@@ -67,7 +67,7 @@ const LINK_VERSION = 4;
 // Matches ROUTER_VERSION in src/protocol.rs; a version 4 link carries it
 // right after the version byte, and the engine refuses a rehearsal for
 // any other.
-export const ROUTER_VERSION = 1;
+export const ROUTER_VERSION = 2;
 const LAYOUT_LINK_VERSION = 3;
 const CUBIC_LINK_VERSION = 2;
 const STROKE_LINK_VERSION = 1;
