@@ -44,11 +44,25 @@ impl Region {
         self.model.face_count() - self.frozen
     }
 
-    /// Lives left on the region's nodes, the most moves its game can last.
+    /// Lives left on the nodes with a corner in the region's own faces,
+    /// the most moves its game can last.
     pub fn lives(&self) -> usize {
         (0..self.model.node_count())
+            .filter(|&v| self.plays(v))
             .map(|v| 3 - usize::from(self.model.degree(v)))
             .sum()
+    }
+
+    fn plays(&self, v: usize) -> bool {
+        match self.model.degree(v) {
+            0 => self.model.corner_face(v, None).expect("home face") >= self.frozen,
+            3 => false,
+            _ => self
+                .model
+                .rotation(v)
+                .iter()
+                .any(|&h| self.model.face_of(h) >= self.frozen),
+        }
     }
 
     /// The region's moves, one per class as `FaceModel::search_moves`,
@@ -365,7 +379,7 @@ mod tests {
             .map(|r| (r.node_count(), r.lives(), r.face_count()))
             .collect();
         sizes.sort_unstable();
-        assert_eq!(sizes, vec![(4, 4, 2), (6, 10, 1)]);
+        assert_eq!(sizes, vec![(4, 4, 2), (6, 9, 1)]);
         for region in &regions {
             check(region.model());
             assert_eq!(region.model().face_count(), 3);

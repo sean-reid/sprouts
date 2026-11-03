@@ -7,7 +7,7 @@
 //! first winning move, and nimbers are found for the parts of a split.
 //! Both depend only on the form and are kept for the life of the worker.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::face::{FaceModel, Region};
 
@@ -17,13 +17,15 @@ pub const NIMBER_BUDGET: usize = 10_000;
 /// Most lives in a region the exact choice is tried on. Six fresh nodes
 /// have 18 and take 800,000 child positions from cold.
 pub const EXACT_LIVES: usize = 16;
+/// Regions kept before the table starts over.
+pub const TABLE_CAP: usize = 200_000;
 
 #[derive(Default)]
 pub struct Nimbers {
     table: HashMap<Vec<u32>, u32>,
     /// Regions known won by the player to move without their nimber; a
     /// lost one has nimber zero and goes in `table`.
-    won: HashMap<Vec<u32>, ()>,
+    won: HashSet<Vec<u32>>,
     hits: usize,
     misses: usize,
     largest: (usize, usize),
@@ -72,18 +74,29 @@ impl Nimbers {
         found
     }
 
-    /// Whether the player to move loses the sum `regions`, from what is
-    /// stored: a lone region's outcome, or every region's nimber.
-    pub fn known_lost(&mut self, regions: &[Region]) -> Option<bool> {
-        if let [one] = regions {
-            if self.won.contains_key(one.form()) {
+    /// Whether the player to move loses the sum of the regions with
+    /// `forms`, from what is stored: a lone region's outcome, or every
+    /// region's nimber.
+    pub fn known_lost(&mut self, forms: &[&[u32]]) -> Option<bool> {
+        if let [one] = forms {
+            if self.won.contains(*one) {
                 self.hits += 1;
                 return Some(false);
             }
         }
-        let sum = regions
-            .iter()
-            .try_fold(0, |acc, region| Some(acc ^ self.get(region)?))?;
+        let mut sum = 0;
+        for form in forms {
+            match self.table.get(*form) {
+                Some(value) => {
+                    self.hits += 1;
+                    sum ^= value;
+                }
+                None => {
+                    self.misses += 1;
+                    return None;
+                }
+            }
+        }
         Some(sum == 0)
     }
 
@@ -113,7 +126,7 @@ impl Nimbers {
         if let Some(value) = self.get(region) {
             return Some(value != 0);
         }
-        if self.won.contains_key(region.form()) {
+        if self.won.contains(region.form()) {
             return Some(true);
         }
         for mv in region.moves() {
@@ -122,8 +135,8 @@ impl Nimbers {
             }
             *budget -= 1;
             if self.lost(&region.after(&mv), budget)? {
-                self.won.insert(region.form().to_vec(), ());
                 self.grew(region);
+                self.won.insert(region.form().to_vec());
                 return Some(true);
             }
         }
@@ -167,14 +180,19 @@ impl Nimbers {
     }
 
     fn insert(&mut self, region: &Region, value: u32) {
-        self.table.insert(region.form().to_vec(), value);
         self.grew(region);
+        self.table.insert(region.form().to_vec(), value);
     }
 
+    /// Notes the region's size and makes room for it.
     fn grew(&mut self, region: &Region) {
         let size = (region.lives(), region.node_count());
         if size > self.largest {
             self.largest = size;
+        }
+        if self.table.len() + self.won.len() >= TABLE_CAP {
+            self.table.clear();
+            self.won.clear();
         }
     }
 }
@@ -210,19 +228,6 @@ mod tests {
         false
     }
 
-    /// `n` nodes after `picks`, each pick an index into the move list.
-    fn after(n: usize, picks: &[u32]) -> FaceModel {
-        let mut m = FaceModel::new(n);
-        for &pick in picks {
-            let moves = m.moves();
-            if moves.is_empty() {
-                break;
-            }
-            m.apply(&moves[pick as usize % moves.len()]).unwrap();
-        }
-        m
-    }
-
     #[test]
     fn one_and_two_lone_nodes_are_lost_for_the_player_to_move() {
         assert_eq!(solved(1), 0);
@@ -246,7 +251,6 @@ mod tests {
         assert!(!children.contains(&value));
         let mex = (0..).find(|v| !children.contains(v)).unwrap();
         assert_eq!(mex, value);
-        assert_eq!(nimbers.misses(), nimbers.misses());
     }
 
     /// Applegate, Jacobson and Sleator: the first player loses from 1 and
@@ -269,12 +273,15 @@ mod tests {
     fn outcomes_are_stored_and_a_lost_region_has_nimber_zero() {
         let mut nimbers = Nimbers::new();
         assert_eq!(nimbers.wins(&fresh(3), &mut 100_000), Some(true));
-        assert_eq!(nimbers.known_lost(&[fresh(3)]), Some(false));
+        assert_eq!(nimbers.known_lost(&[fresh(3).form()]), Some(false));
         assert_eq!(nimbers.get(&fresh(3)), None);
         assert_eq!(nimbers.wins(&fresh(2), &mut 100_000), Some(false));
         assert_eq!(nimbers.get(&fresh(2)), Some(0));
-        assert_eq!(nimbers.known_lost(&[fresh(2)]), Some(true));
-        assert_eq!(nimbers.known_lost(&[fresh(2), fresh(3)]), None);
+        assert_eq!(nimbers.known_lost(&[fresh(2).form()]), Some(true));
+        assert_eq!(
+            nimbers.known_lost(&[fresh(2).form(), fresh(3).form()]),
+            None
+        );
     }
 
     /// The first player wins from 5 nodes and loses from 6. Run with
@@ -400,16 +407,55 @@ mod tests {
         }
     }
 
+    /// Four nodes, a loop round two of them and the chord across it on
+    /// the other side: two regions, whose nim-sum says what the search
+    /// over the whole board says.
     #[test]
     fn a_split_position_is_solved_from_its_parts() {
-        let m = after(5, &[0, 3, 1, 1]);
+        let mut m = FaceModel::new(4);
+        let loop_round = m
+            .moves()
+            .into_iter()
+            .find(|mv| mv.a == 0 && mv.b == 0 && mv.enclosed == vec![2, 3])
+            .unwrap();
+        m.apply(&loop_round).unwrap();
+        let inside = m.corner_face(1, None).unwrap();
+        let chord = m
+            .moves()
+            .into_iter()
+            .find(|mv| mv.a == 0 && mv.b == 4 && m.corner_face(0, mv.at_a) == Ok(inside))
+            .unwrap();
+        m.apply(&chord).unwrap();
         let regions = m.regions();
+        assert_eq!(regions.len(), 2);
         let mut nimbers = Nimbers::new();
-        let total = nimbers.solve_all(&m, &mut plenty()).unwrap();
-        let parts: u32 = regions
+        let values: Vec<u32> = regions
             .iter()
-            .map(|r| nimbers.get(r).unwrap())
-            .fold(0, |acc, v| acc ^ v);
-        assert_eq!(total, parts);
+            .map(|r| nimbers.solve(r, &mut plenty()).unwrap())
+            .collect();
+        assert_ne!(values[0], values[1]);
+        let sum = values[0] ^ values[1];
+        assert_eq!(sum != 0, first_player_wins(&mut m.clone()));
+        assert_eq!(nimbers.lost(&regions, &mut plenty()), Some(sum == 0));
+    }
+
+    /// Four fresh nodes are not reached from three, so settling them on a
+    /// full table starts it over and leaves about what that alone stores,
+    /// less the few small regions hit before the table went.
+    #[test]
+    fn the_table_starts_over_past_its_cap() {
+        let mut alone = Nimbers::new();
+        assert_eq!(alone.wins(&fresh(4), &mut plenty()), Some(true));
+        let mut nimbers = Nimbers::new();
+        nimbers.wins(&fresh(3), &mut plenty()).unwrap();
+        assert_eq!(nimbers.get(&fresh(4)), None);
+        for form in nimbers.len()..TABLE_CAP {
+            nimbers.table.insert(vec![u32::MAX, form as u32], 0);
+        }
+        assert_eq!(nimbers.len(), TABLE_CAP);
+        assert_eq!(nimbers.wins(&fresh(4), &mut plenty()), Some(true));
+        assert!(nimbers.len() <= alone.len());
+        assert!(nimbers.len() > alone.len() / 2);
+        assert_eq!(nimbers.known_lost(&[fresh(4).form()]), Some(false));
     }
 }

@@ -355,8 +355,9 @@ impl<'a> Tree<'a> {
 
 /// The form of the game on the faces of `m` from `frozen` on: the sorted
 /// forms of its independent parts, each in the orientation that reads
-/// lower. Empty when no node there has a life left.
-pub(super) fn live_form(m: &FaceModel, frozen: usize) -> Vec<u32> {
+/// lower and led by its length, so `parts` splits them out again. Empty
+/// when no node there has a life left.
+pub fn live_form(m: &FaceModel, frozen: usize) -> Vec<u32> {
     let corners = Corners::of(m, frozen);
     let forward = Tree::new(&corners, true).forms();
     let backward = Tree::new(&corners, false).forms();
@@ -370,6 +371,19 @@ pub(super) fn live_form(m: &FaceModel, frozen: usize) -> Vec<u32> {
     for part in parts {
         out.push(part.len() as u32);
         out.extend(part);
+    }
+    out
+}
+
+/// The forms of a position's regions, as `Region::form` gives them, read
+/// off the position's own form.
+pub fn parts(form: &[u32]) -> Vec<&[u32]> {
+    let mut out = Vec::new();
+    let mut at = 0;
+    while at < form.len() {
+        let end = at + 1 + form[at] as usize;
+        out.push(&form[at..end]);
+        at = end;
     }
     out
 }
@@ -488,45 +502,44 @@ mod tests {
         assert_eq!(form(&chiral), form(&chiral.mirror()));
     }
 
-    /// Every position reachable from `n` nodes, grouped by live form:
-    /// one outcome per form. Prints the first disagreement.
-    fn forms_agree_with_outcomes(n: usize) {
-        use crate::face::canonical_form;
-        use std::collections::HashMap;
-        let mut outcomes: HashMap<Vec<u32>, bool> = HashMap::new();
-        fn wins(m: &mut FaceModel, memo: &mut HashMap<Vec<u32>, bool>) -> bool {
-            let key = canonical_form(m);
-            if let Some(&w) = memo.get(&key) {
-                return w;
-            }
-            let mut result = false;
-            for mv in m.search_moves() {
-                m.apply(&mv).unwrap();
-                let opponent = wins(m, memo);
-                m.undo();
-                if !opponent {
-                    result = true;
-                    break;
-                }
-            }
-            memo.insert(key, result);
-            result
+    /// The nimber of the whole position by the mex recursion over the
+    /// rotation-system form, which keeps every position apart.
+    fn plain_nimber(m: &mut FaceModel, memo: &mut HashMap<Vec<u32>, u32>) -> u32 {
+        let key = crate::face::canonical_form(m);
+        if let Some(&v) = memo.get(&key) {
+            return v;
         }
-        let mut by_form: HashMap<Vec<u32>, (bool, FaceModel)> = HashMap::new();
+        let mut seen: u64 = 0;
+        for mv in m.search_moves() {
+            m.apply(&mv).unwrap();
+            seen |= 1 << plain_nimber(m, memo);
+            m.undo();
+        }
+        let value = seen.trailing_ones();
+        memo.insert(key, value);
+        value
+    }
+
+    /// Every position reachable from `n` nodes, grouped by live form:
+    /// one nimber per form, and the count of each.
+    fn forms_agree_with_nimbers(n: usize) -> (usize, usize) {
+        use crate::face::canonical_form;
+        let mut nimbers: HashMap<Vec<u32>, u32> = HashMap::new();
+        let mut by_form: HashMap<Vec<u32>, (u32, FaceModel)> = HashMap::new();
         let mut frontier = vec![FaceModel::new(n)];
         let mut seen = std::collections::HashSet::new();
         while let Some(m) = frontier.pop() {
             if !seen.insert(canonical_form(&m)) {
                 continue;
             }
-            let w = wins(&mut m.clone(), &mut outcomes);
+            let value = plain_nimber(&mut m.clone(), &mut nimbers);
             let f = form(&m);
             match by_form.get(&f) {
                 Some((known, other)) => {
-                    assert_eq!(*known, w, "{n} nodes: {other:?} and {m:?} share {f:?}");
+                    assert_eq!(*known, value, "{n} nodes: {other:?} and {m:?} share {f:?}");
                 }
                 None => {
-                    by_form.insert(f, (w, m.clone()));
+                    by_form.insert(f, (value, m.clone()));
                 }
             }
             for mv in m.moves() {
@@ -535,11 +548,7 @@ mod tests {
                 frontier.push(child);
             }
         }
-        println!(
-            "{n} nodes: {} positions, {} live forms",
-            seen.len(),
-            by_form.len()
-        );
+        (seen.len(), by_form.len())
     }
 
     /// Two games side by side read as the sorted pair of their forms.
@@ -560,22 +569,27 @@ mod tests {
             .unwrap();
         m.apply(&chord).unwrap();
         assert_eq!(m.regions().len(), 2);
-        let mut parts: Vec<Vec<u32>> = m.regions().iter().map(|r| r.form().to_vec()).collect();
-        parts.sort();
-        assert_ne!(parts[0], parts[1]);
-        assert_eq!(form(&m), parts.concat());
+        let mut forms: Vec<Vec<u32>> = m.regions().iter().map(|r| r.form().to_vec()).collect();
+        forms.sort();
+        assert_ne!(forms[0], forms[1]);
+        assert_eq!(form(&m), forms.concat());
+        let split: Vec<&[u32]> = forms.iter().map(Vec::as_slice).collect();
+        assert_eq!(parts(&form(&m)), split);
+        assert_eq!(parts(&form(&FaceModel::new(3))).len(), 1);
+        assert!(parts(&[]).is_empty());
     }
 
     #[test]
-    fn every_position_from_two_nodes_has_one_outcome_per_form() {
-        forms_agree_with_outcomes(1);
-        forms_agree_with_outcomes(2);
+    fn every_position_from_two_nodes_has_one_nimber_per_form() {
+        assert_eq!(forms_agree_with_nimbers(1), (3, 3));
+        assert_eq!(forms_agree_with_nimbers(2), (57, 25));
     }
 
+    /// About a second in release; a debug build takes twenty times that.
+    #[cfg(not(debug_assertions))]
     #[test]
-    #[ignore = "about 4249 positions, run in release"]
-    fn every_position_from_three_nodes_has_one_outcome_per_form() {
-        forms_agree_with_outcomes(3);
+    fn every_position_from_three_nodes_has_one_nimber_per_form() {
+        assert_eq!(forms_agree_with_nimbers(3), (4249, 248));
     }
 
     /// Whether the player to move wins, over the reduced move list.

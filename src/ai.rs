@@ -169,8 +169,7 @@ thread_local! {
     static NIMBERS: RefCell<Nimbers> = RefCell::new(Nimbers::new());
 }
 
-/// Index into `candidates` of the move to play. A caller that routes
-/// from the model passes `state.face.search_moves()` here instead.
+/// Index into `candidates` of the move to play.
 pub(crate) fn search_best_index(state: &GameState, candidates: &[FaceMove]) -> usize {
     let root = AbstractState::new(state.face.clone(), state.current_player == Player::AI);
     let mut budget = Budget::new(WallClock::start(), SEARCH_BUDGET_MS);
