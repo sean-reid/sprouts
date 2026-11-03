@@ -1,9 +1,10 @@
 use serde::Serialize;
 use tsify::Tsify;
 
+use crate::curve;
 use crate::geometry::{
     closest_point_on_polyline, closest_point_on_segment, distance, polyline_length,
-    segments_intersect, smooth_path_chaikin,
+    segments_intersect,
 };
 use crate::types::{
     scale, GameState, Move, Point, AI_INTERSECTION_TOLERANCE, HUMAN_INTERSECTION_TOLERANCE,
@@ -225,8 +226,9 @@ fn validate_move_internal(
     }
     debug_log!("[{}] Check 1 passed: Connection limits OK", mode);
 
+    let path = mov.flatten(curve::tolerance(state.board_size));
     let scaled_min_path = MIN_PATH_LENGTH * s;
-    let path_length = polyline_length(&mov.polyline);
+    let path_length = polyline_length(&path);
     if path_length < scaled_min_path {
         debug_log!("[{}] FAIL: Path too short: {:.1}px", mode, path_length);
         return Err(Rejection::too_short(
@@ -264,13 +266,6 @@ fn validate_move_internal(
     }
     debug_log!("[{}] Check 3 passed: Node spacing OK", mode);
 
-    // For human moves, smooth the path to reduce jitter-induced false failures
-    let path_for_clearance = if is_ai_move {
-        mov.polyline.clone()
-    } else {
-        smooth_path_chaikin(&mov.polyline, 2)
-    };
-
     let min_clearance = if is_ai_move {
         MIN_PATH_CLEARANCE_AI
     } else {
@@ -280,7 +275,8 @@ fn validate_move_internal(
         if node.id == mov.from_node || node.id == mov.to_node {
             continue;
         }
-        let (_, dist) = closest_point_on_polyline(&path_for_clearance, &node.position);
+        let dist =
+            curve::nearest(&mov.segments, &node.position).map_or(f64::INFINITY, |hit| hit.distance);
         if dist < min_clearance {
             debug_log!(
                 "[{}] FAIL: Path too close to node {}: {:.1}px",
@@ -298,12 +294,6 @@ fn validate_move_internal(
         state.lines.len()
     );
 
-    let path_for_intersect = if is_ai_move {
-        &mov.polyline
-    } else {
-        &path_for_clearance
-    };
-
     let geom_share_dist = MIN_PATH_CLEARANCE * s;
     for line in &state.lines {
         let shares_node = line.from_node == mov.from_node
@@ -313,13 +303,10 @@ fn validate_move_internal(
         let mut geometrically_shares_node = shares_node;
         if !shares_node {
             for node in &state.nodes {
-                let on_move_path = path_for_intersect
-                    .iter()
-                    .any(|p| p.distance_to(&node.position) < geom_share_dist);
-                let on_line_path = line
-                    .polyline
-                    .iter()
-                    .any(|p| p.distance_to(&node.position) < geom_share_dist);
+                let on_move_path =
+                    closest_point_on_polyline(&path, &node.position).1 < geom_share_dist;
+                let on_line_path =
+                    closest_point_on_polyline(&line.flat, &node.position).1 < geom_share_dist;
                 if on_move_path && on_line_path {
                     geometrically_shares_node = true;
                     debug_log!(
@@ -334,12 +321,12 @@ fn validate_move_internal(
                 }
             }
         }
-        for i in 1..path_for_intersect.len() {
-            let seg_start = &path_for_intersect[i - 1];
-            let seg_end = &path_for_intersect[i];
-            for j in 1..line.polyline.len() {
-                let line_seg_start = &line.polyline[j - 1];
-                let line_seg_end = &line.polyline[j];
+        for i in 1..path.len() {
+            let seg_start = &path[i - 1];
+            let seg_end = &path[i];
+            for j in 1..line.flat.len() {
+                let line_seg_start = &line.flat[j - 1];
+                let line_seg_end = &line.flat[j];
                 if !segments_intersect(seg_start, seg_end, line_seg_start, line_seg_end) {
                     continue;
                 }
@@ -417,7 +404,8 @@ fn validate_move_internal_tight(state: &GameState, mov: &Move) -> Result<(), Rej
         }
     }
 
-    let path_length = polyline_length(&mov.polyline);
+    let path = mov.flatten(curve::tolerance(state.board_size));
+    let path_length = polyline_length(&path);
     if path_length < MIN_PATH_LENGTH * s {
         return Err(Rejection::too_short(
             &mov.polyline,
@@ -445,7 +433,8 @@ fn validate_move_internal_tight(state: &GameState, mov: &Move) -> Result<(), Rej
         if node.id == mov.from_node || node.id == mov.to_node {
             continue;
         }
-        let (_, dist) = closest_point_on_polyline(&mov.polyline, &node.position);
+        let dist =
+            curve::nearest(&mov.segments, &node.position).map_or(f64::INFINITY, |hit| hit.distance);
         if dist < tight_clearance {
             return Err(Rejection::path_too_close(node.id));
         }
@@ -462,26 +451,21 @@ fn validate_move_internal_tight(state: &GameState, mov: &Move) -> Result<(), Rej
         let mut geometrically_shares_node = shares_node;
         if !shares_node {
             for node in &state.nodes {
-                let on_move_path = mov
-                    .polyline
-                    .iter()
-                    .any(|p| p.distance_to(&node.position) < geom_dist);
-                let on_line_path = line
-                    .polyline
-                    .iter()
-                    .any(|p| p.distance_to(&node.position) < geom_dist);
+                let on_move_path = closest_point_on_polyline(&path, &node.position).1 < geom_dist;
+                let on_line_path =
+                    closest_point_on_polyline(&line.flat, &node.position).1 < geom_dist;
                 if on_move_path && on_line_path {
                     geometrically_shares_node = true;
                     break;
                 }
             }
         }
-        for i in 1..mov.polyline.len() {
-            let seg_start = &mov.polyline[i - 1];
-            let seg_end = &mov.polyline[i];
-            for j in 1..line.polyline.len() {
-                let line_seg_start = &line.polyline[j - 1];
-                let line_seg_end = &line.polyline[j];
+        for i in 1..path.len() {
+            let seg_start = &path[i - 1];
+            let seg_end = &path[i];
+            for j in 1..line.flat.len() {
+                let line_seg_start = &line.flat[j - 1];
+                let line_seg_end = &line.flat[j];
                 if !segments_intersect(seg_start, seg_end, line_seg_start, line_seg_end) {
                     continue;
                 }
@@ -624,13 +608,7 @@ mod tests {
             .collect();
         let new_node_pos = p(500.0, 500.0 + 80.0 * (0.5 * std::f64::consts::PI).sin());
 
-        let mov = Move {
-            from_node: 0,
-            to_node: 1,
-            polyline,
-            new_node_pos,
-            player: Player::Human,
-        };
+        let mov = Move::new(0, 1, polyline, new_node_pos, Player::Human, 1000);
         (gs, mov)
     }
 
@@ -665,13 +643,7 @@ mod tests {
             })
             .collect();
 
-        let mov = Move {
-            from_node: 0,
-            to_node: 0,
-            polyline,
-            new_node_pos: p(250.0, 500.0),
-            player: Player::Human,
-        };
+        let mov = Move::new(0, 0, polyline, p(250.0, 500.0), Player::Human, 1000);
         let rejection = validate_move(&gs, &mov).unwrap_err();
         assert_eq!(rejection.kind, RejectionKind::NodeFull);
         assert_eq!(rejection.at, BoardLocation::Node { id: 0 });
@@ -681,13 +653,14 @@ mod tests {
     fn path_too_short_rejected() {
         let (gs, _) = setup_valid_move();
         // Very short path (< MIN_PATH_LENGTH = 20px)
-        let mov = Move {
-            from_node: 0,
-            to_node: 1,
-            polyline: vec![p(200.0, 500.0), p(205.0, 500.0)],
-            new_node_pos: p(202.5, 500.0),
-            player: Player::Human,
-        };
+        let mov = Move::new(
+            0,
+            1,
+            vec![p(200.0, 500.0), p(205.0, 500.0)],
+            p(202.5, 500.0),
+            Player::Human,
+            1000,
+        );
         let rejection = validate_move(&gs, &mov).unwrap_err();
         assert_eq!(rejection.kind, RejectionKind::PathTooShort);
         assert_eq!(rejection.at, BoardLocation::Segments { first: 0, last: 0 });
@@ -706,19 +679,13 @@ mod tests {
                 )
             })
             .collect();
-        let mov = Move {
-            from_node: 0,
-            to_node: 1,
-            polyline,
-            new_node_pos: p(201.0, 500.0), // very close to node 0 at (200, 500)
-            player: Player::Human,
-        };
+        let mov = Move::new(0, 1, polyline, p(201.0, 500.0), Player::Human, 1000);
         let rejection = validate_move(&gs, &mov).unwrap_err();
         assert_eq!(rejection.kind, RejectionKind::NodeTooClose);
         assert_eq!(
             rejection.at,
             BoardLocation::Point {
-                at: p(201.0, 500.0)
+                at: mov.new_node_pos
             }
         );
     }
@@ -737,20 +704,14 @@ mod tests {
                 p(200.0 + t * 600.0, 500.0) // straight line at y=500, node 2 at y=502
             })
             .collect();
-        let mov = Move {
-            from_node: 0,
-            to_node: 1,
-            polyline,
-            new_node_pos: p(400.0, 500.0),
-            player: Player::Human,
-        };
+        let mov = Move::new(0, 1, polyline, p(400.0, 500.0), Player::Human, 1000);
         let rejection = validate_move(&gs, &mov).unwrap_err();
         assert_eq!(rejection.kind, RejectionKind::PathTooCloseToNode);
         assert_eq!(rejection.at, BoardLocation::Node { id: 2 });
     }
 
-    /// The crossing is found on the smoothed path, so the reported segment
-    /// has to be mapped back onto the path the player drew.
+    /// The crossing is found on the flattening of the fit, so the reported
+    /// segment has to be mapped back onto the path the player drew.
     #[test]
     fn crossing_names_the_segment_of_the_submitted_path() {
         let mut gs = GameState::with_board_size(4, 1000);
@@ -758,13 +719,14 @@ mod tests {
         gs.nodes[1].position = p(800.0, 800.0);
         gs.nodes[2].position = p(200.0, 800.0);
         gs.nodes[3].position = p(800.0, 200.0);
-        gs.apply_move(Move {
-            from_node: 0,
-            to_node: 1,
-            polyline: vec![p(200.0, 200.0), p(500.0, 500.0), p(800.0, 800.0)],
-            new_node_pos: p(500.0, 500.0),
-            player: Player::Human,
-        });
+        gs.apply_move(Move::new(
+            0,
+            1,
+            vec![p(200.0, 200.0), p(500.0, 500.0), p(800.0, 800.0)],
+            p(500.0, 500.0),
+            Player::Human,
+            1000,
+        ));
 
         // Four segments; only the third crosses the diagonal, at (550, 550).
         let polyline = vec![
@@ -774,13 +736,7 @@ mod tests {
             p(750.0, 350.0),
             p(800.0, 200.0),
         ];
-        let mov = Move {
-            from_node: 2,
-            to_node: 3,
-            polyline,
-            new_node_pos: p(350.0, 700.0),
-            player: Player::Human,
-        };
+        let mov = Move::new(2, 3, polyline, p(350.0, 700.0), Player::Human, 1000);
         let rejection = validate_move(&gs, &mov).unwrap_err();
         assert_eq!(rejection.kind, RejectionKind::PathCrossesLine);
         assert_eq!(rejection.at, BoardLocation::Segments { first: 2, last: 2 });
@@ -806,5 +762,134 @@ mod tests {
             wire["at"],
             serde_json::json!({ "kind": "point", "at": { "x": 1.0, "y": 2.0 } })
         );
+    }
+
+    // The flattening's chords sit inside a bend, so a node just under the
+    // clearance from the curve can be just over it from the chord.
+    #[test]
+    fn clearance_is_measured_on_the_curve_not_on_its_flattening() {
+        let (mut gs, _) = setup_valid_move();
+        let polyline: Vec<Point> = (0..=40)
+            .map(|i| {
+                let t = i as f64 / 40.0;
+                p(
+                    200.0 + t * 600.0,
+                    500.0 - 150.0 * (t * std::f64::consts::PI).sin(),
+                )
+            })
+            .collect();
+        let probe = Move::new(0, 1, polyline.clone(), polyline[20], Player::Human, 1000);
+        let flat = probe.flatten(curve::tolerance(1000));
+        let (chord_mid, on_curve, sag) = flat
+            .windows(2)
+            .map(|w| {
+                let m = p((w[0].x + w[1].x) / 2.0, (w[0].y + w[1].y) / 2.0);
+                let hit = curve::nearest(&probe.segments, &m).unwrap();
+                (m, hit.point, hit.distance)
+            })
+            .max_by(|a, b| a.2.total_cmp(&b.2))
+            .unwrap();
+        assert!(
+            sag > 0.5,
+            "flattening sag of {sag} is too small to tell the two apart"
+        );
+        let (nx, ny) = (
+            (on_curve.x - chord_mid.x) / sag,
+            (on_curve.y - chord_mid.y) / sag,
+        );
+        let reach = MIN_PATH_CLEARANCE - sag / 2.0;
+        let intruder = p(on_curve.x + nx * reach, on_curve.y + ny * reach);
+        assert!(closest_point_on_polyline(&flat, &intruder).1 >= MIN_PATH_CLEARANCE);
+        gs.nodes.push(Node::new(2, intruder));
+
+        let far = *polyline
+            .iter()
+            .skip(4)
+            .find(|v| v.distance_to(&intruder) > 60.0)
+            .unwrap();
+        let mov = Move::new(0, 1, polyline, far, Player::Human, 1000);
+        let rejection = validate_move(&gs, &mov).unwrap_err();
+        assert_eq!(rejection.kind, RejectionKind::PathTooCloseToNode);
+        assert_eq!(rejection.at, BoardLocation::Node { id: 2 });
+    }
+
+    // A node placed on a line is only on that line's flattening to within
+    // the curve tolerance, and nowhere near its vertices.
+    #[derive(Clone, Copy)]
+    enum Tier {
+        Human,
+        Ai,
+        Tight,
+    }
+
+    fn departing_from_a_mid_line_node(curved: bool, tier: Tier) -> Result<(), Rejection> {
+        let mut gs = GameState::with_board_size(3, 1000);
+        gs.nodes[0].position = p(200.0, 500.0);
+        gs.nodes[1].position = p(800.0, 500.0);
+        gs.nodes[2].position = p(500.0, 200.0);
+        let first: Vec<Point> = (0..=40)
+            .map(|i| {
+                let t = i as f64 / 40.0;
+                let bulge = if curved {
+                    100.0 * (t * std::f64::consts::PI).sin()
+                } else {
+                    0.0
+                };
+                p(200.0 + 600.0 * t, 500.0 + bulge)
+            })
+            .collect();
+        let apex = first[20];
+        let opening = Move::new(0, 1, first, apex, Player::Human, 1000);
+        validate_move(&gs, &opening)?;
+        gs.apply_move(opening);
+
+        let from = gs.nodes[3].position;
+        let to = gs.nodes[2].position;
+        let path: Vec<Point> = (0..=20)
+            .map(|i| {
+                let t = i as f64 / 20.0;
+                p(from.x + (to.x - from.x) * t, from.y + (to.y - from.y) * t)
+            })
+            .collect();
+        let player = match tier {
+            Tier::Human => Player::Human,
+            Tier::Ai | Tier::Tight => Player::AI,
+        };
+        let departure = Move::new(3, 2, path.clone(), path[10], player, 1000);
+        match tier {
+            Tier::Human => validate_move(&gs, &departure),
+            Tier::Ai => validate_ai_move(&gs, &departure),
+            Tier::Tight => validate_ai_move_tight(&gs, &departure),
+        }
+    }
+
+    #[test]
+    fn a_human_may_leave_a_node_placed_on_a_straight_line() {
+        assert_eq!(departing_from_a_mid_line_node(false, Tier::Human), Ok(()));
+    }
+
+    #[test]
+    fn a_human_may_leave_a_node_placed_on_a_curved_line() {
+        assert_eq!(departing_from_a_mid_line_node(true, Tier::Human), Ok(()));
+    }
+
+    #[test]
+    fn the_ai_may_leave_a_node_placed_on_a_straight_line() {
+        assert_eq!(departing_from_a_mid_line_node(false, Tier::Ai), Ok(()));
+    }
+
+    #[test]
+    fn the_ai_may_leave_a_node_placed_on_a_curved_line() {
+        assert_eq!(departing_from_a_mid_line_node(true, Tier::Ai), Ok(()));
+    }
+
+    #[test]
+    fn the_tight_tier_lets_the_ai_leave_a_node_placed_on_a_straight_line() {
+        assert_eq!(departing_from_a_mid_line_node(false, Tier::Tight), Ok(()));
+    }
+
+    #[test]
+    fn the_tight_tier_lets_the_ai_leave_a_node_placed_on_a_curved_line() {
+        assert_eq!(departing_from_a_mid_line_node(true, Tier::Tight), Ok(()));
     }
 }

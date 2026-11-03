@@ -58,23 +58,18 @@ mod tests {
     /// Connects node 0 to node 1 and adds a new node.
     fn state_after_human_first_move(n: usize) -> GameState {
         let mut gs = GameState::new(n);
-        let mov = Move {
-            from_node: 0,
-            to_node: 1,
-            polyline: vec![
-                gs.nodes[0].position,
-                Point::new(
-                    (gs.nodes[0].position.x + gs.nodes[1].position.x) / 2.0,
-                    (gs.nodes[0].position.y + gs.nodes[1].position.y) / 2.0 + 50.0,
-                ),
-                gs.nodes[1].position,
-            ],
-            new_node_pos: Point::new(
-                (gs.nodes[0].position.x + gs.nodes[1].position.x) / 2.0,
-                (gs.nodes[0].position.y + gs.nodes[1].position.y) / 2.0 + 50.0,
-            ),
-            player: Player::Human,
-        };
+        let mid = Point::new(
+            (gs.nodes[0].position.x + gs.nodes[1].position.x) / 2.0,
+            (gs.nodes[0].position.y + gs.nodes[1].position.y) / 2.0 + 50.0,
+        );
+        let mov = Move::new(
+            0,
+            1,
+            vec![gs.nodes[0].position, mid, gs.nodes[1].position],
+            mid,
+            Player::Human,
+            gs.board_size,
+        );
         gs.apply_move(mov);
         gs
     }
@@ -117,13 +112,14 @@ mod tests {
             (from_pos.x + to_pos.x) / 2.0,
             (from_pos.y + to_pos.y) / 2.0 + 50.0,
         );
-        let mov = Move {
-            from_node: u,
-            to_node: c,
-            polyline: vec![from_pos, mid, to_pos],
-            new_node_pos: mid,
-            player: Player::AI,
-        };
+        let mov = Move::new(
+            u,
+            c,
+            vec![from_pos, mid, to_pos],
+            mid,
+            Player::AI,
+            gs.board_size,
+        );
         gs.apply_move(mov);
         assert!(lookup_opening(&gs).is_none());
     }

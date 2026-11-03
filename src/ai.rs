@@ -21,13 +21,14 @@ pub(crate) fn generate_concrete_moves_from_classification(
         if let Some(path) = find_path_on_skeleton(state, *from_id, *to_id) {
             if path.len() >= 3 {
                 let new_node_pos = find_optimal_node_placement(&path, state);
-                let mov = Move {
-                    from_node: *from_id,
-                    to_node: *to_id,
-                    polyline: path,
+                let mov = Move::new(
+                    *from_id,
+                    *to_id,
+                    path,
                     new_node_pos,
-                    player: state.current_player,
-                };
+                    state.current_player,
+                    state.board_size,
+                );
                 if validate_ai_move(state, &mov).is_ok() {
                     moves.push(mov);
                     found = true;
@@ -48,13 +49,14 @@ pub(crate) fn generate_concrete_moves_from_classification(
                 continue;
             }
             let new_node_pos = find_optimal_node_placement(&path, state);
-            let mov = Move {
-                from_node: node_id,
-                to_node: node_id,
-                polyline: path,
+            let mov = Move::new(
+                node_id,
+                node_id,
+                path,
                 new_node_pos,
-                player: state.current_player,
-            };
+                state.current_player,
+                state.board_size,
+            );
             if validate_ai_move(state, &mov).is_ok() || validate_ai_move_tight(state, &mov).is_ok()
             {
                 moves.push(mov);
@@ -74,13 +76,14 @@ pub(crate) fn generate_concrete_moves_from_classification(
                     continue;
                 }
                 let new_node_pos = find_optimal_node_placement(&path, state);
-                let mov = Move {
-                    from_node: *from_id,
-                    to_node: *to_id,
-                    polyline: path,
+                let mov = Move::new(
+                    *from_id,
+                    *to_id,
+                    path,
                     new_node_pos,
-                    player: state.current_player,
-                };
+                    state.current_player,
+                    state.board_size,
+                );
                 if validate_ai_move(state, &mov).is_ok() {
                     moves.push(mov);
                 } else {
@@ -103,13 +106,14 @@ pub(crate) fn generate_concrete_moves_from_classification(
                     continue;
                 }
                 let new_node_pos = find_optimal_node_placement(&path_opt, state);
-                let mov = Move {
-                    from_node: *from_id,
-                    to_node: *to_id,
-                    polyline: path_opt,
+                let mov = Move::new(
+                    *from_id,
+                    *to_id,
+                    path_opt,
                     new_node_pos,
-                    player: state.current_player,
-                };
+                    state.current_player,
+                    state.board_size,
+                );
                 if validate_ai_move(state, &mov).is_ok()
                     || validate_ai_move_tight(state, &mov).is_ok()
                 {
@@ -129,13 +133,14 @@ pub fn find_best_move(state: &mut GameState) -> Option<Move> {
         if let Some(path) = find_path_on_skeleton(state, from, to) {
             if path.len() >= 3 {
                 let new_node_pos = find_optimal_node_placement(&path, state);
-                let mov = Move {
-                    from_node: from,
-                    to_node: to,
-                    polyline: path,
+                let mov = Move::new(
+                    from,
+                    to,
+                    path,
                     new_node_pos,
-                    player: state.current_player,
-                };
+                    state.current_player,
+                    state.board_size,
+                );
                 if validate_ai_move(state, &mov).is_ok() {
                     return Some(mov);
                 }

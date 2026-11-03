@@ -1,4 +1,4 @@
-import type { Flash, GameState, Player, Point } from "./state";
+import type { Cubic, Flash, GameState, Player, Point } from "./state";
 import type { View } from "./view";
 
 export const PLAYER_COLORS: Record<Player, string> = { human: "#60A5FA", ai: "#EF4444" };
@@ -85,29 +85,49 @@ function drawRing(ctx: CanvasRenderingContext2D, state: GameState, view: View): 
   ctx.globalAlpha = 1;
 }
 
-// Catmull-Rom through every point; tension 6 is the standard value.
-function drawSmoothPath(ctx: CanvasRenderingContext2D, points: Point[]): void {
-  const first = points[0];
-  const second = points[1];
-  if (!first || !second) return;
+function lerp(a: Point, b: Point, t: number): Point {
+  return { x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t };
+}
+
+// The part of a cubic before parameter t, by de Casteljau.
+function head(c: Cubic, t: number): Cubic {
+  const p01 = lerp(c.p0, c.p1, t);
+  const p12 = lerp(c.p1, c.p2, t);
+  const p23 = lerp(c.p2, c.p3, t);
+  const p012 = lerp(p01, p12, t);
+  const p123 = lerp(p12, p23, t);
+  return { p0: c.p0, p1: p01, p2: p012, p3: lerp(p012, p123, t) };
+}
+
+// Control points go through the projection like any point, so the screen
+// curve is the affine image of the world curve. `upTo` is the fraction of
+// segments drawn.
+function strokeSegments(
+  ctx: CanvasRenderingContext2D,
+  segments: Cubic[],
+  project: Project,
+  upTo = 1,
+): void {
+  const first = segments[0];
+  if (!first) return;
+  const total = segments.length * Math.min(1, Math.max(0, upTo));
+  const whole = Math.floor(total);
+  const partial = total - whole;
   ctx.beginPath();
-  ctx.moveTo(first.x, first.y);
-  if (points.length === 2) {
-    ctx.lineTo(second.x, second.y);
-  } else {
-    for (let i = 0; i < points.length - 1; i++) {
-      const p0 = points[Math.max(i - 1, 0)];
-      const p1 = points[i];
-      const p2 = points[i + 1];
-      const p3 = points[Math.min(i + 2, points.length - 1)];
-      if (!p0 || !p1 || !p2 || !p3) break;
-      const t = 6;
-      const cp1x = p1.x + (p2.x - p0.x) / t;
-      const cp1y = p1.y + (p2.y - p0.y) / t;
-      const cp2x = p2.x - (p3.x - p1.x) / t;
-      const cp2y = p2.y - (p3.y - p1.y) / t;
-      ctx.bezierCurveTo(cp1x, cp1y, cp2x, cp2y, p2.x, p2.y);
+  const start = project(first.p0);
+  ctx.moveTo(start.x, start.y);
+  for (let i = 0; i < segments.length; i++) {
+    let c = segments[i];
+    if (!c) break;
+    if (i >= whole) {
+      if (partial <= 0) break;
+      c = head(c, partial);
     }
+    const p1 = project(c.p1);
+    const p2 = project(c.p2);
+    const p3 = project(c.p3);
+    ctx.bezierCurveTo(p1.x, p1.y, p2.x, p2.y, p3.x, p3.y);
+    if (i >= whole) break;
   }
   ctx.stroke();
 }
@@ -119,16 +139,19 @@ export function drawBoard(ctx: CanvasRenderingContext2D, state: GameState, proje
   const screen = (points: Point[]): Point[] => points.map(project);
 
   ctx.lineWidth = LINE_WIDTH;
+  ctx.lineCap = "round";
+  ctx.lineJoin = "round";
   for (const line of state.lines) {
     ctx.strokeStyle = PLAYER_COLORS[line.player];
-    drawSmoothPath(ctx, screen(line.polyline));
+    strokeSegments(ctx, line.segments, project);
   }
 
-  const activePath =
-    state.mode === "dragging" ? state.dragPath : state.mode === "placing" ? state.lockedPath : null;
-  if (activePath && activePath.length > 1) {
-    ctx.strokeStyle = "#3B82F6";
-    drawSmoothPath(ctx, screen(activePath));
+  ctx.strokeStyle = "#3B82F6";
+  if (state.mode === "dragging") {
+    strokePolyline(ctx, screen(state.dragPath));
+  } else if (state.mode === "placing") {
+    if (state.lockedSegments) strokeSegments(ctx, state.lockedSegments, project);
+    else strokePolyline(ctx, screen(state.lockedPath));
   }
 
   if (state.mode === "placing" && state.placementDot) {
@@ -158,13 +181,9 @@ export function drawBoard(ctx: CanvasRenderingContext2D, state: GameState, proje
   }
 
   if (state.mode === "animating_ai" && state.animatingLine) {
-    const { path } = state.animatingLine;
-    const shown = Math.floor(state.animationProgress * path.length);
-    if (shown > 1) {
-      ctx.strokeStyle = PLAYER_COLORS.ai;
-      ctx.lineWidth = LINE_WIDTH;
-      drawSmoothPath(ctx, screen(path.slice(0, shown)));
-    }
+    ctx.strokeStyle = PLAYER_COLORS.ai;
+    ctx.lineWidth = LINE_WIDTH;
+    strokeSegments(ctx, state.animatingLine.segments, project, state.animationProgress);
   }
 
   if (state.flash) drawFlash(ctx, state, state.flash, project);

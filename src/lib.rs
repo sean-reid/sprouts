@@ -1,6 +1,7 @@
 mod abstract_graph;
 mod ai;
 mod components;
+mod curve;
 pub mod face;
 mod game_over;
 mod geometry;
@@ -14,7 +15,7 @@ pub mod replay;
 mod types;
 mod validation;
 
-use protocol::{Move, Outcome, Placement, PlacementQuery, Snapshot};
+use protocol::{AiMove, Curve, FitQuery, Move, Outcome, Placement, PlacementQuery, Snapshot};
 use tsify::{Ts, Tsify};
 use types::{GameState, Player};
 use wasm_bindgen::prelude::*;
@@ -51,10 +52,14 @@ impl SproutsGame {
     }
 
     #[wasm_bindgen(js_name = aiMove)]
-    pub fn ai_move(&mut self) -> Result<Option<Ts<Move>>, JsError> {
+    pub fn ai_move(&mut self) -> Result<Option<Ts<AiMove>>, JsError> {
         Ok(protocol::ai_move(&mut self.state)
             .map(|mov| mov.into_ts())
             .transpose()?)
+    }
+
+    pub fn fit(&self, query: Ts<FitQuery>) -> Result<Ts<Curve>, JsError> {
+        Ok(protocol::fit(&self.state, query.to_rust()?).into_ts()?)
     }
 
     pub fn placement(&self, query: Ts<PlacementQuery>) -> Result<Ts<Placement>, JsError> {
