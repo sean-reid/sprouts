@@ -45,9 +45,8 @@ for (const file of fixtures) {
       new RegExp(`^Reviewing: move ${total} of ${total}\\.`),
       { timeout: 240_000 },
     );
-    await expect(entries(other)).toHaveCount(total);
-
-    // The visitor lands on the last move, which the board points out.
+    // The visitor lands on the last move, which the board points out for
+    // two seconds from the end of the seek.
     const last = fixture.moves[total - 1]!;
     const nodes = await recordNodesOnScreen(other, fixture);
     const colour = PLAYER_COLORS[(total - 1) % 2 === 0 ? "human" : "ai"];
@@ -56,6 +55,7 @@ for (const file of fixtures) {
         .poll(() => ringSamplesAround(other, nodes[id]!, 14, colour))
         .toBeGreaterThanOrEqual(8);
     }
+    await expect(entries(other)).toHaveCount(total);
     await visitor.close();
   });
 }

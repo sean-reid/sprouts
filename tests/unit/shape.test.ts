@@ -64,14 +64,13 @@ describe("move rows", () => {
 
   it("counts only nodes that existed before the move", () => {
     const history = board();
+    const around1 = [at(150, 150), at(190, 150), at(190, 190), at(150, 190), at(150, 150)];
     history.push({ fromNode: 0, toNode: 0, polyline: SQUARE, newNodePos: at(150, 100) });
-    history.push({
-      fromNode: 1,
-      toNode: 1,
-      polyline: [at(150, 150), at(190, 150), at(190, 190), at(150, 190), at(150, 150)],
-      newNodePos: at(190, 170),
-    });
+    history.push({ fromNode: 1, toNode: 1, polyline: around1, newNodePos: at(170, 170) });
+    expect(enclosedCount(around1, [at(170, 170)])).toBe(1);
     expect(history.label(1)).toBe("2. AI, loop on one node");
+    history.push({ fromNode: 1, toNode: 1, polyline: around1, newNodePos: at(160, 180) });
+    expect(history.label(2)).toBe("3. You, loop on one node, encloses 1");
   });
 
   it("skips the count when the layout is unknown", () => {

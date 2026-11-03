@@ -1,6 +1,6 @@
 import type { Point } from "../pkg/sprouts";
 
-// Even-odd ray cast along +x; a point on an edge counts as inside.
+// Even-odd ray cast along +x.
 export function pointInPolygon(point: Point, polygon: Point[]): boolean {
   let inside = false;
   for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
