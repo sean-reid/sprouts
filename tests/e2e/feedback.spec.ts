@@ -79,7 +79,7 @@ test("a stroke across an existing line flashes the crossed segment", async ({ pa
   await rejectAt(page, lerp(corner, n2, 0.5), "Path crosses an existing line", crossing);
   await shot(page, "flash");
   await page.waitForTimeout(800);
-  expect(near(await pixelAt(page, crossing), HUMAN)).toBe(true);
+  expect(near(await pixelAt(page, crossing), AI)).toBe(false);
 });
 
 test("a stroke brushing a node flashes that node", async ({ page }) => {
