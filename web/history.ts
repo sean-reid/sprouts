@@ -238,11 +238,11 @@ function scaleOf(boardSize: number): number {
 // then per move: from, to and cubic count as varints, and every point as
 // zigzag varint deltas from the previous point in link quanta, starting at
 // the origin: the first cubic's start, the other three control points of
-// each cubic, then the new node. A move the engine has not fitted yet has
-// count 0 and carries its thinned stroke instead, a point count then the
-// points. A version 1 link has from, to and point count as u16, the first
-// point as two u16 tenths, later points as zigzag varint deltas in tenths,
-// and the new node as two u16 tenths.
+// each cubic, then the new node. A move travels as whichever is shorter,
+// its cubics or its thinned stroke; a stroke has count 0, then a point
+// count and the points. A version 1 link has from, to and point count as
+// u16, the first point as two u16 tenths, later points as zigzag varint
+// deltas in tenths, and the new node as two u16 tenths.
 export function encodeRecord(history: History): string {
   const out = new ByteWriter();
   out.u8(LINK_VERSION);
@@ -256,18 +256,19 @@ export function encodeRecord(history: History): string {
     out.varint(move.fromNode);
     out.varint(move.toNode);
     const point = deltaWriter(out, LINK_QUANTUM * scale);
-    const first = move.segments?.[0];
-    if (move.segments && first) {
-      out.varint(move.segments.length);
+    const stroke = simplify(move.polyline, LINK_TOLERANCE * scale);
+    const segments = move.segments ?? [];
+    const first = segments[0];
+    if (first && 3 * segments.length + 1 < stroke.length) {
+      out.varint(segments.length);
       point(first.p0);
-      for (const cubic of move.segments) {
+      for (const cubic of segments) {
         point(cubic.p1);
         point(cubic.p2);
         point(cubic.p3);
       }
     } else {
       out.varint(0);
-      const stroke = simplify(move.polyline, LINK_TOLERANCE * scale);
       out.varint(stroke.length);
       for (const p of stroke) point(p);
     }
