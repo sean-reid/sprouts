@@ -109,6 +109,12 @@ fn run_bench() -> Result<bool, String> {
          largest region solved {nodes} nodes with {lives} lives"
     );
 
+    let (positions, took) = sprouts::search_rate();
+    println!(
+        "\nsearch rate at 20 nodes: {positions} positions in {took:.0} ms, {:.0} positions/s",
+        positions as f64 / took * 1000.0
+    );
+
     println!("\nbudgets (ms):");
     for phase in PHASES {
         println!("  {phase:>14} {:>10.2}", budgets[phase]);

@@ -5,7 +5,7 @@
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 
-use crate::face::{live_form, parts, FaceModel, LiveScratch, Move, NodeId};
+use crate::face::{parts, FaceModel, LiveScratch, Move, NodeId};
 use crate::nimber::{Nimbers, EXACT_LIVES, NIMBER_BUDGET};
 
 /// Thinking time per move.
@@ -339,6 +339,28 @@ impl<'a, C: Clock> Search<'a, C> {
     }
 }
 
+/// Positions the budgeted search charges and the milliseconds it takes on
+/// 20 nodes after three moves, for the bench's rate line.
+#[cfg(feature = "bench")]
+pub fn search_rate() -> (usize, f64) {
+    let root = twenty_nodes_after_three_moves();
+    let candidates = root.generate_moves();
+    let mut budget = Budget::new(WallClock::start(), SEARCH_BUDGET_MS);
+    let started = std::time::Instant::now();
+    let pick = best_candidate(root, &candidates, &mut budget, &mut Nimbers::new());
+    (pick.spent, started.elapsed().as_secs_f64() * 1000.0)
+}
+
+#[cfg(any(test, feature = "bench"))]
+fn twenty_nodes_after_three_moves() -> AbstractState {
+    let mut s = AbstractState::new(FaceModel::new(20), true);
+    for _ in 0..3 {
+        let mov = s.generate_moves().first().cloned().expect("a move");
+        s.apply_move(&mov);
+    }
+    s
+}
+
 /// Index into `candidates` of the move to play from `root`. When no
 /// region of the root has more than `EXACT_LIVES` lives and each
 /// candidate's child settles as won or lost within `NIMBER_BUDGET` child
@@ -386,6 +408,7 @@ pub fn choose_within<C: Clock>(
         let heuristic = root.quick_move_score(&candidates[idx]);
         (winning, if winning { 0 } else { room }, heuristic)
     };
+    // Reversed so `max_by`, which keeps the last of equals, leaves the lowest index winning.
     let index = (0..candidates.len())
         .rev()
         .max_by(|&a, &b| rank(a).partial_cmp(&rank(b)).expect("finite scores"))
@@ -514,7 +537,7 @@ impl AbstractState {
     /// Hashes the position's regions up to renaming, and whose turn it is.
     #[cfg(test)]
     pub fn hash_key(&self) -> u64 {
-        key_of(&live_form(&self.face, 0), self.is_ai_turn)
+        key_of(&crate::face::live_form(&self.face, 0), self.is_ai_turn)
     }
 
     pub fn quick_move_score(&self, mov: &Move) -> f64 {
@@ -1399,14 +1422,20 @@ mod tests {
         }
     }
 
+    /// A third of the least a quiet machine searches in the budget with
+    /// the live form as the key.
+    #[cfg(not(debug_assertions))]
+    const POSITIONS_FLOOR: usize = 12_000;
+
     /// Depth 1 cannot be cut, so the bound only measures the budget where
     /// depth 1 is well inside it, which a debug build is not.
     #[cfg(not(debug_assertions))]
     #[test]
     fn twenty_nodes_answer_within_the_budget_on_the_wall_clock() {
-        let root = after(20, 3);
+        let root = twenty_nodes_after_three_moves();
         let candidates = root.generate_moves();
         let mut times = Vec::new();
+        let mut spent = Vec::new();
         for _ in 0..10 {
             let started = std::time::Instant::now();
             let mut budget = Budget::new(WallClock::start(), SEARCH_BUDGET_MS);
@@ -1417,10 +1446,16 @@ mod tests {
                 pick.depth, pick.spent
             );
             times.push(took);
+            spent.push(pick.spent);
         }
         for took in times {
             assert!(took <= SEARCH_BUDGET_MS * 1.1, "{took:.1} ms");
         }
+        let slowest = spent.iter().min().copied().unwrap_or(0);
+        assert!(
+            slowest >= POSITIONS_FLOOR,
+            "{slowest} positions in {SEARCH_BUDGET_MS} ms"
+        );
     }
 
     #[test]
