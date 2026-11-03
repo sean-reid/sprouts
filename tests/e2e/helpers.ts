@@ -646,7 +646,7 @@ export async function colourPixelsNear(
 export interface NodeRecord {
   boardSize: number;
   nodes?: [number, number][];
-  moves: { newNode: [number, number] }[];
+  moves: { from: number; to: number; newNode: [number, number] }[];
 }
 
 // Every node of a record on screen at the fitted view, by id: the starting
@@ -675,4 +675,38 @@ export async function rowIds(page: Page, index: number): Promise<[number, number
   const ids = (title ?? "").match(/\d+/g)?.map(Number) ?? [];
   if (ids.length !== 3) throw new Error(`row ${index} title "${title}" names no move`);
   return ids as [number, number, number];
+}
+
+// Two renderings of one board agree when under a tenth of the stroke
+// cells differ.
+export function expectSameStrokes(before: boolean[], after: boolean[]): void {
+  expect(after.length).toBe(before.length);
+  const differing = before.filter((cell, i) => cell !== after[i]).length;
+  const drawn = before.filter(Boolean).length;
+  test.info().annotations.push({ type: "stroke-cells", description: `${differing} of ${drawn}` });
+  expect(drawn).toBeGreaterThan(0);
+  expect(differing).toBeLessThanOrEqual(Math.ceil(drawn * 0.1));
+}
+
+// A restored game that leaves the AI to move gets its reply, and one that
+// ends gets its modal closed into review, before the test goes on.
+export async function awaitReply(page: Page): Promise<void> {
+  await expect(page.locator("#status")).toHaveText(/Your turn!|wins|win!|Reviewing/, {
+    timeout: 60_000,
+  });
+  if (await page.locator("#gameOverModal").isVisible()) await page.locator("#reviewBtn").click();
+}
+
+export const HASH_PREFIX = "#game=";
+
+// Shares the game and returns the link and its payload length.
+export async function share(page: Page, label: string): Promise<{ url: string; payload: number }> {
+  await page.locator("#shareBtn").click();
+  await expect(page.locator("#status")).toHaveText(/Link copied|Copy the link/);
+  const url = page.url();
+  const at = url.indexOf(HASH_PREFIX);
+  expect(at).toBeGreaterThan(0);
+  const payload = url.length - at - HASH_PREFIX.length;
+  test.info().annotations.push({ type: label, description: String(payload) });
+  return { url, payload };
 }

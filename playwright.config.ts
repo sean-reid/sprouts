@@ -36,7 +36,7 @@ export default defineConfig({
     },
     {
       name: "webkit",
-      testMatch: /(layout|play|move-highlight|keyboard)\.spec\.ts$/,
+      testMatch: /(layout|play|move-highlight|keyboard|replay-links)\.spec\.ts$/,
       use: { ...devices["Desktop Safari"], viewport: { width: 1024, height: 800 } },
     },
   ],
