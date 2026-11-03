@@ -365,19 +365,19 @@ fn point2(p: Point) -> Point2<f64> {
 /// Largest displacement of a clearance curve vertex, in board units.
 const JITTER: f64 = 1e-3;
 
-/// A clearance curve vertex moved a hair by a fixed function of its
-/// coordinates. A drawn line runs exactly a clearance from the walls it
-/// hugged, so the next erosion's offset of it lands exactly on those
-/// walls, and overlapping constraints break the triangulation's splitting;
-/// the displacement is far under the fit tolerance and keeps the curves
-/// apart.
-fn jitter(p: Point) -> Point {
-    let mut h = p.x.to_bits() ^ p.y.to_bits().rotate_left(29);
-    h ^= h >> 33;
-    h = h.wrapping_mul(0xff51_afd7_ed55_8ccd);
-    h ^= h >> 33;
-    let unit = |bits: u64| (bits & 0xffff) as f64 / 65535.0 * 2.0 - 1.0;
-    Point::new(p.x + JITTER * unit(h), p.y + JITTER * unit(h >> 16))
+/// The `k`th vertex of a clearance curve moved a hair by a fixed function
+/// of `k`. A drawn line runs exactly a clearance from the walls it hugged,
+/// so the next erosion's offset of it lands exactly on those walls, and
+/// overlapping constraints break the triangulation's splitting; the
+/// displacement is far under the fit tolerance and keeps the curves
+/// apart. It depends on the index and not the coordinates, so a board
+/// that differs by a rounding error erodes to the same arena.
+fn jitter(p: Point, k: usize) -> Point {
+    let t = k as f64;
+    Point::new(
+        p.x + JITTER * (t * 1.618_033_988_749_895).sin(),
+        p.y + JITTER * (t * 2.414_213_562_373_095).cos(),
+    )
 }
 
 fn unit(from: Point, to: Point) -> Option<(f64, f64)> {
@@ -454,7 +454,10 @@ fn disc(centre: Point, radius: f64) -> Vec<Point> {
     (0..DISC_SIDES)
         .map(|k| {
             let t = step * k as f64;
-            jitter(Point::new(centre.x + r * t.cos(), centre.y + r * t.sin()))
+            jitter(
+                Point::new(centre.x + r * t.cos(), centre.y + r * t.sin()),
+                k,
+            )
         })
         .collect()
 }
@@ -520,21 +523,27 @@ impl Arena {
         let mut arrangement = Arrangement::new(edge);
         let model = &state.face;
         let components = model.components(face);
-        let inset = [
+        let inset: Vec<Point> = [
             Point::new(c, c),
             Point::new(edge - c, c),
             Point::new(edge - c, edge - c),
             Point::new(c, edge - c),
         ]
-        .map(jitter);
+        .into_iter()
+        .enumerate()
+        .map(|(k, p)| jitter(p, k))
+        .collect();
         arrangement.add_closed(&inset, false);
         let mut polygons = Vec::new();
         for comp in components {
             if let Component::Cycle(start) = *comp {
                 let poly = cycle_polygon(state, start);
                 if poly.len() >= 2 {
-                    let offset: Vec<Point> =
-                        offset_closed(&poly, c).into_iter().map(jitter).collect();
+                    let offset: Vec<Point> = offset_closed(&poly, c)
+                        .into_iter()
+                        .enumerate()
+                        .map(|(k, p)| jitter(p, k))
+                        .collect();
                     arrangement.add_closed(&offset, false);
                     polygons.push(poly);
                 }
