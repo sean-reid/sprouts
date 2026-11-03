@@ -1,5 +1,5 @@
 use crate::abstract_graph::{abstract_minimax, AbstractMove, AbstractState, TranspositionTable};
-use crate::node_classifier::classify_nodes;
+use crate::node_classifier::{classify_nodes, NodeClassification};
 use crate::opening_book;
 use crate::pathfinding::{
     find_path_on_skeleton, find_path_relaxed, find_path_tight, find_self_loop_on_skeleton,
@@ -9,9 +9,9 @@ use crate::types::{GameState, Move};
 use crate::validation::{validate_ai_move, validate_ai_move_tight};
 
 /// Generate all concrete moves with pixel paths (expensive — called once at root).
-fn generate_concrete_moves_from_classification(
+pub(crate) fn generate_concrete_moves_from_classification(
     state: &mut GameState,
-    classification: &crate::node_classifier::NodeClassification,
+    classification: &NodeClassification,
 ) -> Vec<Move> {
     let mut moves = Vec::new();
     let mut failed_pairs = Vec::new();
@@ -156,6 +156,18 @@ pub fn find_best_move(state: &mut GameState) -> Option<Move> {
     }
 
     // 3. ABSTRACT SEARCH seeded with real topology.
+    let best_idx = search_best_index(state, &classification, &concrete_moves);
+
+    // 4. RETURN best concrete move (already validated during generation)
+    Some(concrete_moves.into_iter().nth(best_idx).unwrap())
+}
+
+/// Index into `concrete_moves` of the move the abstract search prefers.
+pub(crate) fn search_best_index(
+    state: &GameState,
+    classification: &NodeClassification,
+    concrete_moves: &[Move],
+) -> usize {
     let abstract_state = AbstractState::from_game_state_with_classification(
         state,
         &classification.legal_pairs,
@@ -191,9 +203,7 @@ pub fn find_best_move(state: &mut GameState) -> Option<Move> {
             }
         }
     }
-
-    // 4. RETURN best concrete move (already validated during generation)
-    Some(concrete_moves.into_iter().nth(best_idx).unwrap())
+    best_idx
 }
 
 pub fn find_optimal_node_placement(
