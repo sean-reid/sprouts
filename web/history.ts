@@ -16,6 +16,9 @@ const HASH_PREFIX = "#game=";
 const FORMAT_VERSION = 1;
 // Coordinates travel as tenths of a world unit in the share link.
 const TENTHS = 10;
+// A stroke point this close to the chord of its neighbours is left out of
+// the link; the engine's clearances are 6 units and up.
+const LINK_TOLERANCE = 0.25;
 
 export class History {
   moves: Move[] = [];
@@ -171,11 +174,12 @@ export function encodeRecord(record: GameRecord): string {
   out.u16(record.moves.length);
   out.u16(record.cursor);
   for (const move of record.moves) {
+    const polyline = simplify(move.polyline, LINK_TOLERANCE);
     out.u16(move.fromNode);
     out.u16(move.toNode);
-    out.u16(move.polyline.length);
+    out.u16(polyline.length);
     let last = { x: 0, y: 0 };
-    move.polyline.forEach((point, i) => {
+    polyline.forEach((point, i) => {
       const q = quantize(point);
       if (i === 0) {
         out.u16(q.x);
@@ -254,8 +258,41 @@ export function dropHash(): void {
   if (location.hash) history.replaceState(null, "", location.pathname + location.search);
 }
 
+// Douglas-Peucker: keeps the endpoints and every point farther than the
+// tolerance from the chord between kept neighbours.
+export function simplify(points: Point[], tolerance: number): Point[] {
+  const first = points[0];
+  const last = points[points.length - 1];
+  if (!first || !last || points.length <= 2) return points;
+  let worst = 0;
+  let worstIndex = 0;
+  for (let i = 1; i < points.length - 1; i++) {
+    const point = points[i];
+    if (!point) continue;
+    const d = distanceToSegment(point, first, last);
+    if (d > worst) {
+      worst = d;
+      worstIndex = i;
+    }
+  }
+  if (worst <= tolerance) return [first, last];
+  const head = simplify(points.slice(0, worstIndex + 1), tolerance);
+  const tail = simplify(points.slice(worstIndex), tolerance);
+  return [...head, ...tail.slice(1)];
+}
+
+function distanceToSegment(p: Point, a: Point, b: Point): number {
+  const dx = b.x - a.x;
+  const dy = b.y - a.y;
+  const length2 = dx * dx + dy * dy;
+  const t =
+    length2 === 0 ? 0 : Math.min(1, Math.max(0, ((p.x - a.x) * dx + (p.y - a.y) * dy) / length2));
+  return Math.hypot(p.x - (a.x + t * dx), p.y - (a.y + t * dy));
+}
+
 // True when one game is the other played further, so a link to my own game
-// reopens the live game rather than a review of it.
+// reopens the live game rather than a review of it. Endpoints and the new
+// node identify a move; the link carries a thinned polyline.
 export function sameGame(a: GameRecord, b: GameRecord): boolean {
   if (a.initialNodes !== b.initialNodes || a.boardSize !== b.boardSize) return false;
   if (a.firstPlayer !== b.firstPlayer) return false;
@@ -268,9 +305,8 @@ export function sameGame(a: GameRecord, b: GameRecord): boolean {
 
 function moveKey(move: Move | undefined): string {
   if (!move) return "";
-  const points = move.polyline.map(quantize).flatMap((q) => [q.x, q.y]);
   const n = quantize(move.newNodePos);
-  return [move.fromNode, move.toNode, n.x, n.y, ...points].join(",");
+  return [move.fromNode, move.toNode, n.x, n.y].join(",");
 }
 
 function quantize(point: Point): { x: number; y: number } {
