@@ -36,6 +36,7 @@ let thinkingInterval: ReturnType<typeof setInterval> | null = null;
 let placingModeEnteredAt = 0;
 // Bumped by newGame so replies and animations from the previous game stop.
 let gameEpoch = 0;
+let submitting = false;
 
 const engine = new Engine(() => setStatus("Failed to load game engine", "lose"));
 
@@ -106,8 +107,11 @@ function findNodeAt(x: number, y: number): Node | null {
   return closest;
 }
 
-function closestValidSpot(at: Point): Promise<PlacementDot> {
-  return engine.call("placement", { path: state.lockedPath, at });
+// Resolves null once the stroke it was asked about is no longer on screen.
+async function closestValidSpot(at: Point): Promise<PlacementDot | null> {
+  const path = state.lockedPath;
+  const spot = await engine.call("placement", { path, at });
+  return state.mode === "placing" && state.lockedPath === path ? spot : null;
 }
 
 function handleStart(clientX: number, clientY: number): void {
@@ -139,14 +143,15 @@ async function handleMove(clientX: number, clientY: number): Promise<void> {
     }
   } else if (state.mode === "placing") {
     const snapDist = state.lastInputWasTouch ? 80 : 30;
+    const path = state.lockedPath;
     let spot: PlacementDot;
     try {
-      spot = await engine.latest("placement", "placement", { path: state.lockedPath, at: point });
+      spot = await engine.latest("placement", "placement", { path, at: point });
     } catch (error) {
       if (error instanceof StaleRequest) return;
       throw error;
     }
-    if (state.mode !== "placing") return;
+    if (state.mode !== "placing" || state.lockedPath !== path) return;
     const { x, y } = spot.position;
     state.placementDot = Math.hypot(point.x - x, point.y - y) < snapDist ? spot : null;
   }
@@ -196,7 +201,7 @@ async function autoPlaceMidpoint(): Promise<void> {
   const mid = state.lockedPath[Math.floor(state.lockedPath.length / 2)];
   if (state.mode !== "placing" || state.lockedPath.length < 2 || !mid) return;
   const spot = await closestValidSpot(mid);
-  if (state.mode === "placing" && !state.placementDot) state.placementDot = spot;
+  if (spot && !state.placementDot) state.placementDot = spot;
 }
 
 async function handleDesktopClick(clientX: number, clientY: number): Promise<void> {
@@ -206,6 +211,7 @@ async function handleDesktopClick(clientX: number, clientY: number): Promise<voi
 
   const point = canvasCoords(clientX, clientY);
   const spot = await closestValidSpot(point);
+  if (!spot) return;
   if (Math.hypot(point.x - spot.position.x, point.y - spot.position.y) < 40 && spot.valid) {
     state.placementDot = spot;
     await executeMove();
@@ -220,6 +226,7 @@ async function confirmMove(): Promise<void> {
     const mid = state.lockedPath[Math.floor(state.lockedPath.length / 2)] ?? state.lockedPath[0];
     if (mid) {
       const spot = await closestValidSpot(mid);
+      if (!spot) return;
       if (spot.valid) state.placementDot = spot;
     }
   }
@@ -233,6 +240,7 @@ function cancelPlacement(): void {
 }
 
 async function executeMove(): Promise<void> {
+  if (submitting) return;
   if (!state.placementDot?.valid || state.dragStartNode === null || state.dragEndNode === null) {
     setStatus("Select a valid spot on the line", "lose");
     return;
@@ -246,7 +254,9 @@ async function executeMove(): Promise<void> {
   overlay.classList.remove("visible");
 
   const epoch = gameEpoch;
+  submitting = true;
   const outcome = await engine.call("applyMove", move).catch(failure);
+  submitting = false;
   if (epoch !== gameEpoch) return;
   if (outcome.kind === "rejected") {
     setStatus(outcome.reason, "lose");
@@ -346,6 +356,8 @@ async function undoMove(): Promise<void> {
 async function newGame(nodeCount: number): Promise<void> {
   lastNodeCount = nodeCount;
   Object.assign(state, freshBoard());
+  clearStroke();
+  overlay.classList.remove("visible");
   stopThinking();
   gameEpoch++;
   engine.cancel("turn");
