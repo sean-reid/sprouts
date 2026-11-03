@@ -16,9 +16,14 @@ const HASH_PREFIX = "#game=";
 const FORMAT_VERSION = 1;
 // Coordinates travel as tenths of a world unit in the share link.
 const TENTHS = 10;
-// A stroke point this close to the chord of its neighbours is left out of
-// the link; the engine's clearances are 6 units and up.
+// A stroke point this close to the chord of its neighbours, in units of a
+// 1000 board, is left out of the link; the tightest clearance is 3 units.
 const LINK_TOLERANCE = 0.25;
+// Bounds for a record that arrived by link; a Sprouts game lasts at most
+// 3n - 1 moves from n nodes.
+const MAX_NODES = 500;
+const MIN_BOARD = 100;
+const MAX_BOARD = 6000;
 
 export class History {
   moves: Move[] = [];
@@ -125,8 +130,14 @@ function asRecord(value: unknown): GameRecord | null {
   const v = value as Record<string, unknown>;
   if (v.version !== FORMAT_VERSION) return null;
   if (!isCount(v.initialNodes) || !isCount(v.boardSize) || !isCount(v.cursor)) return null;
+  if (v.initialNodes < 1 || v.initialNodes > MAX_NODES) return null;
+  if (v.boardSize < MIN_BOARD || v.boardSize > MAX_BOARD) return null;
   if (v.firstPlayer !== "human" && v.firstPlayer !== "ai") return null;
-  if (!Array.isArray(v.moves) || !v.moves.every(isMove)) return null;
+  if (!Array.isArray(v.moves) || v.moves.length > 3 * v.initialNodes) return null;
+  const nodes = v.initialNodes;
+  const board = v.boardSize;
+  if (!v.moves.every((m, i) => isMove(m) && movePlausible(m, nodes + i, board))) return null;
+  if (v.cursor > v.moves.length) return null;
   return {
     version: 1,
     initialNodes: v.initialNodes,
@@ -145,6 +156,17 @@ function isPoint(value: unknown): value is Point {
   if (typeof value !== "object" || value === null) return false;
   const p = value as Record<string, unknown>;
   return Number.isFinite(p.x) && Number.isFinite(p.y);
+}
+
+// Endpoints name nodes that exist before the move; points lie on the board.
+function movePlausible(move: Move, nodeCount: number, board: number): boolean {
+  const onBoard = (p: Point): boolean => p.x >= 0 && p.x <= board && p.y >= 0 && p.y <= board;
+  return (
+    move.fromNode < nodeCount &&
+    move.toNode < nodeCount &&
+    move.polyline.every(onBoard) &&
+    onBoard(move.newNodePos)
+  );
 }
 
 function isMove(value: unknown): value is Move {
@@ -173,8 +195,9 @@ export function encodeRecord(record: GameRecord): string {
   out.u16(record.boardSize);
   out.u16(record.moves.length);
   out.u16(record.cursor);
+  const tolerance = (LINK_TOLERANCE * record.boardSize) / 1000;
   for (const move of record.moves) {
-    const polyline = simplify(move.polyline, LINK_TOLERANCE);
+    const polyline = simplify(move.polyline, tolerance);
     out.u16(move.fromNode);
     out.u16(move.toNode);
     out.u16(polyline.length);

@@ -78,7 +78,8 @@ let timeline = new History(DEFAULT_NODES, view.boardSize);
 let shared = false;
 let lastNodeCount = DEFAULT_NODES;
 let thinkingInterval: ReturnType<typeof setInterval> | null = null;
-// Bumped by newGame so replies and animations from the previous game stop.
+// Bumped whenever the table is reset so replies and animations from the
+// previous game stop.
 let gameEpoch = 0;
 let submitting = false;
 let seeking = false;
@@ -122,6 +123,7 @@ function updateControls(): void {
 }
 
 function renderMoveList(): void {
+  const hadFocus = moveListEl.contains(document.activeElement);
   const items = timeline.moves.map((_, index) => {
     const item = document.createElement("li");
     const button = document.createElement("button");
@@ -133,12 +135,18 @@ function renderMoveList(): void {
     return item;
   });
   moveListEl.replaceChildren(...items);
-  moveListEl.querySelector("[aria-current]")?.scrollIntoView({ block: "nearest" });
+  const current = moveListEl.querySelector<HTMLElement>("[aria-current]");
+  current?.scrollIntoView({ block: "nearest" });
+  if (hadFocus) (current ?? moveListEl.querySelector("button") ?? backBtn).focus();
   updateControls();
 }
 
+// A link in the address bar describes the game only until it changes.
 function persist(): void {
-  if (!shared) save(timeline);
+  if (!shared) {
+    save(timeline);
+    dropHash();
+  }
   renderMoveList();
 }
 
@@ -444,33 +452,42 @@ async function finishAIMove(move: Move, epoch: number): Promise<void> {
 }
 
 // Moves the engine to the board after move number target by undoing or
-// re-applying stored moves; a stored move the engine now rejects ends the list.
-async function seek(target: number): Promise<void> {
+// re-applying stored moves. A stored move the engine now rejects ends the
+// list; the result says whether the target was reached in this game.
+async function seek(target: number): Promise<boolean> {
   const epoch = gameEpoch;
   seeking = true;
   updateControls();
   try {
     while (timeline.cursor > target) {
-      if (!(await engine.call("undo")) || epoch !== gameEpoch) return;
+      const undone = await engine.call("undo").catch(() => false);
+      if (epoch !== gameEpoch) return false;
+      if (!undone) {
+        setStatus("Undo failed in the engine", "lose");
+        return false;
+      }
       timeline.cursor--;
     }
     while (timeline.cursor < target) {
       const move = timeline.moves[timeline.cursor];
       if (!move) break;
       const outcome = await engine.call("applyMove", move).catch(failure);
-      if (epoch !== gameEpoch) return;
+      if (epoch !== gameEpoch) return false;
       if (outcome.kind === "rejected") {
         timeline.truncate();
         setStatus(`Replay stopped at move ${timeline.cursor + 1}: ${outcome.reason}`, "lose");
-        break;
+        return false;
       }
       timeline.cursor++;
     }
-    if (epoch === gameEpoch) await refreshBoard();
+    return true;
   } finally {
     if (epoch === gameEpoch) {
-      seeking = false;
-      persist();
+      await refreshBoard().catch(() => setStatus("Lost contact with the engine", "lose"));
+      if (epoch === gameEpoch) {
+        seeking = false;
+        persist();
+      }
     }
   }
 }
@@ -487,15 +504,16 @@ function stepTarget(direction: -1 | 1): number {
   return target;
 }
 
-async function jumpTo(target: number): Promise<void> {
-  if (busy() || target < 0 || target > timeline.moves.length) return;
-  closeModal();
-  await seek(target);
+// After a seek: review stays in review, a live game either hands the AI
+// its turn at the end of the list or, on an earlier AI-to-move board,
+// enters review rather than letting the AI replace the moves ahead.
+function settleAfterSeek(): void {
+  if (!state.reviewing && !state.gameOver && state.currentPlayer === "ai" && !timeline.atEnd) {
+    state.reviewing = true;
+  }
   if (state.reviewing) {
     setStatus(reviewStatus());
-    return;
-  }
-  if (!state.gameOver && state.currentPlayer === "ai") {
+  } else if (!state.gameOver && state.currentPlayer === "ai") {
     startThinking();
     void performAIMove();
   } else if (state.gameOver) {
@@ -505,10 +523,20 @@ async function jumpTo(target: number): Promise<void> {
   }
 }
 
+async function jumpTo(target: number): Promise<void> {
+  if (busy() || target < 0 || target > timeline.moves.length) return;
+  const epoch = gameEpoch;
+  closeModal();
+  const reached = await seek(target);
+  if (epoch !== gameEpoch) return;
+  if (reached) settleAfterSeek();
+  else if (state.currentPlayer === "ai" && !state.gameOver) state.reviewing = true;
+}
+
 function reviewStatus(): string {
   const total = timeline.moves.length;
   const at = timeline.atStart ? "start" : `move ${timeline.cursor} of ${total}`;
-  const hint = shared && !timeline.atStart ? "Undo to play on from here." : "";
+  const hint = timeline.atStart ? "" : "Undo to play on from here.";
   return `Reviewing: ${at}. ${hint}`.trim();
 }
 
@@ -519,16 +547,22 @@ async function step(direction: -1 | 1): Promise<void> {
   await jumpTo(target);
 }
 
-// Undo in a live game is back one pair; from a review it returns to play.
+// Undo in a live game is back one pair. From a review it returns to play:
+// on the spot when it is already the human's turn, else one pair back.
 async function undoMove(): Promise<void> {
   if (busy() || timeline.atStart) return;
+  const epoch = gameEpoch;
+  const wasReviewing = state.reviewing;
   state.reviewing = false;
-  if (shared) {
-    shared = false;
-    dropHash();
+  shared = false;
+  if (wasReviewing && !state.gameOver && state.currentPlayer === "human") {
+    persist();
+    setStatus("Your turn!");
+    return;
   }
   const target = stepTarget(-1);
-  await seek(Math.max(target, 0));
+  const reached = await seek(Math.max(target, 0));
+  if (epoch !== gameEpoch || !reached) return;
   if (!state.gameOver && state.currentPlayer === "ai") {
     startThinking();
     void performAIMove();
@@ -596,6 +630,7 @@ async function newGame(nodeCount: number): Promise<void> {
 // move in review, a saved one at the cursor it was left at.
 async function restore(record: GameRecord, fromLink: boolean): Promise<void> {
   resetTable();
+  const epoch = gameEpoch;
   shared = fromLink;
   lastNodeCount = record.initialNodes;
   timeline = History.from(record);
@@ -605,22 +640,23 @@ async function restore(record: GameRecord, fromLink: boolean): Promise<void> {
   setBoardSize(timeline.boardSize);
   setStatus("Initializing...");
   await engine.call("init", timeline.initialNodes, timeline.boardSize);
+  if (epoch !== gameEpoch) return;
   state.reviewing = fromLink;
-  await seek(target);
+  const reached = await seek(target);
+  if (epoch !== gameEpoch) return;
   if (state.gameOver) state.reviewing = true;
-  if (state.reviewing) {
-    setStatus(reviewStatus());
-  } else if (state.currentPlayer === "ai") {
-    startThinking();
-    void performAIMove();
-  } else {
-    setStatus(timeline.atStart ? "Draw a line between two nodes" : "Your turn!");
+  if (!reached) {
+    if (state.currentPlayer === "ai" && !state.gameOver) state.reviewing = true;
+    return;
   }
+  if (!state.reviewing && timeline.atStart) setStatus("Draw a line between two nodes");
+  else settleAfterSeek();
 }
 
 async function boot(): Promise<void> {
   const linked = recordFromHash(location.hash);
   const saved = loadSaved();
+  const epoch = gameEpoch;
   try {
     if (linked && linked.firstPlayer === "human") {
       if (saved && sameGame(saved, linked)) {
@@ -635,8 +671,11 @@ async function boot(): Promise<void> {
       await newGame(DEFAULT_NODES);
     }
   } catch (error) {
+    // A New Game clicked during the load has already replaced the table.
+    if (epoch + 1 !== gameEpoch) return;
+    await newGame(DEFAULT_NODES);
     setStatus(
-      "Failed to start game: " + (error instanceof Error ? error.message : String(error)),
+      "Could not load the saved game: " + (error instanceof Error ? error.message : String(error)),
       "lose",
     );
   } finally {
