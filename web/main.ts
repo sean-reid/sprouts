@@ -10,6 +10,7 @@ import {
   sameGame,
   save,
   shareUrl,
+  toMove,
   type GameRecord,
 } from "./history";
 import { attachInput, type InputOptions, type PointerKind } from "./input";
@@ -456,6 +457,7 @@ function recordMove(move: Move, snapshot: Snapshot): void {
 }
 
 function applySnapshot(snapshot: Snapshot): void {
+  timeline.adopt(snapshot.lines);
   state.nodes = snapshot.nodes;
   state.lines = snapshot.lines;
   state.currentPlayer = snapshot.currentPlayer;
@@ -466,7 +468,9 @@ function applySnapshot(snapshot: Snapshot): void {
 }
 
 async function refreshBoard(): Promise<void> {
-  applySnapshot(await engine.call("snapshot"));
+  const epoch = gameEpoch;
+  const snapshot = await engine.call("snapshot");
+  if (epoch === gameEpoch) applySnapshot(snapshot);
 }
 
 async function performAIMove(): Promise<void> {
@@ -540,7 +544,7 @@ async function seek(target: number): Promise<boolean> {
       if (!move) break;
       let outcome: Outcome;
       try {
-        outcome = await engine.call("applyMove", move);
+        outcome = await engine.call("applyMove", toMove(move));
       } catch (error) {
         if (epoch === gameEpoch) setStatus("Replay failed: " + describe(error), "lose");
         return false;
@@ -664,7 +668,7 @@ async function undoMove(): Promise<void> {
 }
 
 async function share(): Promise<void> {
-  const url = shareUrl(timeline.record());
+  const url = shareUrl(timeline);
   window.history.replaceState(null, "", url);
   try {
     await navigator.clipboard.writeText(url);

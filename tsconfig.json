@@ -17,5 +17,5 @@
     "exactOptionalPropertyTypes": true,
     "types": ["vite/client"]
   },
-  "include": ["web", "tests", "vite.config.ts", "playwright.config.ts"]
+  "include": ["web", "tests", "vite.config.ts", "vitest.config.ts", "playwright.config.ts"]
 }
