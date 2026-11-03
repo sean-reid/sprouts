@@ -4,6 +4,7 @@ use tsify::Tsify;
 use crate::curve::{self, Cubic};
 use crate::embedding;
 use crate::face::{FaceModel, Move as FaceMove};
+use crate::settle;
 use crate::validation::Rejection;
 
 pub const BOARD_SIZE: usize = 1000;
@@ -206,6 +207,9 @@ pub struct GameState {
     pub next_line_id: usize,
     pub initial_node_count: usize,
     pub board_size: usize,
+    /// What each settle moved, one record per settled move, so an undo
+    /// puts the geometry back.
+    pub settles: Vec<settle::Undo>,
 }
 
 impl GameState {
@@ -236,6 +240,7 @@ impl GameState {
             next_line_id: 0,
             initial_node_count: initial_nodes,
             board_size,
+            settles: Vec::new(),
         }
     }
 

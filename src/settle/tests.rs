@@ -27,6 +27,9 @@ fn bits(state: &GameState) -> Vec<u64> {
             }
         }
         out.extend([line.new_node_pos.x.to_bits(), line.new_node_pos.y.to_bits()]);
+        for p in &line.polyline {
+            out.extend([p.x.to_bits(), p.y.to_bits()]);
+        }
     }
     out
 }
@@ -220,6 +223,7 @@ proptest! {
     ) {
         let (first, played) = play_random(nodes, &picks);
         let (second, again) = play_random(nodes, &picks);
+        prop_assert!(played > 0);
         prop_assert_eq!(played, again);
         prop_assert_eq!(bits(&first), bits(&second));
         prop_assert!(same_face_model(&first));
@@ -304,4 +308,92 @@ fn a_line_hugging_a_node_is_pushed_off_it() {
             .distance_to(&Point::new(500.0, 512.0))
             <= shift
     );
+}
+
+fn fixture_move(state: &GameState, recorded: &replay::FixtureMove) -> crate::types::Move {
+    crate::types::Move::new(
+        recorded.from,
+        recorded.to,
+        recorded
+            .polyline
+            .iter()
+            .map(|p| Point::new(p[0], p[1]))
+            .collect(),
+        Point::new(recorded.new_node[0], recorded.new_node[1]),
+        state.current_player,
+        state.board_size,
+    )
+}
+
+/// No node moves more than MAX_SHIFT node spacings in one settle; the
+/// drift over a whole game is printed for the record.
+#[test]
+fn no_node_moves_more_than_the_shift_in_one_settle() {
+    for fixture in fixtures() {
+        let mut state = fixture.start();
+        let bound = MAX_SHIFT * MIN_NODE_SPACING * scale(state.board_size);
+        let mut drift: f64 = 0.0;
+        let mut first_seen: Vec<Point> = Vec::new();
+        for recorded in &fixture.moves {
+            let mov = fixture_move(&state, recorded);
+            state.apply_move(mov).unwrap();
+            let before: Vec<Point> = state.nodes.iter().map(|n| n.position).collect();
+            if first_seen.len() < before.len() {
+                first_seen.extend_from_slice(&before[first_seen.len()..]);
+            }
+            settle(&mut state);
+            for (node, was) in state.nodes.iter().zip(&before) {
+                let moved = node.position.distance_to(was);
+                assert!(
+                    moved <= bound + 1e-6,
+                    "{} nodes: node {} moved {moved:.2} in one settle",
+                    fixture.initial_nodes,
+                    node.id
+                );
+                drift = drift.max(node.position.distance_to(&first_seen[node.id]));
+            }
+        }
+        println!(
+            "{} nodes, board {}: a node drifted at most {drift:.1} units over {} moves",
+            fixture.initial_nodes,
+            fixture.board_size,
+            fixture.moves.len()
+        );
+    }
+}
+
+/// Undo puts back the geometry the undone move was drawn on, so the
+/// stroke that followed re-applies as it did.
+#[test]
+fn undo_restores_the_board_the_next_move_was_drawn_on() {
+    for fixture in fixtures() {
+        let mut state = fixture.start();
+        let mut boards = vec![bits(&state)];
+        for recorded in &fixture.moves {
+            let mov = fixture_move(&state, recorded);
+            state.apply_move(mov).unwrap();
+            settle(&mut state);
+            boards.push(bits(&state));
+        }
+        assert_eq!(state.settles.len(), fixture.moves.len());
+        let finished = boards.last().unwrap().clone();
+        while crate::protocol::undo(&mut state) {
+            boards.pop();
+            assert_eq!(
+                bits(&state),
+                *boards.last().unwrap(),
+                "{} nodes: undo to {} moves left a different board",
+                fixture.initial_nodes,
+                state.lines.len()
+            );
+        }
+        assert!(state.settles.is_empty());
+        for recorded in &fixture.moves {
+            let mov = fixture_move(&state, recorded);
+            crate::protocol::check(&state, &mov).unwrap();
+            state.apply_move(mov).unwrap();
+            settle(&mut state);
+        }
+        assert_eq!(bits(&state), finished);
+    }
 }

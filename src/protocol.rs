@@ -573,11 +573,14 @@ fn unroutable(mv: &face::Move, why: Unroutable) -> Rejection {
     }
 }
 
-/// Takes the last move back and settles the board without it.
+/// Takes the last move back and puts the geometry back as it was before
+/// that move settled, so the board is the one the next move was drawn on.
 pub fn undo(state: &mut GameState) -> bool {
     let undone = state.undo_move();
     if undone {
-        settle::settle(state);
+        if let Some(settled) = state.settles.pop() {
+            settled.restore(state);
+        }
     }
     undone
 }

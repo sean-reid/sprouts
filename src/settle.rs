@@ -13,8 +13,8 @@ use crate::embedding;
 use crate::face::Move as FaceMove;
 use crate::geometry::{closest_point_on_segment, segment_intersection, segments_intersect};
 use crate::types::{
-    ai_node_clearance, node_disc, scale, GameState, Move, Point, MIN_NODE_SPACING,
-    MIN_PATH_CLEARANCE,
+    ai_node_clearance, node_disc, scale, GameState, Line, Move, Point, MIN_NODE_SPACING,
+    MIN_PATH_CLEARANCE, MIN_PATH_CLEARANCE_AI,
 };
 
 const ROUNDS: usize = 24;
@@ -41,6 +41,10 @@ const SMOOTH_JOIN: f64 = 1e-6;
 /// Distances the board is relaxed toward, in board units.
 struct Targets {
     node: f64,
+    /// Two nodes this far apart or more read as a passage to the router;
+    /// up to `passage_slack` beyond it the passage is too tight to draw.
+    passage: f64,
+    passage_slack: f64,
     line_node: f64,
     line: f64,
     edge_node: f64,
@@ -53,6 +57,8 @@ impl Targets {
         let s = scale(board_size);
         Self {
             node: (MIN_NODE_SPACING * s).max(2.0 * node_disc(board_size)),
+            passage: 2.0 * ai_node_clearance(board_size),
+            passage_slack: MIN_PATH_CLEARANCE_AI * s,
             line_node: ai_node_clearance(board_size),
             line: MIN_PATH_CLEARANCE * s,
             edge_node: node_disc(board_size),
@@ -90,8 +96,8 @@ struct Layout {
     lines: Vec<Chain>,
 }
 
-/// The pair that sets the least clearance.
-#[derive(Clone, Copy, Debug, PartialEq)]
+/// A pair measured for clearance.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Tightest {
     Nothing,
     Nodes(usize, usize),
@@ -100,6 +106,14 @@ pub enum Tightest {
     Hairpin(usize),
     NodeEdge(usize),
     LineEdge(usize),
+}
+
+/// What one pass over the board measured: the least clearance as a share
+/// of its target, the pair that set it, and every pair short of target.
+struct Survey {
+    least: f64,
+    at: Tightest,
+    short: Vec<Tightest>,
 }
 
 /// Displacements gathered over one round: a sum per node, a weighted sum
@@ -355,15 +369,21 @@ impl Layout {
         ids.iter().any(|&v| self.nodes[v].distance_to(p) < radius)
     }
 
-    /// The least clearance as a share of its target over every pair on
-    /// the board, gathering the pushes to close the shortfalls when asked.
-    fn survey(&self, targets: &Targets, mut push: Option<&mut Push>) -> (f64, Tightest) {
+    /// Measures every pair on the board, gathering the pushes to close the
+    /// shortfalls when asked.
+    fn survey(&self, targets: &Targets, mut push: Option<&mut Push>) -> Survey {
         let mut least = (f64::INFINITY, Tightest::Nothing);
+        let mut shorts = Vec::new();
         let mut short = |d: f64, target: f64, at: Tightest| -> Option<f64> {
             if d / target < least.0 {
                 least = (d / target, at);
             }
-            (d < target).then(|| STEP * (target - d) / 2.0)
+            if d < target {
+                shorts.push(at);
+                Some(STEP * (target - d) / 2.0)
+            } else {
+                None
+            }
         };
         let away = |from: Point, to: Point, f: f64| -> Point {
             let d = sub(to, from);
@@ -379,10 +399,17 @@ impl Layout {
         for i in 0..n {
             for j in i + 1..n {
                 let d = self.nodes[i].distance_to(&self.nodes[j]);
-                if let (Some(f), Some(push)) = (
-                    short(d, targets.node, Tightest::Nodes(i, j)),
-                    push.as_deref_mut(),
-                ) {
+                // A gap the router would plan through but cannot hold is
+                // widened until it can; narrower gaps it never tries.
+                let target = if d >= targets.passage && d < targets.passage + targets.passage_slack
+                {
+                    targets.passage + targets.passage_slack
+                } else {
+                    targets.node
+                };
+                if let (Some(f), Some(push)) =
+                    (short(d, target, Tightest::Nodes(i, j)), push.as_deref_mut())
+                {
                     let dir = away(self.nodes[j], self.nodes[i], f);
                     self.push_node(push, i, dir);
                     self.push_node(push, j, mul(dir, -1.0));
@@ -480,7 +507,14 @@ impl Layout {
                 }
             }
         }
-        least
+        drop(short);
+        shorts.sort_unstable();
+        shorts.dedup();
+        Survey {
+            least: least.0,
+            at: least.1,
+            short: shorts,
+        }
     }
 
     /// Crossings between the flattenings of distinct lines and within each
@@ -557,12 +591,7 @@ impl Layout {
             } else {
                 delta
             };
-            let mut next = add(*p, delta);
-            let off = sub(next, from);
-            let far = norm(off);
-            if far > shift {
-                next = add(from, mul(off, shift / far));
-            }
+            let next = within(add(*p, delta), from, shift);
             longest = longest.max(next.distance_to(p));
             *p = next;
         };
@@ -583,8 +612,9 @@ impl Layout {
     /// Carries each line's ends along with its nodes, keeps smooth joins
     /// smooth and puts every made node back on its curve, in move order so
     /// a line always ends on a node already placed. A line that has not
-    /// moved keeps its node where the move put it.
-    fn rebuild(&mut self, targets: &Targets, origin: &Layout) {
+    /// moved keeps its node where the move put it. The control points
+    /// carried along stay within `shift` of where the settle began.
+    fn rebuild(&mut self, targets: &Targets, origin: &Layout, shift: f64) {
         for k in 0..self.lines.len() {
             let (from, to) = (self.nodes[self.lines[k].from], self.nodes[self.lines[k].to]);
             let id = self.mid(k);
@@ -592,10 +622,14 @@ impl Layout {
             let last = chain.pts.len() - 1;
             let d0 = sub(from, chain.pts[0]);
             chain.pts[0] = from;
-            chain.pts[1] = add(chain.pts[1], d0);
+            chain.pts[1] = within(add(chain.pts[1], d0), origin.lines[k].pts[1], shift);
             let dn = sub(to, chain.pts[last]);
             chain.pts[last] = to;
-            chain.pts[last - 1] = add(chain.pts[last - 1], dn);
+            chain.pts[last - 1] = within(
+                add(chain.pts[last - 1], dn),
+                origin.lines[k].pts[last - 1],
+                shift,
+            );
             for j in 1..chain.segments() {
                 if !chain.smooth[j - 1] {
                     continue;
@@ -620,6 +654,18 @@ impl Layout {
             chain.resample(targets);
             self.nodes[id] = mid;
         }
+    }
+}
+
+/// `p`, pulled back onto the circle of radius `shift` about `from` when
+/// it lies outside it.
+fn within(p: Point, from: Point, shift: f64) -> Point {
+    let off = sub(p, from);
+    let far = norm(off);
+    if far > shift {
+        add(from, mul(off, shift / far))
+    } else {
+        p
     }
 }
 
@@ -650,29 +696,67 @@ fn journal(state: &GameState) -> Vec<FaceMove> {
 pub fn least_clearance(state: &GameState) -> (f64, Tightest) {
     let targets = Targets::for_board(state.board_size);
     Layout::from_state(state, &targets).map_or((f64::INFINITY, Tightest::Nothing), |layout| {
-        layout.survey(&targets, None)
+        let survey = layout.survey(&targets, None);
+        (survey.least, survey.at)
     })
 }
 
-/// Relaxes the position in place. Lines whose curve moves get the
-/// flattening of the new curve as their stroke.
+/// What one settle changed, so an undo can put the board back as it was
+/// before the move it settled.
+#[derive(Clone, Debug, Default)]
+pub struct Undo {
+    nodes: Vec<(usize, Point)>,
+    lines: Vec<(usize, Line)>,
+}
+
+impl Undo {
+    /// Puts back every item the settle changed that the board still has.
+    pub fn restore(self, state: &mut GameState) {
+        for (id, position) in self.nodes {
+            if let Some(node) = state.nodes.iter_mut().find(|n| n.id == id) {
+                node.position = position;
+            }
+        }
+        for (k, was) in self.lines {
+            if let Some(line) = state.lines.get_mut(k) {
+                line.segments = was.segments;
+                line.polyline = was.polyline;
+                line.flat = was.flat;
+                line.new_node_pos = was.new_node_pos;
+            }
+        }
+    }
+}
+
+/// Relaxes the position in place and records what moved on the state's
+/// settle stack. Lines whose curve moves get the flattening of the new
+/// curve as their stroke.
 pub fn settle(state: &mut GameState) {
+    let undo = relax(state);
+    state.settles.push(undo);
+}
+
+fn relax(state: &mut GameState) -> Undo {
     if state.lines.is_empty() {
-        return;
+        return Undo::default();
     }
     let targets = Targets::for_board(state.board_size);
     let Some(origin) = Layout::from_state(state, &targets) else {
-        return;
+        return Undo::default();
     };
     let original = journal(state);
     if original.len() != state.lines.len() {
-        return;
+        return Undo::default();
     }
     let tolerance = curve::tolerance(state.board_size);
     let mut layout = origin.clone();
-    let (mut least, _) = layout.survey(&targets, None);
+    let Survey {
+        mut least,
+        mut short,
+        ..
+    } = layout.survey(&targets, None);
     if least >= 1.0 {
-        return;
+        return Undo::default();
     }
     let mut crossings = layout.crossings(tolerance);
     let mut stride = STRIDE * targets.line;
@@ -689,12 +773,20 @@ pub fn settle(state: &mut GameState) {
         layout.survey(&targets, Some(&mut push));
         let mut next = layout.clone();
         let longest = next.apply(&push, &origin, stride, shift);
-        next.rebuild(&targets, &origin);
-        let (after, _) = next.survey(&targets, None);
+        next.rebuild(&targets, &origin, shift);
+        let after = next.survey(&targets, None);
         let crossed = next.crossings(tolerance);
-        if after + 1e-9 >= least && crossed <= crossings && next.holds(state, &original) {
+        // A pair at target stays at target: a round may close shortfalls
+        // but not open one.
+        let no_new_short = after.short.iter().all(|pair| short.contains(pair));
+        if after.least + 1e-9 >= least
+            && no_new_short
+            && crossed <= crossings
+            && next.holds(state, &original)
+        {
             layout = next;
-            least = after;
+            least = after.least;
+            short = after.short;
             crossings = crossed;
             if longest < CONVERGED {
                 break;
@@ -712,11 +804,13 @@ pub fn settle(state: &mut GameState) {
         .zip(&origin.lines)
         .map(|(now, was)| now.pts != was.pts)
         .collect();
+    let mut undo = Undo::default();
     for (k, chain) in layout.lines.iter().enumerate() {
         if !changed[k] {
             continue;
         }
         let line = &mut state.lines[k];
+        undo.lines.push((k, line.clone()));
         line.segments = chain.cubics();
         line.flat = curve::flatten(&line.segments, tolerance);
         line.polyline = line.flat.clone();
@@ -728,9 +822,11 @@ pub fn settle(state: &mut GameState) {
         }
         let at = layout.nodes[node.id];
         if at != node.position {
+            undo.nodes.push((node.id, node.position));
             node.position = at;
         }
     }
+    undo
 }
 
 #[cfg(test)]
