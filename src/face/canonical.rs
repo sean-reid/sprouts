@@ -106,27 +106,35 @@ impl<'a> Tree<'a> {
         rotation[(at + 1) % rotation.len()]
     }
 
-    /// Breadth-first code of the piece holding `root`, plus the label each
-    /// of its half-edges got.
-    fn code(&self, root: HalfEdgeId, labels: &mut HashMap<HalfEdgeId, u32>) -> Vec<u32> {
-        labels.clear();
-        let mut order = vec![root];
-        labels.insert(root, 0);
-        let mut code = Vec::new();
+    /// Breadth-first code of the piece holding `root`. `labels` is indexed
+    /// by half-edge and holds `u32::MAX` for half-edges not yet reached;
+    /// `order` lists the piece's half-edges in label order.
+    fn code(
+        &self,
+        root: HalfEdgeId,
+        labels: &mut [u32],
+        order: &mut Vec<HalfEdgeId>,
+        code: &mut Vec<u32>,
+    ) {
+        for &d in order.iter() {
+            labels[d] = u32::MAX;
+        }
+        order.clear();
+        code.clear();
+        order.push(root);
+        labels[root] = 0;
         let mut i = 0;
         while i < order.len() {
             let d = order[i];
             for e in [d ^ 1, self.sigma(d)] {
-                let next = order.len() as u32;
-                let label = *labels.entry(e).or_insert_with(|| {
+                if labels[e] == u32::MAX {
+                    labels[e] = order.len() as u32;
                     order.push(e);
-                    next
-                });
-                code.push(label);
+                }
+                code.push(labels[e]);
             }
             i += 1;
         }
-        code
     }
 
     fn face(&mut self, f: FaceId, parent: Option<Piece>) -> Vec<u32> {
@@ -157,24 +165,26 @@ impl<'a> Tree<'a> {
             vec![ISOLATED]
         } else {
             let mut best: Option<Vec<u32>> = None;
-            let mut labels = HashMap::new();
+            let mut labels = vec![u32::MAX; self.m.half_edges.len()];
+            let mut order = Vec::with_capacity(self.darts[p].len());
+            let mut code = Vec::with_capacity(2 * self.darts[p].len());
+            let mut lowest = vec![u32::MAX; self.m.faces.len()];
             for root in self.darts[p].clone() {
-                let code = self.code(root, &mut labels);
+                self.code(root, &mut labels, &mut order, &mut code);
+                for &f in &self.faces_of_piece[p] {
+                    lowest[f] = u32::MAX;
+                }
+                for &d in &order {
+                    let f = self.m.face_of(d);
+                    lowest[f] = lowest[f].min(labels[d]);
+                }
                 let mut orbits: Vec<(u32, FaceId)> = self.faces_of_piece[p]
                     .iter()
-                    .map(|&f| {
-                        let lowest = self.darts[p]
-                            .iter()
-                            .filter(|&&d| self.m.face_of(d) == f)
-                            .map(|d| labels[d])
-                            .min()
-                            .expect("a face round a piece has a half-edge of it");
-                        (lowest, f)
-                    })
+                    .map(|&f| (lowest[f], f))
                     .collect();
                 orbits.sort_unstable();
                 let mut form = vec![PIECE, code.len() as u32];
-                form.extend(code);
+                form.extend_from_slice(&code);
                 for (lowest, f) in orbits {
                     if Some(f) == parent {
                         form.push(lowest);
