@@ -32,13 +32,13 @@ function drawSmoothPath(ctx: CanvasRenderingContext2D, points: Point[]): void {
   ctx.stroke();
 }
 
+export type Project = (world: Point) => Point;
+
+export const BOARD_BACKGROUND = "#1A1A1A";
+
 // Points are mapped to screen before stroking so widths stay constant under zoom.
-export function draw(ctx: CanvasRenderingContext2D, state: GameState, view: View): void {
-  const dpr = view.width > 0 ? ctx.canvas.width / view.width : 1;
-  const screen = (points: Point[]): Point[] => points.map((p) => view.toScreen(p));
-  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  ctx.fillStyle = "#1A1A1A";
-  ctx.fillRect(0, 0, view.width, view.height);
+export function drawBoard(ctx: CanvasRenderingContext2D, state: GameState, project: Project): void {
+  const screen = (points: Point[]): Point[] => points.map(project);
 
   ctx.lineWidth = LINE_WIDTH;
   for (const line of state.lines) {
@@ -55,7 +55,7 @@ export function draw(ctx: CanvasRenderingContext2D, state: GameState, view: View
 
   if (state.mode === "placing" && state.placementDot) {
     const { position, valid } = state.placementDot;
-    const at = view.toScreen(position);
+    const at = project(position);
     ctx.fillStyle = valid ? "#10B981" : "#EF4444";
     ctx.beginPath();
     ctx.arc(at.x, at.y, NODE_RADIUS, 0, Math.PI * 2);
@@ -67,7 +67,7 @@ export function draw(ctx: CanvasRenderingContext2D, state: GameState, view: View
   ctx.textBaseline = "middle";
   for (const node of state.nodes) {
     const remaining = 3 - node.connectionCount;
-    const at = view.toScreen(node.position);
+    const at = project(node.position);
     ctx.fillStyle = state.activeNodes.has(node.id) ? "#3B82F6" : "#555";
     ctx.strokeStyle = "#FFF";
     ctx.lineWidth = 2;
@@ -88,4 +88,12 @@ export function draw(ctx: CanvasRenderingContext2D, state: GameState, view: View
       drawSmoothPath(ctx, screen(path.slice(0, shown)));
     }
   }
+}
+
+export function draw(ctx: CanvasRenderingContext2D, state: GameState, view: View): void {
+  const dpr = view.width > 0 ? ctx.canvas.width / view.width : 1;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.fillStyle = BOARD_BACKGROUND;
+  ctx.fillRect(0, 0, view.width, view.height);
+  drawBoard(ctx, state, (p) => view.toScreen(p));
 }
