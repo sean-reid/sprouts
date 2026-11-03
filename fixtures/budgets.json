@@ -1,7 +1,8 @@
 {
-  "skeleton": 3100,
-  "classification": 70,
-  "generation": 5200,
-  "search": 23200,
-  "validation": 1
+  "skeleton": 6700,
+  "classification": 40,
+  "generation": 7900,
+  "search": 29200,
+  "validation": 1,
+  "game_over": 3100
 }

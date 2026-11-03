@@ -38,7 +38,7 @@ fn load_budgets() -> Result<BTreeMap<String, f64>, String> {
     Ok(budgets)
 }
 
-fn print_table(name: &str, fixture: &Fixture, timings: &[MoveTiming]) -> [f64; 5] {
+fn print_table(name: &str, fixture: &Fixture, timings: &[MoveTiming]) -> [f64; 6] {
     println!(
         "\n{name}: {} nodes, board {}, {} moves",
         fixture.initial_nodes,
@@ -52,9 +52,10 @@ fn print_table(name: &str, fixture: &Fixture, timings: &[MoveTiming]) -> [f64; 5
     println!(" {:>10}", "total");
 
     for t in timings {
-        let player = match t.player {
-            replay::Player::Human => "human",
-            replay::Player::AI => "ai",
+        let player = match (t.terminal, t.player) {
+            (true, _) => "end",
+            (false, replay::Player::Human) => "human",
+            (false, replay::Player::AI) => "ai",
         };
         print!("{:>4} {:>6}", t.index, player);
         for d in t.phases.as_array() {
@@ -84,11 +85,16 @@ fn run_bench() -> Result<bool, String> {
             .file_stem()
             .and_then(|s| s.to_str())
             .unwrap_or("fixture");
-        let timings = replay::load(path).and_then(|fixture| {
-            replay::replay(&fixture).map(|timings| print_table(name, &fixture, &timings))
-        });
-        match timings {
-            Ok(max) => failures.extend(replay::breaches(name, &max, &budgets)),
+        match replay::load(path) {
+            Ok(fixture) => {
+                let run = replay::replay(&fixture);
+                let max = print_table(name, &fixture, &run.timings);
+                failures.extend(replay::breaches(name, &max, &budgets));
+                if let Some(e) = run.failure {
+                    println!("{name}: {e}");
+                    failures.push(format!("{name}: {e}"));
+                }
+            }
             Err(e) => {
                 println!("\n{name}: {e}");
                 failures.push(format!("{name}: {e}"));

@@ -2,6 +2,7 @@
 
 use crate::ai;
 use crate::components::label_components;
+use crate::game_over::is_game_over;
 use crate::morphology::generate_skeleton;
 use crate::node_classifier::classify_nodes;
 pub use crate::types::Player;
@@ -58,12 +59,13 @@ impl FixtureMove {
     }
 }
 
-pub const PHASES: [&str; 5] = [
+pub const PHASES: [&str; 6] = [
     "skeleton",
     "classification",
     "generation",
     "search",
     "validation",
+    "game_over",
 ];
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -73,16 +75,18 @@ pub struct Phases {
     pub generation: Duration,
     pub search: Duration,
     pub validation: Duration,
+    pub game_over: Duration,
 }
 
 impl Phases {
-    pub fn as_array(&self) -> [Duration; 5] {
+    pub fn as_array(&self) -> [Duration; 6] {
         [
             self.skeleton,
             self.classification,
             self.generation,
             self.search,
             self.validation,
+            self.game_over,
         ]
     }
 
@@ -95,7 +99,15 @@ impl Phases {
 pub struct MoveTiming {
     pub index: usize,
     pub player: Player,
+    /// The position after the last move, where no move is validated.
+    pub terminal: bool,
     pub phases: Phases,
+}
+
+#[derive(Debug, Clone)]
+pub struct Replay {
+    pub timings: Vec<MoveTiming>,
+    pub failure: Option<String>,
 }
 
 pub fn ms(d: Duration) -> f64 {
@@ -103,8 +115,8 @@ pub fn ms(d: Duration) -> f64 {
 }
 
 /// Slowest run of each phase across the replay, in milliseconds.
-pub fn max_per_phase(timings: &[MoveTiming]) -> [f64; 5] {
-    let mut max = [0.0f64; 5];
+pub fn max_per_phase(timings: &[MoveTiming]) -> [f64; 6] {
+    let mut max = [0.0f64; 6];
     for t in timings {
         for (slot, d) in max.iter_mut().zip(t.phases.as_array()) {
             *slot = slot.max(ms(d));
@@ -114,7 +126,7 @@ pub fn max_per_phase(timings: &[MoveTiming]) -> [f64; 5] {
 }
 
 /// One line per phase whose max is over its budget.
-pub fn breaches(name: &str, max: &[f64; 5], budgets: &BTreeMap<String, f64>) -> Vec<String> {
+pub fn breaches(name: &str, max: &[f64; 6], budgets: &BTreeMap<String, f64>) -> Vec<String> {
     PHASES
         .iter()
         .zip(max)
@@ -153,12 +165,14 @@ fn validate_for(state: &GameState, mov: &Move) -> Result<(), String> {
     }
 }
 
-/// Runs every phase of a turn at the position before each move, then applies it.
-pub fn replay(fixture: &Fixture) -> Result<Vec<MoveTiming>, String> {
+/// Runs every phase of a turn at each position, including the one after the
+/// last move, and applies each recorded move in turn.
+pub fn replay(fixture: &Fixture) -> Replay {
     let mut state = GameState::with_board_size(fixture.initial_nodes, fixture.board_size);
-    let mut timings = Vec::with_capacity(fixture.moves.len());
+    let mut timings = Vec::with_capacity(fixture.moves.len() + 1);
+    let mut failure = None;
 
-    for (index, recorded) in fixture.moves.iter().enumerate() {
+    for index in 0..=fixture.moves.len() {
         let mut phases = Phases::default();
 
         let t = Instant::now();
@@ -185,21 +199,37 @@ pub fn replay(fixture: &Fixture) -> Result<Vec<MoveTiming>, String> {
         }
         phases.search = t.elapsed();
 
-        let mov = recorded.to_move(state.current_player);
         let t = Instant::now();
-        let verdict = validate_for(&state, &mov);
-        phases.validation = t.elapsed();
-        verdict.map_err(|e| format!("move {} rejected: {}", index, e))?;
+        black_box(is_game_over(&state, &classification));
+        phases.game_over = t.elapsed();
+
+        let recorded = fixture.moves.get(index);
+        let verdict = recorded.map(|recorded| {
+            let mov = recorded.to_move(state.current_player);
+            let t = Instant::now();
+            let verdict = validate_for(&state, &mov);
+            phases.validation = t.elapsed();
+            (mov, verdict)
+        });
 
         timings.push(MoveTiming {
             index,
             player: state.current_player,
+            terminal: recorded.is_none(),
             phases,
         });
-        state.apply_move(mov);
+
+        match verdict {
+            Some((mov, Ok(()))) => state.apply_move(mov),
+            Some((_, Err(e))) => {
+                failure = Some(format!("move {index} rejected: {e}"));
+                break;
+            }
+            None => {}
+        }
     }
 
-    Ok(timings)
+    Replay { timings, failure }
 }
 
 /// Plays the AI against itself, holding each side to the validation the page
@@ -250,26 +280,55 @@ mod tests {
         let fixture = load(&fixtures_dir().join("human-4n-1000.json")).unwrap();
         assert_eq!(fixture.initial_nodes, 4);
         assert_eq!(fixture.board_size, 1000);
-        let timings = replay(&fixture).unwrap();
-        assert_eq!(timings.len(), fixture.moves.len());
-        assert_eq!(timings[0].player, Player::Human);
-        assert_eq!(timings[1].player, Player::AI);
-        let max = max_per_phase(&timings);
-        assert!(max[0] > 0.0 && max[1] > 0.0 && max[2] > 0.0 && max[4] > 0.0);
+        let run = replay(&fixture);
+        assert_eq!(run.failure, None);
+        assert_eq!(run.timings.len(), fixture.moves.len() + 1);
+        assert_eq!(run.timings[0].player, Player::Human);
+        assert_eq!(run.timings[1].player, Player::AI);
+        assert!(run.timings[2].terminal);
+        let max = max_per_phase(&run.timings);
+        assert!(max.iter().all(|v| *v > 0.0), "{max:?}");
+    }
+
+    #[test]
+    fn exported_game_replays() {
+        let Ok(path) = std::env::var("SPROUTS_FIXTURE") else {
+            return;
+        };
+        let fixture = load(Path::new(&path)).unwrap();
+        assert!(fixture.moves.len() >= 2);
+        let run = replay(&fixture);
+        assert_eq!(run.failure, None);
+    }
+
+    #[test]
+    fn rejection_keeps_the_timings_so_far() {
+        let mut fixture = load(&fixtures_dir().join("human-4n-1000.json")).unwrap();
+        let start = fixture.moves[1].polyline[0];
+        fixture.moves[1].polyline = vec![start, start];
+        let run = replay(&fixture);
+        assert!(run
+            .failure
+            .as_deref()
+            .unwrap()
+            .starts_with("move 1 rejected"));
+        assert_eq!(run.timings.len(), 2);
+        assert!(!run.timings[1].terminal);
     }
 
     #[test]
     fn self_play_records_a_game_that_replays() {
         let fixture = record(4, 500);
         assert!(fixture.moves.len() >= 2);
-        let timings = replay(&fixture).unwrap();
-        assert_eq!(timings.len(), fixture.moves.len());
+        let run = replay(&fixture);
+        assert_eq!(run.failure, None);
+        assert_eq!(run.timings.len(), fixture.moves.len() + 1);
     }
 
     #[test]
     fn breaches_name_only_phases_over_budget() {
         let budgets: BTreeMap<String, f64> = PHASES.iter().map(|p| (p.to_string(), 10.0)).collect();
-        let max = [5.0, 10.0, 10.5, 0.0, 200.0];
+        let max = [5.0, 10.0, 10.5, 0.0, 200.0, 1.0];
         let hits = breaches("g", &max, &budgets);
         assert_eq!(hits.len(), 2);
         assert!(hits[0].starts_with("g: generation 10.50 ms over budget 10.00 ms"));
