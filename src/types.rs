@@ -1,4 +1,6 @@
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
+use tsify::Tsify;
 
 pub const BOARD_SIZE: usize = 1000;
 
@@ -22,7 +24,7 @@ pub const LINE_RASTER_WIDTH: f64 = 3.0;
 pub const NODE_PROTECTION_RADIUS: i32 = 6;
 pub const MAX_ASTAR_ITERATIONS: usize = 300_000;
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Tsify)]
 pub struct Point {
     pub x: f64,
     pub y: f64,
@@ -52,13 +54,15 @@ impl PixelCoord {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Tsify)]
+#[serde(rename_all = "lowercase")]
 pub enum Player {
     Human,
     AI,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Tsify)]
+#[serde(rename_all = "camelCase")]
 pub struct Node {
     pub id: usize,
     pub position: Point,
@@ -75,7 +79,8 @@ impl Node {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Tsify)]
+#[serde(rename_all = "camelCase")]
 pub struct Line {
     pub id: usize,
     pub from_node: usize,
@@ -108,6 +113,7 @@ pub struct GameState {
 }
 
 impl GameState {
+    #[cfg(test)]
     pub fn new(initial_nodes: usize) -> Self {
         Self::with_board_size(initial_nodes, BOARD_SIZE)
     }

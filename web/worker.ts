@@ -1,6 +1,6 @@
 import init, { SproutsGame } from "../pkg/sprouts.js";
 import wasmUrl from "../pkg/sprouts_bg.wasm?url";
-import type { Envelope, Reply, Request, Results } from "./protocol";
+import type { Envelope, Reply } from "./protocol";
 
 interface WorkerScope {
   onmessage: ((event: MessageEvent<Envelope>) => void) | null;
@@ -17,61 +17,29 @@ function ready(): SproutsGame {
   return game;
 }
 
-async function handle(request: Request): Promise<Results[Request["type"]]> {
-  switch (request.type) {
-    case "init":
-      wasmLoaded ??= init({ module_or_path: wasmUrl });
-      await wasmLoaded;
-      game?.free();
-      game = null;
-      game = SproutsGame.new_with_board_size(request.nodeCount, request.boardSize);
-      return null;
-    case "get_state":
-      return ready().get_state();
-    case "get_active_nodes":
-      return ready().get_active_nodes();
-    case "is_game_over":
-      return ready().is_game_over();
-    case "get_ai_move":
-      return ready().get_ai_move();
-    case "undo":
-      return ready().undo();
-    case "get_closest_point":
-      return ready().get_closest_point_on_path(
-        Float64Array.from(request.pathData),
-        request.x,
-        request.y,
-      );
-    case "validate_placement":
-      return ready().validate_placement(
-        Float64Array.from(request.pathData),
-        request.newNodeX,
-        request.newNodeY,
-      );
-    case "apply_move":
-      return ready().apply_move(
-        request.fromNode,
-        request.toNode,
-        Float64Array.from(request.pathData),
-        request.newNodeX,
-        request.newNodeY,
-      );
-    case "get_move_error":
-      return ready().get_move_error(
-        request.fromNode,
-        request.toNode,
-        Float64Array.from(request.pathData),
-        request.newNodeX,
-        request.newNodeY,
-      );
+async function handle(envelope: Envelope): Promise<unknown> {
+  if (envelope.method === "init") {
+    const [nodeCount, boardSize] = envelope.args;
+    wasmLoaded ??= init({ module_or_path: wasmUrl });
+    await wasmLoaded;
+    game?.free();
+    game = null;
+    game = new SproutsGame(nodeCount, boardSize);
+    return undefined;
   }
+  const current = ready();
+  return Reflect.apply(current[envelope.method], current, envelope.args) as unknown;
 }
 
 scope.onmessage = async (event) => {
-  const { id, request } = event.data;
+  const { id } = event.data;
   try {
-    scope.postMessage({ id, result: await handle(request) });
+    scope.postMessage({ id, ok: true, result: await handle(event.data) });
   } catch (error) {
-    scope.postMessage({ id, error: error instanceof Error ? error.message : String(error) });
+    scope.postMessage({
+      id,
+      ok: false,
+      error: error instanceof Error ? error.message : String(error),
+    });
   }
 };
