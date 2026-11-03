@@ -94,15 +94,18 @@ pub fn snapshot(state: &mut GameState) -> Snapshot {
     }
 }
 
+// The AI generator keeps a move that passes either check, so apply must too.
+pub fn check(state: &GameState, mov: &types::Move) -> Result<(), Rejection> {
+    match state.current_player {
+        Player::AI => validation::validate_ai_move(state, mov)
+            .or_else(|_| validation::validate_ai_move_tight(state, mov)),
+        Player::Human => validation::validate_move(state, mov),
+    }
+}
+
 pub fn apply(state: &mut GameState, mov: Move) -> Outcome {
     let mov = mov.by(state.current_player);
-    // The AI generator keeps a move that passes either check, so apply must too.
-    let checked = match state.current_player {
-        Player::AI => validation::validate_ai_move(state, &mov)
-            .or_else(|_| validation::validate_ai_move_tight(state, &mov)),
-        Player::Human => validation::validate_move(state, &mov),
-    };
-    match checked {
+    match check(state, &mov) {
         Ok(()) => {
             state.apply_move(mov);
             Outcome::Applied {

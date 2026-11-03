@@ -5,9 +5,10 @@ use crate::components::label_components;
 use crate::game_over::is_game_over;
 use crate::morphology::generate_skeleton;
 use crate::node_classifier::classify_nodes;
+use crate::protocol;
 pub use crate::types::Player;
 use crate::types::{GameState, Move, Point};
-use crate::validation::{validate_ai_move, validate_move};
+use crate::validation::Rejection;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::hint::black_box;
@@ -158,11 +159,8 @@ pub fn write(fixture: &Fixture, path: &Path) -> Result<(), String> {
     std::fs::write(path, json).map_err(|e| format!("{}: {}", path.display(), e))
 }
 
-fn validate_for(state: &GameState, mov: &Move) -> Result<(), String> {
-    match state.current_player {
-        Player::Human => validate_move(state, mov),
-        Player::AI => validate_ai_move(state, mov),
-    }
+fn validate_for(state: &GameState, mov: &Move) -> Result<(), Rejection> {
+    protocol::check(state, mov)
 }
 
 /// Runs every phase of a turn at each position, including the one after the
@@ -222,7 +220,7 @@ pub fn replay(fixture: &Fixture) -> Replay {
         match verdict {
             Some((mov, Ok(()))) => state.apply_move(mov),
             Some((_, Err(e))) => {
-                failure = Some(format!("move {index} rejected: {e}"));
+                failure = Some(format!("move {index} rejected: {}", e.message));
                 break;
             }
             None => {}
