@@ -365,25 +365,24 @@ async function finishAIMove(
   path: Point[],
   newPos: Point,
 ): Promise<void> {
-  const success = await engine.call({
-    type: "apply_move",
-    fromNode,
-    toNode,
-    pathData: toPathData(path),
-    newNodeX: newPos.x,
-    newNodeY: newPos.y,
-  });
-  if (!success) {
+  try {
+    const success = await engine.call({
+      type: "apply_move",
+      fromNode,
+      toNode,
+      pathData: toPathData(path),
+      newNodeX: newPos.x,
+      newNodeY: newPos.y,
+    });
+    if (success) await refreshBoard();
+    if (!state.gameOver) setStatus("Your turn!");
+  } catch (error) {
+    setStatus("AI error: " + (error instanceof Error ? error.message : String(error)), "lose");
+  } finally {
     state.mode = "idle";
     state.animatingLine = null;
-    setStatus("Your turn!");
-    return;
+    updateUndoButton();
   }
-  await refreshBoard();
-  state.mode = "idle";
-  state.animatingLine = null;
-  updateUndoButton();
-  if (!state.gameOver) setStatus("Your turn!");
 }
 
 async function undoMove(): Promise<void> {
