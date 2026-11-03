@@ -1,0 +1,63 @@
+name: deploy
+
+on:
+  workflow_run:
+    workflows: [ci]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+env:
+  CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+  CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID || '860e267e26cbf52bdca301d114b3c203' }}
+
+jobs:
+  deploy:
+    if: >-
+      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push' &&
+       github.event.workflow_run.head_repository.full_name == github.repository)
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+      url: https://sprouts-game.pages.dev
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-pack
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - name: require the deploy token
+        run: |
+          if [ -z "$CLOUDFLARE_API_TOKEN" ]; then
+            echo "::error::CLOUDFLARE_API_TOKEN is not set in Actions secrets"
+            exit 1
+          fi
+      - run: npm run build
+      - name: create the Pages project on first deploy
+        run: |
+          out=$(npx wrangler pages project create sprouts-game --production-branch main 2>&1) \
+            || echo "$out" | grep -q "already exists" \
+            || { echo "$out"; exit 1; }
+      - run: npx wrangler pages deploy --branch main --commit-hash "$GITHUB_SHA"
+      - name: smoke
+        run: |
+          curl -fsS --retry 5 --retry-all-errors --retry-delay 5 https://sprouts-game.pages.dev/ | grep -qi sprouts
