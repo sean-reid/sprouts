@@ -258,6 +258,31 @@ pub fn replay(fixture: &Fixture) -> Replay {
     Replay { timings, failure }
 }
 
+/// Positions the search charged, summed over the fixture's positions with a
+/// choice to make, when deepening to each depth from 1 to `max_depth`
+/// without a time limit.
+pub fn nodes_per_depth(fixture: &Fixture, max_depth: usize) -> Vec<usize> {
+    let mut state = fixture.start();
+    let mut totals = vec![0; max_depth];
+    for recorded in &fixture.moves {
+        let classification = classify_nodes(&mut state);
+        let generated =
+            ai::generate_concrete_moves_from_classification(&mut state, &classification);
+        let candidates = ai::embedded_moves(&state, generated);
+        if candidates.len() > 1 {
+            let topologies: Vec<FaceMove> = candidates.iter().map(|(_, t)| t.clone()).collect();
+            for (slot, depth) in totals.iter_mut().zip(1..) {
+                *slot += ai::nodes_to_depth(&state, &topologies, depth);
+            }
+        }
+        let mov = recorded.to_move(state.current_player, state.board_size);
+        if state.apply_move(mov).is_err() {
+            break;
+        }
+    }
+    totals
+}
+
 /// Plays the AI against itself, holding each side to the validation the page
 /// applies to that side.
 pub fn record(initial_nodes: usize, board_size: usize) -> Fixture {

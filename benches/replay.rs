@@ -138,10 +138,41 @@ fn run_record() -> Result<(), String> {
     Ok(())
 }
 
+/// Prints the positions the search charges to reach each depth, summed over
+/// the AI's choices in every fixture.
+fn run_nodes_per_depth(max_depth: usize) -> Result<(), String> {
+    let paths = game_paths()?;
+    print!("{:>28}", "fixture");
+    for depth in 1..=max_depth {
+        print!(" {:>9}", format!("depth {depth}"));
+    }
+    println!();
+    for path in &paths {
+        let name = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("fixture");
+        let fixture = replay::load(path)?;
+        print!("{name:>28}");
+        for total in replay::nodes_per_depth(&fixture, max_depth) {
+            print!(" {total:>9}");
+        }
+        println!();
+    }
+    Ok(())
+}
+
 fn main() -> ExitCode {
-    let record = std::env::args().skip(1).any(|a| a == "--record");
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let record = args.iter().any(|a| a == "--record");
+    let depths = args
+        .iter()
+        .position(|a| a == "--nodes-per-depth")
+        .map(|at| args.get(at + 1).and_then(|d| d.parse().ok()).unwrap_or(4));
     let outcome = if record {
         run_record().map(|()| true)
+    } else if let Some(max_depth) = depths {
+        run_nodes_per_depth(max_depth).map(|()| true)
     } else {
         run_bench()
     };

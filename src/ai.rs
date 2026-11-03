@@ -168,6 +168,21 @@ pub(crate) fn search_best_index(state: &GameState, candidates: &[FaceMove]) -> u
     best_candidate(root, candidates, &mut budget).index
 }
 
+/// Positions charged when deepening to `depth` with no time limit.
+#[cfg(feature = "bench")]
+pub(crate) fn nodes_to_depth(state: &GameState, candidates: &[FaceMove], depth: usize) -> usize {
+    use crate::abstract_graph::{best_candidate_to, Clock};
+    struct Still;
+    impl Clock for Still {
+        fn elapsed_ms(&mut self) -> f64 {
+            0.0
+        }
+    }
+    let root = AbstractState::new(state.face.clone(), state.current_player == Player::AI);
+    let mut budget = Budget::new(Still, f64::INFINITY);
+    best_candidate_to(root, candidates, &mut budget, depth).spent
+}
+
 pub fn find_optimal_node_placement(
     path: &[crate::types::Point],
     state: &crate::types::GameState,
