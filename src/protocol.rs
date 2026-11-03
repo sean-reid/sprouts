@@ -212,6 +212,58 @@ mod tests {
     }
 
     #[test]
+    fn placement_on_an_existing_node_is_invalid() {
+        let state = GameState::new(4);
+        let a = state.nodes[0].position;
+        let b = state.nodes[1].position;
+        let path = straight(a, b, 10);
+        let placed = placement(&state, PlacementQuery { path, at: a });
+        assert!(!placed.valid);
+        assert_eq!(placed.position, a);
+    }
+
+    #[test]
+    fn a_recorded_game_replays_from_its_move_list() {
+        #[derive(Serialize, Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Recorded {
+            initial_nodes: usize,
+            board_size: usize,
+            moves: Vec<Move>,
+        }
+
+        let layout = GameState::new(4);
+        let chord = |from: usize, to: usize| {
+            let polyline = straight(layout.nodes[from].position, layout.nodes[to].position, 10);
+            let new_node_pos = polyline[5];
+            Move {
+                from_node: from,
+                to_node: to,
+                polyline,
+                new_node_pos,
+            }
+        };
+        let fixture = serde_json::to_string(&Recorded {
+            initial_nodes: 4,
+            board_size: 1000,
+            moves: vec![chord(0, 1), chord(2, 3)],
+        })
+        .unwrap();
+
+        let recorded: Recorded = serde_json::from_str(&fixture).unwrap();
+        let mut state = GameState::with_board_size(recorded.initial_nodes, recorded.board_size);
+        for mov in recorded.moves {
+            match apply(&mut state, mov) {
+                Outcome::Applied { .. } => {}
+                Outcome::Rejected { reason } => panic!("replay rejected: {reason}"),
+            }
+        }
+        assert_eq!(state.lines.len(), 2);
+        assert_eq!(state.lines[1].player, Player::AI);
+        assert_eq!(state.current_player, Player::Human);
+    }
+
+    #[test]
     fn placement_snaps_to_the_path() {
         let state = GameState::new(4);
         let a = state.nodes[0].position;

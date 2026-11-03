@@ -1,5 +1,5 @@
 import "./style.css";
-import type { Move, Snapshot } from "../pkg/sprouts";
+import type { Move, Outcome, Snapshot } from "../pkg/sprouts";
 import { Engine, StaleRequest } from "./engine";
 import { healPath } from "./path";
 import { draw } from "./render";
@@ -34,6 +34,8 @@ const state: GameState = { ...freshBoard(), lastInputWasTouch: false };
 let lastNodeCount = DEFAULT_NODES;
 let thinkingInterval: ReturnType<typeof setInterval> | null = null;
 let placingModeEnteredAt = 0;
+// Bumped by newGame so replies and animations from the previous game stop.
+let gameEpoch = 0;
 
 const engine = new Engine(() => setStatus("Failed to load game engine", "lose"));
 
@@ -76,6 +78,7 @@ function showGameOver(): void {
 }
 
 function clearStroke(): void {
+  engine.cancel("placement");
   state.mode = "idle";
   state.dragPath = [];
   state.lockedPath = [];
@@ -242,7 +245,9 @@ async function executeMove(): Promise<void> {
   };
   overlay.classList.remove("visible");
 
-  const outcome = await engine.call("applyMove", move);
+  const epoch = gameEpoch;
+  const outcome = await engine.call("applyMove", move).catch(failure);
+  if (epoch !== gameEpoch) return;
   if (outcome.kind === "rejected") {
     setStatus(outcome.reason, "lose");
     clearStroke();
@@ -256,6 +261,10 @@ async function executeMove(): Promise<void> {
     startThinking();
     void performAIMove();
   }
+}
+
+function failure(error: unknown): Outcome {
+  return { kind: "rejected", reason: error instanceof Error ? error.message : String(error) };
 }
 
 function applySnapshot(snapshot: Snapshot): void {
@@ -275,6 +284,7 @@ async function refreshBoard(): Promise<void> {
 }
 
 async function performAIMove(): Promise<void> {
+  const epoch = gameEpoch;
   try {
     const move = await engine.latest("turn", "aiMove");
     stopThinking();
@@ -289,9 +299,10 @@ async function performAIMove(): Promise<void> {
     state.animationProgress = 0;
     const startTime = performance.now();
     const animate = (now: number): void => {
+      if (epoch !== gameEpoch) return;
       state.animationProgress = Math.min((now - startTime) / AI_ANIMATION_MS, 1);
       if (state.animationProgress < 1) requestAnimationFrame(animate);
-      else void finishAIMove(move);
+      else void finishAIMove(move, epoch);
     };
     requestAnimationFrame(animate);
   } catch (error) {
@@ -302,18 +313,18 @@ async function performAIMove(): Promise<void> {
   }
 }
 
-async function finishAIMove(move: Move): Promise<void> {
-  try {
-    const outcome = await engine.call("applyMove", move);
-    if (outcome.kind === "applied") applySnapshot(outcome.snapshot);
+async function finishAIMove(move: Move, epoch: number): Promise<void> {
+  const outcome = await engine.call("applyMove", move).catch(failure);
+  if (epoch !== gameEpoch) return;
+  if (outcome.kind === "applied") {
+    applySnapshot(outcome.snapshot);
     if (!state.gameOver) setStatus("Your turn!");
-  } catch (error) {
-    setStatus("AI error: " + (error instanceof Error ? error.message : String(error)), "lose");
-  } finally {
-    state.mode = "idle";
-    state.animatingLine = null;
-    updateUndoButton();
+  } else {
+    setStatus("AI error: " + outcome.reason, "lose");
   }
+  state.mode = "idle";
+  state.animatingLine = null;
+  updateUndoButton();
 }
 
 async function undoMove(): Promise<void> {
@@ -336,6 +347,7 @@ async function newGame(nodeCount: number): Promise<void> {
   lastNodeCount = nodeCount;
   Object.assign(state, freshBoard());
   stopThinking();
+  gameEpoch++;
   engine.cancel("turn");
   setStatus("Initializing...");
   closeModal();
