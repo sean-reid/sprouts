@@ -13,6 +13,7 @@ const FLASH_RING_RADIUS = NODE_RADIUS + 6;
 const ID_OFFSET = NODE_RADIUS + 13;
 export const HIGHLIGHT_COLOR = "#FFFFFF";
 const HIGHLIGHT_OUTLINE = 2;
+export const CANDIDATE_ALPHA = 0.5;
 
 export type Project = (world: Point) => Point;
 
@@ -86,6 +87,12 @@ function drawRing(ctx: CanvasRenderingContext2D, state: GameState, view: View): 
   const inset = RING_WIDTH / 2;
   ctx.strokeRect(inset, inset, view.width - RING_WIDTH, view.height - RING_WIDTH);
   ctx.globalAlpha = 1;
+}
+
+function strokeRing(ctx: CanvasRenderingContext2D, at: Point): void {
+  ctx.beginPath();
+  ctx.arc(at.x, at.y, FLASH_RING_RADIUS, 0, Math.PI * 2);
+  ctx.stroke();
 }
 
 function lerp(a: Point, b: Point, t: number): Point {
@@ -163,11 +170,7 @@ function drawHighlight(
   ctx.fillStyle = HIGHLIGHT_COLOR;
   for (const id of new Set([line.fromNode, line.toNode])) {
     const world = nodeAt(id);
-    if (!world) continue;
-    const at = project(world);
-    ctx.beginPath();
-    ctx.arc(at.x, at.y, FLASH_RING_RADIUS, 0, Math.PI * 2);
-    ctx.stroke();
+    if (world) strokeRing(ctx, project(world));
   }
   const origin = project(centre);
   for (const id of new Set([line.fromNode, line.toNode, created])) {
@@ -208,8 +211,14 @@ export function drawBoard(
   if (state.mode === "dragging") {
     strokePolyline(ctx, screen(state.dragPath));
   } else if (state.mode === "placing") {
+    ctx.save();
+    if (state.routed) {
+      ctx.strokeStyle = PLAYER_COLORS[state.currentPlayer];
+      ctx.globalAlpha = CANDIDATE_ALPHA;
+    }
     if (state.lockedSegments) strokeSegments(ctx, state.lockedSegments, project);
     else strokePolyline(ctx, screen(state.lockedPath));
+    ctx.restore();
   }
 
   if (state.mode === "placing" && state.placementDot) {
@@ -236,6 +245,13 @@ export function drawBoard(
     ctx.stroke();
     ctx.fillStyle = "#FFF";
     ctx.fillText(String(remaining), at.x, at.y + 0.5);
+  }
+
+  ctx.strokeStyle = HIGHLIGHT_COLOR;
+  ctx.lineWidth = LINE_WIDTH;
+  for (const id of new Set([state.pickedNode, state.focusedNode])) {
+    const node = id === null ? undefined : state.nodes.find((n) => n.id === id);
+    if (node) strokeRing(ctx, project(node.position));
   }
 
   if (state.highlightedMove !== null) {

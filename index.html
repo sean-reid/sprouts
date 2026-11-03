@@ -2,10 +2,7 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta
-      name="viewport"
-      content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover"
-    />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <title>Sprouts Game</title>
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
   </head>
@@ -41,7 +38,10 @@
 
     <div class="play-area">
       <div class="canvas-container">
-        <canvas id="canvas"></canvas>
+        <div id="board" tabindex="-1">
+          <canvas id="canvas" role="img" aria-label="Game board"></canvas>
+          <div id="nodeTargets" role="group" aria-label="Nodes"></div>
+        </div>
       </div>
 
       <aside id="history" aria-label="Move list" hidden>
@@ -55,7 +55,13 @@
       </aside>
     </div>
 
-    <div id="gameOverModal" class="modal">
+    <div
+      id="gameOverModal"
+      class="modal"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="winnerText"
+    >
       <div class="modal-content">
         <h2 id="winnerText"></h2>
         <p>Game Over</p>

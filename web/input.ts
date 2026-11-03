@@ -24,6 +24,9 @@ export interface StrokeHandlers {
 export interface InputOptions {
   // World units; a shorter release is a tap.
   minStrokeLength: number;
+  // Receives the pointer events; the canvas itself when absent. Positions
+  // are still measured against the canvas.
+  surface?: HTMLElement;
 }
 
 interface Tracked {
@@ -71,6 +74,7 @@ export function attachInput(
   handlers: StrokeHandlers,
   options: InputOptions,
 ): void {
+  const surface = options.surface ?? canvas;
   const pointers = new Map<number, Tracked>();
   let stroke: Stroke | null = null;
   let held: number | null = null;
@@ -118,7 +122,7 @@ export function attachInput(
     view.anchor(pinch.startWorld, midpoint(a.screen, b.screen), pinch.startScale * ratio);
   };
 
-  canvas.addEventListener("pointerdown", (e) => {
+  surface.addEventListener("pointerdown", (e) => {
     const kind = kindOf(e);
     if (kind === "mouse" && e.button !== 0) return;
     const screen = local(e);
@@ -146,7 +150,7 @@ export function attachInput(
     stroke.drawing = handlers.start(world, kind);
   });
 
-  canvas.addEventListener("pointermove", (e) => {
+  surface.addEventListener("pointermove", (e) => {
     const kind = kindOf(e);
     const tracked = pointers.get(e.pointerId);
     const events = e.getCoalescedEvents?.() ?? [];
@@ -226,7 +230,7 @@ export function attachInput(
       lastTap = { at: now, screen };
     }
   };
-  canvas.addEventListener("pointerup", release);
+  surface.addEventListener("pointerup", release);
 
   // A cancelled pointer never finishes a stroke; everything it drove resets.
   const cancelAll = (): void => {
@@ -241,10 +245,10 @@ export function attachInput(
   const cancel = (e: PointerEvent): void => {
     if (pointers.has(e.pointerId)) cancelAll();
   };
-  canvas.addEventListener("pointercancel", cancel);
-  canvas.addEventListener("lostpointercapture", cancel);
+  surface.addEventListener("pointercancel", cancel);
+  surface.addEventListener("lostpointercapture", cancel);
 
-  canvas.addEventListener(
+  surface.addEventListener(
     "wheel",
     (e) => {
       e.preventDefault();

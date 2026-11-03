@@ -1,5 +1,6 @@
 import "./style.css";
 import type { AutoPlacement, Move, Outcome, Player, Rejection, Snapshot } from "../pkg/sprouts";
+import { Dialog } from "./dialog";
 import { Engine, StaleRequest } from "./engine";
 import {
   clearSaved,
@@ -14,10 +15,12 @@ import {
   type GameRecord,
 } from "./history";
 import { attachInput, type InputOptions, type PointerKind } from "./input";
+import { KeyboardPlay, type Routed } from "./keyboard";
 import { Loupe } from "./loupe";
 import { healPath } from "./path";
 import { startingNodes, wireRecording } from "./record";
 import { draw } from "./render";
+import { NodeTargets } from "./targets";
 import {
   freshBoard,
   watched,
@@ -71,6 +74,8 @@ const shareUrlEl = byId<HTMLInputElement>("shareUrl");
 const cancelBtn = byId<HTMLButtonElement>("cancelBtn");
 const modal = byId<HTMLElement>("gameOverModal");
 const winnerText = byId<HTMLElement>("winnerText");
+const boardEl = byId<HTMLElement>("board");
+const targetsEl = byId<HTMLElement>("nodeTargets");
 
 const context = canvas.getContext("2d");
 if (!context) throw new Error("2d canvas context unavailable");
@@ -83,7 +88,10 @@ function invalidate(): void {
 
 const view = new View(BOARD_SIZE);
 const loupe = new Loupe();
-const inputOptions: InputOptions = { minStrokeLength: minStrokeLength(view.boardSize) };
+const inputOptions: InputOptions = {
+  minStrokeLength: minStrokeLength(view.boardSize),
+  surface: boardEl,
+};
 const motionQuery = window.matchMedia("(prefers-reduced-motion: reduce)");
 const state: GameState = watched(
   { ...freshBoard(), reducedMotion: motionQuery.matches },
@@ -115,6 +123,27 @@ let suggestion: Promise<void> = Promise.resolve();
 let dotUpdate: Promise<void> = Promise.resolve();
 
 const engine = new Engine(() => setStatus("Failed to load game engine", "lose"));
+const targets = new NodeTargets(targetsEl, boardEl, state, view, {
+  activate: (id) => void keys.activate(id),
+  focus: (id) => {
+    state.focusedNode = id;
+  },
+});
+const keys = new KeyboardPlay(
+  {
+    canPick: () =>
+      !busy() && !state.gameOver && !state.reviewing && state.currentPlayer === "human",
+    movesFrom: async (node) => (await engine.call("movesFrom", node)).moves,
+    route: (mv) => engine.latest("route", "routeMove", mv),
+    lock: lockRouted,
+    commit: () => void commitPlacement(),
+    cancel: cancelPlacement,
+    status: setStatus,
+  },
+  state,
+  targets,
+);
+const dialog = new Dialog(modal, review);
 
 function describe(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -232,7 +261,14 @@ function persist(): void {
 }
 
 function closeModal(): void {
-  modal.classList.remove("visible");
+  dialog.hide(boardEl);
+}
+
+function review(): void {
+  state.reviewing = true;
+  pinnedReview = true;
+  closeModal();
+  updateControls();
 }
 
 function showGameOver(): void {
@@ -242,7 +278,7 @@ function showGameOver(): void {
   setStatus(humanWins ? "You win!" : "AI wins", humanWins ? "win" : "lose");
   winnerText.textContent = humanWins ? "YOU WIN" : "AI WINS";
   winnerText.style.color = humanWins ? "#10B981" : "#EF4444";
-  modal.classList.add("visible");
+  dialog.show();
 }
 
 function hideLoupe(): void {
@@ -260,6 +296,26 @@ function clearStroke(): void {
   state.lockedPath = [];
   state.lockedSegments = null;
   state.placementDot = null;
+  keys.reset();
+}
+
+// A routed curve takes the place of a locked stroke, its dot already on it.
+function lockRouted(from: number, to: number, routed: Routed): void {
+  hideLoupe();
+  engine.cancel("lock");
+  engine.cancel("placement");
+  state.dragStartNode = from;
+  state.dragEndNode = to;
+  state.dragPath = [];
+  state.lockedPath = routed.mov.polyline;
+  state.lockedSegments = routed.segments;
+  state.placementDot = { position: routed.mov.newNodePos, valid: true };
+  state.routed = true;
+  state.mode = "placing";
+  suggestion = Promise.resolve();
+  dotUpdate = Promise.resolve();
+  cancelBtn.hidden = false;
+  updateControls();
 }
 
 // Thresholds are screen pixels; the view turns them into world units.
@@ -290,12 +346,13 @@ function overDot(world: Point): boolean {
 
 function handleStart(world: Point, kind: PointerKind): boolean {
   if (state.reviewing) {
-    if (state.gameOver && timeline.atEnd) modal.classList.add("visible");
+    if (state.gameOver && timeline.atEnd) dialog.show();
     return false;
   }
   if (state.mode !== "idle" || state.thinking || state.gameOver || seeking) return false;
   const node = findNodeAt(world, kind === "touch" ? 30 : 15);
   if (!node || !state.activeNodes.has(node.id)) return false;
+  keys.reset();
   state.mode = "dragging";
   state.dragStartNode = node.id;
   state.dragPath = [{ x: node.position.x, y: node.position.y }];
@@ -504,6 +561,8 @@ function applySnapshot(snapshot: Snapshot): void {
   state.currentPlayer = snapshot.currentPlayer;
   state.activeNodes = new Set(snapshot.activeNodes);
   state.gameOver = snapshot.gameOver;
+  keys.reset();
+  targets.sync();
   updateTurn();
   updateControls();
 }
@@ -534,6 +593,11 @@ async function performAIMove(): Promise<void> {
     state.mode = "animating_ai";
     updateControls();
     state.animatingLine = { segments: reply.segments, newPos: reply.mov.newNodePos };
+    if (state.reducedMotion) {
+      state.animationProgress = 1;
+      void finishAIMove(reply.mov, epoch);
+      return;
+    }
     state.animationProgress = 0;
     const startTime = performance.now();
     const animate = (now: number): void => {
@@ -739,6 +803,7 @@ function setBoardSize(boardSize: number): void {
 function resetTable(): void {
   Object.assign(state, freshBoard());
   clearStroke();
+  targets.sync();
   shareUrlEl.hidden = true;
   stopThinking();
   gameEpoch++;
@@ -910,13 +975,19 @@ function wireInput(): void {
     }
   });
   document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && keys.escape()) return;
     if (state.mode === "placing") {
       if (e.key === "Escape") cancelPlacement();
       if (e.key === "Enter" && !(e.target instanceof HTMLButtonElement)) void commitPlacement();
     }
-    if (historyEl.hidden || typingInField(e.target) || e.altKey || e.ctrlKey || e.metaKey) return;
-    if (e.key === "ArrowLeft") void step(-1);
-    if (e.key === "ArrowRight") void step(1);
+    if (typingInField(e.target) || e.altKey || e.ctrlKey || e.metaKey) return;
+    const direction = e.key === "ArrowLeft" ? -1 : e.key === "ArrowRight" ? 1 : null;
+    if (direction === null) return;
+    if (keys.cycle(direction)) {
+      e.preventDefault();
+      return;
+    }
+    if (!historyEl.hidden) void step(direction);
   });
 
   startBtn.addEventListener("click", () => void newGame(chosenNodeCount()));
@@ -951,12 +1022,7 @@ function wireInput(): void {
   forwardBtn.addEventListener("click", () => void step(1));
   shareBtn.addEventListener("click", () => void share());
   cancelBtn.addEventListener("click", cancelPlacement);
-  byId("reviewBtn").addEventListener("click", () => {
-    state.reviewing = true;
-    pinnedReview = true;
-    closeModal();
-    updateControls();
-  });
+  byId("reviewBtn").addEventListener("click", review);
   byId("newGameBtn").addEventListener("click", () => void newGame(chosenNodeCount()));
 }
 
@@ -975,9 +1041,13 @@ motionQuery.addEventListener("change", () => {
 });
 view.onChange(() => {
   loupe.hide();
+  targets.place();
   invalidate();
 });
-trackCanvasSize(canvas, view, invalidate);
+trackCanvasSize(canvas, view, () => {
+  targets.place();
+  invalidate();
+});
 wireInput();
 wireRecording(state, () => timeline.boardSize);
 requestAnimationFrame(frame);
