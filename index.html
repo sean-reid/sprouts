@@ -14,9 +14,11 @@
 
     <div class="toolbar">
       <div class="controls">
-        <button data-nodes="4">4 Nodes</button>
-        <button data-nodes="5">5 Nodes</button>
-        <button data-nodes="6">6 Nodes</button>
+        <label class="node-count">
+          <span>Nodes</span>
+          <input id="nodeCount" type="number" inputmode="numeric" min="2" max="24" value="4" />
+        </label>
+        <button id="startBtn">New Game</button>
         <button id="undoBtn" disabled>Undo</button>
       </div>
 

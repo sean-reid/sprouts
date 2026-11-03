@@ -65,11 +65,13 @@ export function pinch(
   return { ...zoomed, tx: zoomed.tx + (m1.x - m0.x), ty: zoomed.ty + (m1.y - m0.y) };
 }
 
-// Mirrors the opening layout in src/types.rs: nodes on a circle around the
-// board centre, radius scaled to the board size.
+// Mirrors opening_layout in src/types.rs: a sunflower spiral whose last
+// node sits 35 percent of the board from the centre.
 export function nodeWorld(index: number, count: number, board: number): Client {
-  const radius = (count <= 4 ? 120 : 160) * (board / 1000);
-  const angle = (2 * Math.PI * index) / count;
+  const goldenAngle = Math.PI * (3 - Math.sqrt(5));
+  const unit = (0.35 * board) / Math.sqrt(count - 0.5);
+  const radius = unit * Math.sqrt(index + 0.5);
+  const angle = index * goldenAngle;
   return { x: board / 2 + radius * Math.cos(angle), y: board / 2 + radius * Math.sin(angle) };
 }
 
@@ -116,11 +118,23 @@ export async function expectNodeDrawnAt(page: Page, at: Client): Promise<void> {
 
 export const PLACING_HINT = /Drag the dot/;
 
+// Sets the starting node count and starts a game with it.
+export async function startGame(page: Page, count: number): Promise<void> {
+  await page.locator("#nodeCount").fill(String(count));
+  await page.locator("#startBtn").click();
+  await expect(page.locator("#status")).toHaveText("Draw a line between two nodes");
+}
+
 // Locks a straight stroke between two nodes and returns its midpoint, where
 // the dot lands on an empty board.
-export async function drawBetween(page: Page, from: number, to: number): Promise<Client> {
-  const a = await nodeOnScreen(page, from, 4);
-  const b = await nodeOnScreen(page, to, 4);
+export async function drawBetween(
+  page: Page,
+  from: number,
+  to: number,
+  count = 4,
+): Promise<Client> {
+  const a = await nodeOnScreen(page, from, count);
+  const b = await nodeOnScreen(page, to, count);
   await mouseStroke(page, a, b);
   await expect(page.locator("#status")).toHaveText(PLACING_HINT);
   return { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
@@ -457,8 +471,8 @@ export async function openBoard(page: Page, path = "/"): Promise<void> {
 }
 
 // One human move and the AI's reply, with the mouse.
-export async function playExchange(page: Page): Promise<void> {
-  const mid = await drawBetween(page, 0, 1);
+export async function playExchange(page: Page, count = 4): Promise<void> {
+  const mid = await drawBetween(page, 0, 1, count);
   await expectDotAt(page, mid);
   await clickAway(page);
   await expect(page.locator("#status")).toHaveText("Your turn!", { timeout: 60_000 });

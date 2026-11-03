@@ -6,6 +6,7 @@ import {
   inkPixels,
   openBoard,
   PLACING_HINT,
+  startGame,
   strokeCells,
 } from "./helpers";
 
@@ -50,7 +51,7 @@ test("the first-player toggle restarts an empty board and waits on one in play",
   expect(await strokeCells(page)).toEqual(opened);
   await expect(page.locator("#moveList li")).toHaveCount(1);
 
-  await page.locator('button[data-nodes="4"]').click();
+  await startGame(page, 4);
   await expect(page.locator("#status")).toHaveText("Draw a line between two nodes");
   await expect.poll(() => inkPixels(page)).toBe(empty);
 
@@ -72,7 +73,7 @@ test("the first-player toggle restarts an empty board and waits on one in play",
   expect(await strokeCells(page)).toEqual(played);
   await expect(page.locator("#moveList li")).toHaveCount(2);
 
-  await page.locator('button[data-nodes="4"]').click();
+  await startGame(page, 4);
   await expect(page.locator("#status")).toHaveText("AI is thinking", { timeout: 20_000 });
   await expect(page.locator("#status")).toHaveText("Your turn!", { timeout: 60_000 });
   await expect(page.locator("#moveList li")).toHaveText([/^1\. AI \d+ to \d+$/]);

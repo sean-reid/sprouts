@@ -15,7 +15,7 @@ mod types;
 mod validation;
 
 use protocol::{
-    AiMove, AutoPlacement, AutoPlacementQuery, Curve, FitQuery, Move, Outcome, Placement,
+    AiMove, AutoPlacement, AutoPlacementQuery, Curve, FitQuery, Layout, Move, Outcome, Placement,
     PlacementQuery, Snapshot,
 };
 use tsify::{Ts, Tsify};
@@ -34,9 +34,11 @@ impl SproutsGame {
         initial_nodes: usize,
         board_size: usize,
         first_player: Ts<Player>,
+        layout: Option<Ts<Layout>>,
     ) -> Result<SproutsGame, JsError> {
+        let nodes = layout.map(|l| l.to_rust()).transpose()?.map(|l| l.nodes);
         Ok(Self {
-            state: protocol::start(initial_nodes, board_size, first_player.to_rust()?),
+            state: protocol::start(initial_nodes, board_size, first_player.to_rust()?, nodes),
         })
     }
 

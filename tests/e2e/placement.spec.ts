@@ -3,6 +3,7 @@ import {
   blueSamplesAround,
   clampToViewport,
   clickAway,
+  type Client,
   dotColourAt,
   drawBetween,
   expectDotAt,
@@ -24,12 +25,12 @@ import {
   playExchange,
   ringPixels,
   shot,
+  startGame,
   tapAway,
   toClient,
   touchDrag,
   touchStroke,
   wheelZoomTo,
-  type Client,
 } from "./helpers";
 
 const NO_ROOM = "No room for a new node on this line";
@@ -160,7 +161,7 @@ test("Escape and Cancel each abort, and Undo and New Game still work", async ({ 
   await page.keyboard.press("Escape");
   await expect(page.locator("#status")).toHaveText("Move cancelled");
   await expect(page.locator("#cancelBtn")).toBeHidden();
-  await page.locator("button[data-nodes='4']").click();
+  await startGame(page, 4);
   await expect(page.locator("#status")).toHaveText("Draw a line between two nodes");
   await expect(page.locator("#undoBtn")).toBeDisabled();
 });

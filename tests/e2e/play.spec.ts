@@ -28,7 +28,7 @@ test.beforeEach(async ({ page }) => {
 
 test("opens on a four node board with undo disabled", async ({ page }) => {
   await expect(page.locator("#canvas")).toBeVisible();
-  await expect(page.locator("button[data-nodes]")).toHaveCount(3);
+  await expect(page.locator("#nodeCount")).toHaveValue("4");
   await expect(page.locator("#undoBtn")).toBeDisabled();
   await shot(page, "start");
 });

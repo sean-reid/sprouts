@@ -29,6 +29,26 @@ pub const LINE_RASTER_WIDTH: f64 = 3.0;
 pub const NODE_PROTECTION_RADIUS: i32 = 6;
 pub const MAX_ASTAR_ITERATIONS: usize = 300_000;
 
+/// Fraction of the board the outermost starting node sits from the centre.
+pub const LAYOUT_REACH: f64 = 0.35;
+
+/// Starting nodes on a sunflower spiral: node i at radius proportional to
+/// the square root of i + 0.5 and i golden angles round, scaled so the last
+/// node reaches `LAYOUT_REACH` of the board. Neighbours stay at least four
+/// node spacings apart up to 24 nodes.
+pub fn opening_layout(count: usize, board_size: usize) -> Vec<Point> {
+    let golden_angle = std::f64::consts::PI * (3.0 - 5f64.sqrt());
+    let centre = board_size as f64 / 2.0;
+    let unit = LAYOUT_REACH * board_size as f64 / (count as f64 - 0.5).sqrt();
+    (0..count)
+        .map(|i| {
+            let radius = unit * (i as f64 + 0.5).sqrt();
+            let angle = i as f64 * golden_angle;
+            Point::new(centre + radius * angle.cos(), centre + radius * angle.sin())
+        })
+        .collect()
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Tsify)]
 pub struct Point {
     pub x: f64,
@@ -165,21 +185,17 @@ impl GameState {
     }
 
     pub fn with_board_size(initial_nodes: usize, board_size: usize) -> Self {
-        let mut nodes = Vec::new();
+        Self::with_nodes(opening_layout(initial_nodes, board_size), board_size)
+    }
 
-        let center_x = board_size as f64 / 2.0;
-        let center_y = board_size as f64 / 2.0;
-        // Scale placement radius proportionally to board size
-        let base_radius = if initial_nodes <= 4 { 120.0 } else { 160.0 };
-        let radius = base_radius * (board_size as f64 / BOARD_SIZE as f64);
-
-        for i in 0..initial_nodes {
-            let angle = 2.0 * std::f64::consts::PI * (i as f64) / (initial_nodes as f64);
-            let x = center_x + radius * angle.cos();
-            let y = center_y + radius * angle.sin();
-            nodes.push(Node::new(i, Point::new(x, y)));
-        }
-
+    /// A fresh game whose starting nodes sit at `positions`.
+    pub fn with_nodes(positions: Vec<Point>, board_size: usize) -> Self {
+        let initial_nodes = positions.len();
+        let nodes = positions
+            .into_iter()
+            .enumerate()
+            .map(|(i, position)| Node::new(i, position))
+            .collect();
         Self {
             nodes,
             lines: Vec::new(),
@@ -455,36 +471,63 @@ mod tests {
     }
 
     #[test]
-    fn new_positions_around_center() {
-        let gs = GameState::new(2);
-        let center = BOARD_SIZE as f64 / 2.0;
-        // Both nodes should be equidistant from center
-        let d0 = gs.nodes[0]
-            .position
-            .distance_to(&Point::new(center, center));
-        let d1 = gs.nodes[1]
-            .position
-            .distance_to(&Point::new(center, center));
-        assert!((d0 - d1).abs() < 1e-6);
+    fn the_last_node_of_the_layout_reaches_the_set_fraction_of_the_board() {
+        for board in [500, 1000] {
+            let centre = Point::new(board as f64 / 2.0, board as f64 / 2.0);
+            for count in 1..=24 {
+                let layout = opening_layout(count, board);
+                let reach = layout.last().unwrap().distance_to(&centre);
+                assert!((reach - LAYOUT_REACH * board as f64).abs() < 1e-6);
+                let widest = layout
+                    .iter()
+                    .map(|p| p.distance_to(&centre))
+                    .fold(0.0, f64::max);
+                assert_eq!(widest, reach);
+            }
+        }
     }
 
-    // --- GameState::with_board_size ---
+    #[test]
+    fn layout_neighbours_keep_four_node_spacings_apart_up_to_24_nodes() {
+        for board in [500, 1000] {
+            let floor = 4.0 * MIN_NODE_SPACING * scale(board);
+            for count in 2..=24 {
+                let layout = opening_layout(count, board);
+                let mut closest = f64::INFINITY;
+                for (i, a) in layout.iter().enumerate() {
+                    for b in &layout[i + 1..] {
+                        closest = closest.min(a.distance_to(b));
+                    }
+                }
+                assert!(closest >= floor, "{count} nodes on {board}: {closest:.1}");
+            }
+        }
+    }
 
     #[test]
-    fn with_board_size_scales_positions() {
+    fn with_board_size_lays_out_the_scaled_sunflower() {
         let gs = GameState::with_board_size(2, 500);
         assert_eq!(gs.board_size, 500);
-        let center = 250.0;
-        for node in &gs.nodes {
-            // All nodes should be within the board
+        for (node, expected) in gs.nodes.iter().zip(opening_layout(2, 500)) {
+            assert_eq!(node.position, expected);
             assert!(node.position.x > 0.0 && node.position.x < 500.0);
             assert!(node.position.y > 0.0 && node.position.y < 500.0);
         }
-        let d = gs.nodes[0]
-            .position
-            .distance_to(&Point::new(center, center));
-        // Radius scales with board_size: 120 * (500/1000) = 60
-        assert!((d - 60.0).abs() < 1e-6);
+        let full = GameState::with_board_size(2, 1000);
+        for (half, whole) in gs.nodes.iter().zip(&full.nodes) {
+            assert!((half.position.x * 2.0 - whole.position.x).abs() < 1e-6);
+            assert!((half.position.y * 2.0 - whole.position.y).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn with_nodes_takes_the_positions_given() {
+        let positions = vec![Point::new(100.0, 100.0), Point::new(300.0, 120.0)];
+        let gs = GameState::with_nodes(positions.clone(), 500);
+        assert_eq!(gs.initial_node_count, 2);
+        assert_eq!(gs.next_node_id, 2);
+        assert_eq!(gs.nodes[1].position, positions[1]);
+        assert_eq!(gs.nodes[1].id, 1);
     }
 
     // --- apply_move ---

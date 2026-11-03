@@ -19,6 +19,7 @@ import {
   PLACING_HINT,
   playExchange,
   shot,
+  startGame,
   strokeCells,
 } from "./helpers";
 
@@ -109,7 +110,7 @@ test("a reload restores the game and New Game clears it", async ({ page }) => {
   await expect(page.locator("#undoBtn")).toBeEnabled();
   await shot(page, "history-restored");
 
-  await page.locator("button[data-nodes='4']").click();
+  await startGame(page, 4);
   await expect(page.locator("#status")).toHaveText("Draw a line between two nodes");
   expect(await page.evaluate(() => localStorage.getItem("sprouts.game"))).toBeNull();
   await page.reload();
@@ -197,7 +198,7 @@ test("a share link reopens the game in review and steps through it", async ({ pa
   await expect(page.locator("#backBtn")).toBeDisabled();
   expect(page.url()).not.toContain("#");
 
-  await other.locator("button[data-nodes='4']").click();
+  await startGame(other, 4);
   await expect(other.locator("#status")).toHaveText("Draw a line between two nodes");
   expect(other.url()).not.toContain("#");
   await visitor.close();
@@ -322,7 +323,7 @@ test("a finished game reopens in review and steps single moves", async ({ page }
 test("a game the AI started restores with the AI as first player", async ({ page }) => {
   await openBoard(page);
   await page.locator("button[data-first='ai']").click();
-  await page.locator("button[data-nodes='4']").click();
+  await startGame(page, 4);
   await expect(page.locator("#status")).toHaveText("Your turn!", { timeout: 60_000 });
   await expect(entries(page)).toHaveText([/^1\. AI \d+ to \d+$/]);
 

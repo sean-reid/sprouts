@@ -2,6 +2,12 @@
  "version": 1,
  "initialNodes": 4,
  "boardSize": 1000,
+ "nodes": [
+  [620, 500],
+  [500, 620],
+  [380, 500],
+  [500, 380]
+ ],
  "moves": [
   {
    "from": 1,

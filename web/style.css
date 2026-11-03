@@ -70,6 +70,30 @@ h1 {
   min-height: 44px;
 }
 
+.node-count {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  color: #a0a0a0;
+}
+
+.node-count input {
+  width: 4.5em;
+  min-height: 44px;
+  padding: 0 8px;
+  background: #1a1a1a;
+  border: 1px solid #2a2a2a;
+  border-radius: 4px;
+  color: #ffffff;
+  font-size: 14px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
 button {
   background: #1a1a1a;
   border: 1px solid #2a2a2a;

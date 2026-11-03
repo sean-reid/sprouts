@@ -48,6 +48,8 @@ const MAX_BOARD = 6000;
 export class History {
   moves: RecordedMove[] = [];
   cursor = 0;
+  // Starting positions once the engine has laid the board out.
+  nodes: [number, number][] | null = null;
 
   constructor(
     public initialNodes: number,
@@ -57,6 +59,7 @@ export class History {
 
   static from(record: GameRecord): History {
     const history = new History(record.initialNodes, record.boardSize, record.firstPlayer);
+    history.nodes = record.nodes ?? null;
     history.moves = record.moves.map(fromFixtureMove);
     history.cursor = Math.min(Math.max(record.cursor, 0), history.moves.length);
     return history;
@@ -115,6 +118,7 @@ export class History {
       version: 1,
       initialNodes: this.initialNodes,
       boardSize: this.boardSize,
+      ...(this.nodes ? { nodes: this.nodes } : {}),
       firstPlayer: this.firstPlayer,
       moves: this.moves.map(toFixtureMove),
       cursor: this.cursor,
@@ -196,10 +200,12 @@ function asRecord(value: unknown): GameRecord | null {
     return null;
   }
   if (v.cursor > v.moves.length) return null;
+  if (v.nodes !== undefined && !isLayout(v.nodes, nodes)) return null;
   return {
     version: 1,
     initialNodes: v.initialNodes,
     boardSize: v.boardSize,
+    ...(v.nodes ? { nodes: v.nodes } : {}),
     firstPlayer: v.firstPlayer,
     moves: v.moves,
     cursor: v.cursor,
@@ -221,6 +227,10 @@ function isPair(value: unknown): value is [number, number] {
     Number.isFinite(value[0]) &&
     Number.isFinite(value[1])
   );
+}
+
+function isLayout(value: unknown, count: number): value is [number, number][] {
+  return Array.isArray(value) && value.length === count && value.every(isPair);
 }
 
 function isMove(value: unknown): value is FixtureMove {
