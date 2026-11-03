@@ -151,6 +151,26 @@ export async function touchDrag(
   }
 }
 
+// Two fingers, ids 1 and 2, moving from one pair of client points to another.
+export async function pinchDrag(
+  cdp: CDPSession,
+  from: [Client, Client],
+  to: [Client, Client],
+  steps = 10,
+): Promise<void> {
+  for (let i = 1; i <= steps; i++) {
+    const s = i / steps;
+    await cdp.send("Input.dispatchTouchEvent", {
+      type: "touchMove",
+      touchPoints: from.map((f, k) => ({
+        x: f.x + (to[k]!.x - f.x) * s,
+        y: f.y + (to[k]!.y - f.y) * s,
+        id: k + 1,
+      })),
+    });
+  }
+}
+
 // Mobile emulation rescales wheel deltas, so the test reads what the page got.
 export async function ctrlWheel(page: Page, at: Client, deltaY: number): Promise<number> {
   await page.mouse.move(at.x, at.y);
