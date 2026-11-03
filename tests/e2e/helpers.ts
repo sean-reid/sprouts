@@ -1,4 +1,5 @@
 import { expect, test, type CDPSession, type Page } from "@playwright/test";
+import { openingLayout } from "../../web/layout";
 
 export interface Client {
   x: number;
@@ -65,14 +66,10 @@ export function pinch(
   return { ...zoomed, tx: zoomed.tx + (m1.x - m0.x), ty: zoomed.ty + (m1.y - m0.y) };
 }
 
-// Mirrors opening_layout in src/types.rs: a sunflower spiral whose last
-// node sits 35 percent of the board from the centre.
+// A starting node in world units on the page's own mirror of the layout.
 export function nodeWorld(index: number, count: number, board: number): Client {
-  const goldenAngle = Math.PI * (3 - Math.sqrt(5));
-  const unit = (0.35 * board) / Math.sqrt(count - 0.5);
-  const radius = unit * Math.sqrt(index + 0.5);
-  const angle = index * goldenAngle;
-  return { x: board / 2 + radius * Math.cos(angle), y: board / 2 + radius * Math.sin(angle) };
+  const [x, y] = openingLayout(count, board)[index]!;
+  return { x, y };
 }
 
 export function toClient(frame: Frame, t: Transform, world: Client): Client {
