@@ -6,7 +6,7 @@ use crate::curve::{self, Cubic};
 use crate::game_over;
 use crate::geometry;
 use crate::node_classifier;
-use crate::types::{self, GameState, Line, Node, Player, Point};
+use crate::types::{self, scale, GameState, Line, Node, Player, Point, MIN_NODE_SPACING};
 use crate::validation::{self, Rejection};
 
 /// A move as proposed to the engine. The mover is whoever is to play, so a
@@ -183,11 +183,15 @@ pub fn placement(state: &GameState, query: PlacementQuery) -> Placement {
 }
 
 /// Candidates are spaced two curve tolerances apart along the flattening,
-/// ranked by clearance, and the first that validates wins.
+/// ranked by clearance, kept a node spacing in from every board edge, and
+/// the first that validates wins.
 pub fn auto_placement(state: &GameState, query: AutoPlacementQuery) -> AutoPlacement {
     let tolerance = curve::tolerance(state.board_size);
     let flat = curve::flatten(&query.segments, tolerance);
     let path = geometry::resample_polyline(&flat, tolerance * 2.0);
+    let inset = MIN_NODE_SPACING * scale(state.board_size);
+    let far = state.board_size as f64 - inset;
+    let inside = |at: &Point| (inset..=far).contains(&at.x) && (inset..=far).contains(&at.y);
     let valid = |at: &Point| {
         validation::validate_new_node_placement(&flat, at, &state.nodes, state.board_size).is_ok()
     };
@@ -195,6 +199,7 @@ pub fn auto_placement(state: &GameState, query: AutoPlacementQuery) -> AutoPlace
         .into_iter()
         .filter_map(|at| curve::nearest(&query.segments, &at))
         .map(|hit| hit.point)
+        .filter(inside)
         .find(valid);
     match chosen {
         Some(position) => AutoPlacement::Placed {
@@ -613,7 +618,7 @@ mod tests {
         let AutoPlacement::Placed { placement } = suggested(&state, segments.clone()) else {
             panic!("the arc has room for a node inside the board");
         };
-        assert!(placement.position.y >= 0.0);
+        assert!(placement.position.y >= MIN_NODE_SPACING);
         assert!(placement.valid);
         let check = placement_at(&state, segments, placement.position);
         assert!(check.valid);

@@ -13,6 +13,7 @@ import {
   frameOf,
   holdNext,
   interceptWorkerMessages,
+  mouseStroke,
   nodeAt,
   nodeOnScreen,
   nodeWorld,
@@ -260,7 +261,8 @@ test("Enter while the fit is pending still places the node", async ({ page }) =>
 
 test("a stroke the engine cannot fit returns to idle with Cancel hidden", async ({ page }) => {
   await failNext(page, "fit", "fit failed");
-  await drawBetween(page, 0, 1);
+  // The error lands right after the lock, so the placing hint is not awaited.
+  await mouseStroke(page, await nodeOnScreen(page, 0, 4), await nodeOnScreen(page, 1, 4));
   await expect(page.locator("#status")).toHaveText("Could not fit the stroke: fit failed");
   await expect(page.locator("#cancelBtn")).toBeHidden();
   expect(await findDot(page)).toBeNull();
@@ -272,7 +274,9 @@ test("a stroke that leaves the board gets its dot on the board", async ({ page }
   const frame = await frameOf(page);
   const a = await nodeOnScreen(page, 0, 4);
   const b = await nodeOnScreen(page, 1, 4);
-  const via = { x: frame.left - 6, y: b.y + (b.y - a.y) / 2 };
+  // Out through the top edge, which has room above the canvas on every
+  // project, and far enough that the inset candidates are clear of it.
+  const via = { x: a.x + 30, y: frame.top - 40 };
   await page.mouse.move(a.x, a.y);
   await page.mouse.down();
   await page.mouse.move(via.x, via.y, { steps: 15 });
@@ -281,8 +285,13 @@ test("a stroke that leaves the board gets its dot on the board", async ({ page }
   await expect(page.locator("#status")).toHaveText(PLACING_HINT);
   await expect.poll(() => findDot(page)).not.toBeNull();
   const dot = (await findDot(page))!;
-  expect(dot.x).toBeGreaterThanOrEqual(frame.left);
-  expect(dot.x).toBeLessThanOrEqual(frame.left + frame.width);
+  // MIN_NODE_SPACING in src/types.rs, scaled to the board and the screen.
+  const margin = 20 * (frame.board / 1000) * fit(frame).scale - 1;
+  expect(dot.x).toBeGreaterThanOrEqual(frame.left + margin);
+  expect(dot.x).toBeLessThanOrEqual(frame.left + frame.width - margin);
+  expect(dot.y).toBeGreaterThanOrEqual(frame.top + margin);
+  expect(dot.y).toBeLessThanOrEqual(frame.top + frame.height - margin);
+  expect(Math.hypot(dot.x - via.x, dot.y - via.y)).toBeGreaterThan(20);
   await shot(page, "placement-detour");
   await clickAway(page);
   await expect(page.locator("#status")).toHaveText("Your turn!", { timeout: 60_000 });
