@@ -240,6 +240,14 @@ button:disabled {
   border-color: #3b82f6;
 }
 
+#moveList button[data-player="human"] {
+  border-left: 3px solid #60a5fa;
+}
+
+#moveList button[data-player="ai"] {
+  border-left: 3px solid #ef4444;
+}
+
 #shareUrl {
   width: 100%;
   min-height: 44px;

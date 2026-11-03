@@ -209,6 +209,7 @@ function renderMoveList(): void {
     button.textContent = timeline.label(index);
     button.title = timeline.ids(index);
     button.dataset.move = String(index);
+    button.dataset.player = timeline.moverOf(index);
     if (index === timeline.cursor - 1) button.setAttribute("aria-current", "step");
     button.addEventListener("click", () => void jumpTo(index + 1));
     item.append(button);

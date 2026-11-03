@@ -11,6 +11,8 @@ const FLASH_WIDTH = 6;
 const FLASH_MIN_LENGTH = 24;
 const FLASH_RING_RADIUS = NODE_RADIUS + 6;
 const ID_OFFSET = NODE_RADIUS + 13;
+export const HIGHLIGHT_COLOR = "#FFFFFF";
+const HIGHLIGHT_OUTLINE = 2;
 
 export type Project = (world: Point) => Point;
 
@@ -145,18 +147,20 @@ function drawHighlight(
 ): void {
   const line = state.lines[index];
   if (!line) return;
-  const colour = PLAYER_COLORS[line.player];
   const created = state.nodes.length - state.lines.length + index;
   const nodeAt = (id: number): Point | undefined =>
     state.nodes.find((node) => node.id === id)?.position;
   ctx.save();
-  ctx.strokeStyle = colour;
-  ctx.fillStyle = colour;
   ctx.lineCap = "round";
   ctx.lineJoin = "round";
-  ctx.lineWidth = LINE_WIDTH + 2;
+  ctx.strokeStyle = HIGHLIGHT_COLOR;
+  ctx.lineWidth = LINE_WIDTH + 2 * HIGHLIGHT_OUTLINE;
   strokeSegments(ctx, line.segments, project);
+  ctx.strokeStyle = PLAYER_COLORS[line.player];
   ctx.lineWidth = LINE_WIDTH;
+  strokeSegments(ctx, line.segments, project);
+  ctx.strokeStyle = HIGHLIGHT_COLOR;
+  ctx.fillStyle = HIGHLIGHT_COLOR;
   for (const id of new Set([line.fromNode, line.toNode])) {
     const world = nodeAt(id);
     if (!world) continue;
