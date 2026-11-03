@@ -33,7 +33,7 @@ fn orbits(m: &FaceModel) -> Vec<usize> {
     orbit
 }
 
-fn check(m: &FaceModel) {
+pub(super) fn check(m: &FaceModel) {
     let v = m.nodes.len();
     let e = m.half_edges.len() / 2;
     let f = m.faces.len();
