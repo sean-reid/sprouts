@@ -395,7 +395,6 @@ export function readFlashProbe(page: Page): Promise<FlashProbe> {
   return page.evaluate(() => (window as unknown as { flashProbe: FlashProbe }).flashProbe);
 }
 
-// The 4 px turn ring starts at the canvas edge; 2 px in is its centre line.
 // Resolves after the page has painted a frame, so a pixel read sees the
 // state the status line already reports.
 export function nextFrame(page: Page): Promise<void> {
@@ -407,6 +406,7 @@ export function nextFrame(page: Page): Promise<void> {
   );
 }
 
+// The 4 px turn ring starts at the canvas edge; 2 px in is its centre line.
 export function ringPixel(frame: Frame): Client {
   return { x: frame.left + 2, y: frame.top + frame.height / 2 };
 }

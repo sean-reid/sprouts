@@ -349,6 +349,18 @@ mod tests {
         assert!(moves[0].enclosed.is_empty());
     }
 
+    /// The face model knows the move, but the AI still generates through
+    /// the raster pipeline, which cannot draw it, so it returns no move and
+    /// the page declares the game over anyway.
+    #[test]
+    fn the_ai_forfeits_the_false_game_over_until_it_generates_from_the_model() {
+        let fixture = load(&fixtures_dir().join("false-game-over-4n-1000.json")).unwrap();
+        let mut state = play(&fixture);
+        assert!(!state.face.is_game_over());
+        assert_eq!(state.current_player, Player::AI);
+        assert!(ai::select_ai_move(&mut state).is_none());
+    }
+
     #[test]
     fn exported_game_replays() {
         let Ok(path) = std::env::var("SPROUTS_FIXTURE") else {

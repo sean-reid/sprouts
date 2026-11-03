@@ -1,3 +1,5 @@
+import { readFile } from "node:fs/promises";
+
 import { expect, test, type Page } from "@playwright/test";
 import {
   armFlashProbe,
@@ -13,7 +15,6 @@ import {
   openBoard,
   pixelAt,
   PLACING_HINT,
-  playExchange,
   readFlashProbe,
   ringPixel,
   shot,
@@ -62,9 +63,17 @@ test.beforeEach(async ({ page }) => {
   await page.addInitScript(interceptWorkerMessages);
 });
 
+// The recorded first exchange: a straight chord 0 to 1 and the AI's reply
+// 2 to 0 above it, so the stroke below only ever meets the chord.
+async function openFirstExchange(page: Page): Promise<void> {
+  const record = await readFile("fixtures/saved/first-exchange.json", "utf8");
+  await page.addInitScript((saved) => localStorage.setItem("sprouts.game", saved), record);
+  await page.goto("/");
+  await expect(page.locator("#status")).toHaveText("Your turn!", { timeout: 20_000 });
+}
+
 test("a stroke across an existing line flashes the crossed segment", async ({ page }) => {
-  await openBoard(page);
-  await playExchange(page);
+  await openFirstExchange(page);
 
   // Node 3 to node 2 by way of the corner past the first chord, so the
   // stroke crosses it a third of the way along from node 0.
