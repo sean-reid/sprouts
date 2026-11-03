@@ -272,7 +272,9 @@ test("a stroke that leaves the board gets its dot on the board", async ({ page }
   const frame = await frameOf(page);
   const a = await nodeOnScreen(page, 0, 4);
   const b = await nodeOnScreen(page, 1, 4);
-  const via = { x: frame.left - 6, y: b.y + (b.y - a.y) / 2 };
+  // Out through the top edge, which has room above the canvas on every
+  // project, and far enough that the inset candidates are clear of it.
+  const via = { x: a.x + 30, y: frame.top - 40 };
   await page.mouse.move(a.x, a.y);
   await page.mouse.down();
   await page.mouse.move(via.x, via.y, { steps: 15 });
