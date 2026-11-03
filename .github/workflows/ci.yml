@@ -25,6 +25,23 @@ jobs:
       - run: cargo clippy --all-targets --all-features -- -D warnings
       - run: cargo test
 
+  bench:
+    runs-on: ubuntu-latest
+    needs: core
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --release --features bench
+      - run: cargo bench --features bench 2>&1 | tee bench-report.txt
+        shell: bash
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: bench-report
+          path: bench-report.txt
+          retention-days: 90
+
   web:
     runs-on: ubuntu-latest
     steps:
