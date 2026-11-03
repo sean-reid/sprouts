@@ -67,6 +67,12 @@ export function freshBoard(): Board {
   };
 }
 
+// The player to move at game over is the one who lost.
+export function winner(board: Board): Player | null {
+  if (!board.gameOver) return null;
+  return board.currentPlayer === "human" ? "ai" : "human";
+}
+
 // Any assignment through the returned proxy reports a change, so the renderer
 // can redraw only when something moved.
 export function watched<T extends object>(target: T, onChange: () => void): T {

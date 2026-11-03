@@ -1,4 +1,4 @@
-import type { Cubic, Flash, GameState, Player, Point } from "./state";
+import { winner, type Cubic, type Flash, type GameState, type Player, type Point } from "./state";
 import type { View } from "./view";
 
 export const PLAYER_COLORS: Record<Player, string> = { human: "#60A5FA", ai: "#EF4444" };
@@ -74,7 +74,7 @@ function drawFlash(
 
 // The ring sits just inside the canvas edge in screen pixels, whatever the zoom.
 function drawRing(ctx: CanvasRenderingContext2D, state: GameState, view: View): void {
-  ctx.strokeStyle = PLAYER_COLORS[state.currentPlayer];
+  ctx.strokeStyle = PLAYER_COLORS[winner(state) ?? state.currentPlayer];
   ctx.lineWidth = RING_WIDTH;
   if (state.thinking && !state.reducedMotion) {
     const phase = (performance.now() / PULSE_PERIOD_MS) * Math.PI * 2;

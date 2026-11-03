@@ -20,6 +20,7 @@ import { draw } from "./render";
 import {
   freshBoard,
   watched,
+  winner,
   type BoardLocation,
   type Cubic,
   type GameState,
@@ -117,9 +118,14 @@ function setStatus(message: string, kind: StatusKind = ""): void {
   statusEl.className = kind;
 }
 
+const TURN_TEXT: Record<Player, string> = { human: "Your turn", ai: "AI's turn" };
+const WON_TEXT: Record<Player, string> = { human: "You won", ai: "AI won" };
+
 function updateTurn(): void {
-  turnEl.dataset.player = state.currentPlayer;
-  turnText.textContent = state.currentPlayer === "human" ? "Your turn" : "AI's turn";
+  const won = winner(state);
+  const player = won ?? state.currentPlayer;
+  turnEl.dataset.player = player;
+  turnText.textContent = (won ? WON_TEXT : TURN_TEXT)[player];
 }
 
 function flash(at: BoardLocation, path: Point[]): void {
@@ -189,7 +195,8 @@ function closeModal(): void {
 
 function showGameOver(): void {
   stopThinking();
-  const humanWins = state.currentPlayer === "ai";
+  updateTurn();
+  const humanWins = winner(state) === "human";
   setStatus(humanWins ? "You win!" : "AI wins", humanWins ? "win" : "lose");
   winnerText.textContent = humanWins ? "YOU WIN" : "AI WINS";
   winnerText.style.color = humanWins ? "#10B981" : "#EF4444";
@@ -755,6 +762,19 @@ async function restore(record: GameRecord, fromLink: boolean): Promise<void> {
   }
 }
 
+// An idle board with no moves restarts with the choice; otherwise the
+// choice waits for the next game.
+function pickFirstPlayer(player: Player): void {
+  if (player === firstPlayer) return;
+  chooseFirstPlayer(player);
+  if (busy()) return;
+  if (timeline.moves.length === 0) {
+    void newGame(lastNodeCount);
+  } else {
+    setStatus(player === "human" ? "You start next game" : "AI starts next game");
+  }
+}
+
 function chooseFirstPlayer(player: Player): void {
   firstPlayer = player;
   for (const button of firstPlayerButtons) {
@@ -832,7 +852,7 @@ function wireInput(): void {
   }
   undoBtn.addEventListener("click", () => void undoMove());
   for (const button of firstPlayerButtons) {
-    button.addEventListener("click", () => chooseFirstPlayer(button.dataset.first as Player));
+    button.addEventListener("click", () => pickFirstPlayer(button.dataset.first as Player));
   }
   backBtn.addEventListener("click", () => void step(-1));
   forwardBtn.addEventListener("click", () => void step(1));
