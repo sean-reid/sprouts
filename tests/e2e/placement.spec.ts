@@ -13,6 +13,7 @@ import {
   frameOf,
   holdNext,
   interceptWorkerMessages,
+  mouseStroke,
   nodeAt,
   nodeOnScreen,
   nodeWorld,
@@ -260,7 +261,8 @@ test("Enter while the fit is pending still places the node", async ({ page }) =>
 
 test("a stroke the engine cannot fit returns to idle with Cancel hidden", async ({ page }) => {
   await failNext(page, "fit", "fit failed");
-  await drawBetween(page, 0, 1);
+  // The error lands right after the lock, so the placing hint is not awaited.
+  await mouseStroke(page, await nodeOnScreen(page, 0, 4), await nodeOnScreen(page, 1, 4));
   await expect(page.locator("#status")).toHaveText("Could not fit the stroke: fit failed");
   await expect(page.locator("#cancelBtn")).toBeHidden();
   expect(await findDot(page)).toBeNull();
