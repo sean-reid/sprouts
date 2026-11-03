@@ -313,7 +313,8 @@ export function failNext(page: Page, method: string, error: string): Promise<voi
 
 // Client position of the placement dot, from the centroid of its green
 // pixels, or null when none is drawn.
-export function findDot(page: Page): Promise<Client | null> {
+export async function findDot(page: Page): Promise<Client | null> {
+  await nextFrame(page);
   return page.evaluate(() => {
     const canvas = document.getElementById("canvas") as HTMLCanvasElement;
     const ctx = canvas.getContext("2d");
@@ -338,7 +339,8 @@ export function findDot(page: Page): Promise<Client | null> {
 
 export type Rgb = [number, number, number];
 
-export function pixelAt(page: Page, at: Client): Promise<Rgb> {
+export async function pixelAt(page: Page, at: Client): Promise<Rgb> {
+  await nextFrame(page);
   return page.evaluate(({ x, y }) => {
     const canvas = document.getElementById("canvas") as HTMLCanvasElement;
     const rect = canvas.getBoundingClientRect();
@@ -464,7 +466,8 @@ export async function playExchange(page: Page): Promise<void> {
 
 // Coarse map of which 10 px cells hold a stroke colour, for comparing two
 // renderings of the same board without pixel-exact matching.
-export function strokeCells(page: Page): Promise<boolean[]> {
+export async function strokeCells(page: Page): Promise<boolean[]> {
+  await nextFrame(page);
   return page.evaluate(() => {
     const canvas = document.getElementById("canvas") as HTMLCanvasElement;
     const ctx = canvas.getContext("2d")!;
@@ -489,7 +492,8 @@ export function strokeCells(page: Page): Promise<boolean[]> {
 
 // Pixels in either player's colour: nodes, strokes and the ring. A move
 // adds a line and a node, so the count rises whatever the AI draws.
-export function inkPixels(page: Page): Promise<number> {
+export async function inkPixels(page: Page): Promise<number> {
+  await nextFrame(page);
   return page.evaluate(() => {
     const canvas = document.getElementById("canvas") as HTMLCanvasElement;
     const { data } = canvas.getContext("2d")!.getImageData(0, 0, canvas.width, canvas.height);

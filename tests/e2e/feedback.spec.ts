@@ -10,7 +10,6 @@ import {
   holdNext,
   interceptWorkerMessages,
   near,
-  nextFrame,
   nodeOnScreen,
   openBoard,
   pixelAt,
@@ -49,7 +48,6 @@ async function ringWhileThinking(page: Page): Promise<Rgb[]> {
   await expectDotAt(page, mid);
   await clickAway(page);
   await expect(page.locator("#status")).toHaveText("AI is thinking");
-  await nextFrame(page);
   const at = ringPixel(await frameOf(page));
   const samples: Rgb[] = [];
   for (let i = 0; i < 3; i++) {
