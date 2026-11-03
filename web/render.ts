@@ -1,4 +1,12 @@
-import { winner, type Cubic, type Flash, type GameState, type Player, type Point } from "./state";
+import {
+  winner,
+  type Cubic,
+  type Flash,
+  type GameState,
+  type Geometry,
+  type Player,
+  type Point,
+} from "./state";
 import type { View } from "./view";
 
 export const PLAYER_COLORS: Record<Player, string> = { human: "#60A5FA", ai: "#EF4444" };
@@ -49,7 +57,7 @@ function flashedSpan(path: Point[], first: number, last: number): Point[] {
 
 function drawFlash(
   ctx: CanvasRenderingContext2D,
-  state: GameState,
+  board: Geometry,
   flash: Flash,
   project: Project,
 ): void {
@@ -64,7 +72,7 @@ function drawFlash(
     strokePolyline(ctx, flashedSpan(path, at.first, at.last));
   } else {
     const world =
-      at.kind === "node" ? state.nodes.find((node) => node.id === at.id)?.position : at.at;
+      at.kind === "node" ? board.nodes.find((node) => node.id === at.id)?.position : at.at;
     if (world) {
       const centre = project(world);
       ctx.lineWidth = LINE_WIDTH;
@@ -147,16 +155,16 @@ function strokeSegments(
 // disc facing the board centre so they stay inside the canvas edge.
 function drawHighlight(
   ctx: CanvasRenderingContext2D,
-  state: GameState,
+  board: Geometry,
   index: number,
   project: Project,
   centre: Point,
 ): void {
-  const line = state.lines[index];
+  const line = board.lines[index];
   if (!line) return;
-  const created = state.nodes.length - state.lines.length + index;
+  const created = board.nodes.length - board.lines.length + index;
   const nodeAt = (id: number): Point | undefined =>
-    state.nodes.find((node) => node.id === id)?.position;
+    board.nodes.find((node) => node.id === id)?.position;
   ctx.save();
   ctx.lineCap = "round";
   ctx.lineJoin = "round";
@@ -190,7 +198,8 @@ function drawHighlight(
 export const BOARD_BACKGROUND = "#1A1A1A";
 
 // Points are mapped to screen before stroking so widths stay constant under
-// zoom. `centre` is the board centre in world units.
+// zoom. `centre` is the board centre in world units. While a settle
+// animates, the board drawn is the one part way to the snapshot.
 export function drawBoard(
   ctx: CanvasRenderingContext2D,
   state: GameState,
@@ -198,11 +207,12 @@ export function drawBoard(
   centre: Point,
 ): void {
   const screen = (points: Point[]): Point[] => points.map(project);
+  const board: Geometry = state.settling ?? state;
 
   ctx.lineWidth = LINE_WIDTH;
   ctx.lineCap = "round";
   ctx.lineJoin = "round";
-  for (const line of state.lines) {
+  for (const line of board.lines) {
     ctx.strokeStyle = PLAYER_COLORS[line.player];
     strokeSegments(ctx, line.segments, project);
   }
@@ -233,7 +243,7 @@ export function drawBoard(
   ctx.font = "bold 10px sans-serif";
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
-  for (const node of state.nodes) {
+  for (const node of board.nodes) {
     const remaining = 3 - node.connectionCount;
     const at = project(node.position);
     ctx.fillStyle = state.activeNodes.has(node.id) ? "#3B82F6" : "#555";
@@ -255,7 +265,7 @@ export function drawBoard(
   }
 
   if (state.highlightedMove !== null) {
-    drawHighlight(ctx, state, state.highlightedMove, project, centre);
+    drawHighlight(ctx, board, state.highlightedMove, project, centre);
   }
 
   if (state.mode === "animating_ai" && state.animatingLine) {
@@ -264,7 +274,7 @@ export function drawBoard(
     strokeSegments(ctx, state.animatingLine.segments, project, state.animationProgress);
   }
 
-  if (state.flash) drawFlash(ctx, state, state.flash, project);
+  if (state.flash) drawFlash(ctx, board, state.flash, project);
 }
 
 // Draws in CSS pixels on a backing store kept at device pixels.

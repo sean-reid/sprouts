@@ -79,9 +79,32 @@ export function nodeAt(frame: Frame, t: Transform, index: number, count = 4): Cl
   return toClient(frame, t, nodeWorld(index, count, frame.board));
 }
 
+// A node moves at most one node spacing per settle (MAX_SHIFT in
+// src/settle.rs) and an exchange settles twice: that in CSS px at the
+// widest layout, plus a pixel.
+export const SETTLE_SHIFT_PX = 2 * 20 * 0.74 + 1;
+
+interface BoardNode {
+  id: number;
+  x: number;
+  y: number;
+}
+
+// Nodes of the last board the engine reported, by id, in world units, as
+// the worker intercept recorded them.
+export async function boardNodes(page: Page): Promise<Map<number, Client>> {
+  const nodes = await page.evaluate(
+    () => (window as unknown as { latestNodes?: BoardNode[] }).latestNodes ?? [],
+  );
+  return new Map(nodes.map((node) => [node.id, { x: node.x, y: node.y }]));
+}
+
+// Where a starting node is drawn: where the engine's last board puts it,
+// else its layout spot, at the fitted view.
 export async function nodeOnScreen(page: Page, index: number, count: number): Promise<Client> {
   const frame = await frameOf(page);
-  return nodeAt(frame, fit(frame), index, count);
+  const settled = (await boardNodes(page)).get(index);
+  return toClient(frame, fit(frame), settled ?? nodeWorld(index, count, frame.board));
 }
 
 // Counts node-disc samples, active blue or spent grey, on a ring 5 px out
@@ -116,6 +139,17 @@ export async function expectNodeDrawnAt(page: Page, at: Client): Promise<void> {
   await expect.poll(() => nodeSamplesAround(page, at)).toBeGreaterThanOrEqual(6);
 }
 
+// The node `id` sits within the settle bound of where the move put it and
+// is drawn there.
+export async function expectNodeDrawnNear(page: Page, at: Client, id: number): Promise<void> {
+  const settled = (await boardNodes(page)).get(id);
+  expect(settled).toBeDefined();
+  const frame = await frameOf(page);
+  const on = toClient(frame, fit(frame), settled!);
+  expect(Math.hypot(on.x - at.x, on.y - at.y)).toBeLessThanOrEqual(SETTLE_SHIFT_PX);
+  await expectNodeDrawnAt(page, on);
+}
+
 export const PLACING_HINT = /Drag the dot/;
 
 // Sets the starting node count and starts a game with it. The value goes
@@ -135,11 +169,17 @@ export async function recordedNodeOnScreen(
   index: number,
 ): Promise<Client> {
   const frame = await frameOf(page);
-  const [x, y] = record.nodes![index]!;
-  const scale = Math.min(frame.width, frame.height) / record.boardSize;
+  const settled = (await boardNodes(page)).get(index);
+  const [x, y] = settled ? [settled.x, settled.y] : record.nodes![index]!;
+  return recordPointOnScreen(frame, record.boardSize, x, y);
+}
+
+// A world point of a record at the fitted view of its board.
+function recordPointOnScreen(frame: Frame, boardSize: number, x: number, y: number): Client {
+  const scale = Math.min(frame.width, frame.height) / boardSize;
   return {
-    x: frame.left + (frame.width - record.boardSize * scale) / 2 + x * scale,
-    y: frame.top + (frame.height - record.boardSize * scale) / 2 + y * scale,
+    x: frame.left + (frame.width - boardSize * scale) / 2 + x * scale,
+    y: frame.top + (frame.height - boardSize * scale) / 2 + y * scale,
   };
 }
 
@@ -295,12 +335,38 @@ export async function plainWheel(page: Page, deltaY: number): Promise<number> {
 // worker back, so the worker answers a newer request first, or fail one
 // with an error reply the worker never saw.
 export function interceptWorkerMessages(): void {
+  const hooks = window as unknown as {
+    holdNext: typeof holdNext;
+    failNext: typeof failNext;
+    latestNodes?: BoardNode[];
+    intercepted?: boolean;
+  };
+  if (hooks.intercepted) return;
+  hooks.intercepted = true;
   const post = Worker.prototype.postMessage;
   let hold: { method: string; ms: number } | null = null;
   let fail: { method: string; error: string } | null = null;
-  const hooks = window as unknown as { holdNext: typeof holdNext; failNext: typeof failNext };
   hooks.holdNext = holdNext;
   hooks.failNext = failNext;
+  // Every reply that carries a board leaves its nodes on the window, so a
+  // test reads node positions from the engine rather than the layout.
+  interface Reported {
+    nodes?: { id: number; position: { x: number; y: number } }[];
+    snapshot?: Reported;
+  }
+  const RealWorker = Worker;
+  window.Worker = class extends RealWorker {
+    constructor(...args: ConstructorParameters<typeof Worker>) {
+      super(...args);
+      this.addEventListener("message", (event: MessageEvent<{ result?: Reported }>) => {
+        const result = event.data?.result;
+        const nodes = result?.nodes ?? result?.snapshot?.nodes;
+        if (nodes) {
+          hooks.latestNodes = nodes.map((n) => ({ id: n.id, x: n.position.x, y: n.position.y }));
+        }
+      });
+    }
+  };
   function holdNext(method: string, ms: number): void {
     hold = { method, ms };
   }
@@ -522,6 +588,7 @@ export async function shot(page: Page, name: string): Promise<Buffer> {
 }
 
 export async function openBoard(page: Page, path = "/"): Promise<void> {
+  await page.addInitScript(interceptWorkerMessages);
   await page.goto(path);
   // Fetching and compiling the wasm takes a few seconds on a shared runner.
   await expect(page.locator("#status")).toHaveText("Draw a line between two nodes", {
@@ -652,16 +719,16 @@ export interface NodeRecord {
   moves: { from: number; to: number; newNode: [number, number] }[];
 }
 
-// Every node of a record on screen at the fitted view, by id: the starting
-// ones from the layout, then one per move where it put its node.
+// Every node of a record on screen, by id: where the engine's last board
+// puts it, else the starting layout and then each move's node.
 export async function recordNodesOnScreen(page: Page, record: NodeRecord): Promise<Client[]> {
   const frame = await frameOf(page);
-  const scale = Math.min(frame.width, frame.height) / record.boardSize;
+  const settled = await boardNodes(page);
   const world = [...(record.nodes ?? []), ...record.moves.map((m) => m.newNode)];
-  return world.map(([x, y]) => ({
-    x: frame.left + (frame.width - record.boardSize * scale) / 2 + x * scale,
-    y: frame.top + (frame.height - record.boardSize * scale) / 2 + y * scale,
-  }));
+  return world.map(([x, y], id) => {
+    const at = settled.get(id);
+    return recordPointOnScreen(frame, record.boardSize, at?.x ?? x, at?.y ?? y);
+  });
 }
 
 export function savedRecord(page: Page): Promise<NodeRecord> {

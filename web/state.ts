@@ -20,6 +20,11 @@ export interface Flash {
   path: Point[];
 }
 
+export interface Geometry {
+  nodes: Node[];
+  lines: Line[];
+}
+
 export interface Board {
   mode: Mode;
   nodes: Node[];
@@ -46,6 +51,9 @@ export interface Board {
   pickedNode: number | null;
   // The locked curve came from the router, not a stroke.
   routed: boolean;
+  // The board part way from the last snapshot to this one while the settle
+  // animates; nodes and lines hold where the engine put them.
+  settling: Geometry | null;
 }
 
 export interface GameState extends Board {
@@ -75,6 +83,7 @@ export function freshBoard(): Board {
     focusedNode: null,
     pickedNode: null,
     routed: false,
+    settling: null,
   };
 }
 

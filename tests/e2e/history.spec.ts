@@ -18,6 +18,7 @@ import {
   expectSameStrokes,
   frameOf,
   HASH_PREFIX,
+  interceptWorkerMessages,
   nodeOnScreen,
   openBoard,
   PLACING_HINT,
@@ -280,6 +281,7 @@ test("a version 1 link of the saved game reopens the live game", async ({ page }
 });
 
 test("a version 2 link opens on the circle with both moves replayed", async ({ page }) => {
+  await page.addInitScript(interceptWorkerMessages);
   await page.goto("/" + VERSION_2_LINK);
   await expect(page.locator("#status")).toHaveText(/^Reviewing: move 2 of 2/, {
     timeout: 20_000,

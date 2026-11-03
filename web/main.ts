@@ -40,6 +40,8 @@ import {
   type BoardLocation,
   type Cubic,
   type GameState,
+  type Geometry,
+  type Line,
   type Node,
   type PlacementDot,
   type Point,
@@ -53,6 +55,8 @@ function minStrokeLength(boardSize: number): number {
   return 20 * (boardSize / 1000);
 }
 const AI_ANIMATION_MS = 500;
+// The board eases from the last snapshot to the settled one in this long.
+const SETTLE_MS = 300;
 const FLASH_MS = 600;
 // How long the board points out the move a seek landed on.
 const HIGHLIGHT_MS = 2000;
@@ -133,6 +137,8 @@ let gameEpoch = 0;
 let submitting = false;
 let seeking = false;
 let booted = false;
+// Bumped per settle animation so a frame from an older one stops.
+let settleRun = 0;
 // Settles once the locked stroke's dot is shown or the stroke is abandoned.
 let suggestion: Promise<void> = Promise.resolve();
 // Settles once the last drag of the dot has been answered.
@@ -590,8 +596,10 @@ function canPlay(): boolean {
 // A board that changes under a stroke or a candidate takes it down with it.
 function applySnapshot(snapshot: Snapshot): void {
   timeline.adopt(snapshot.lines);
+  const before: Geometry = { nodes: state.nodes, lines: state.lines };
   state.nodes = snapshot.nodes;
   state.lines = snapshot.lines;
+  animateSettle(before);
   state.currentPlayer = snapshot.currentPlayer;
   state.activeNodes = new Set(snapshot.activeNodes);
   state.gameOver = snapshot.gameOver;
@@ -600,6 +608,83 @@ function applySnapshot(snapshot: Snapshot): void {
   targets.sync();
   updateTurn();
   updateControls();
+}
+
+function lerp(a: Point, b: Point, t: number): Point {
+  return { x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t };
+}
+
+function samePoint(a: Point, b: Point): boolean {
+  return a.x === b.x && a.y === b.y;
+}
+
+function sameCubic(a: Cubic, b: Cubic): boolean {
+  return samePoint(a.p1, b.p1) && samePoint(a.p2, b.p2) && samePoint(a.p3, b.p3);
+}
+
+// Eases the nodes and lines the last snapshot already had from where they
+// were to where the settle put them; new ones appear in place. Nothing
+// animates when nothing moved or motion is reduced.
+function animateSettle(before: Geometry): void {
+  const nodes = new Map(before.nodes.map((node) => [node.id, node]));
+  const lines = new Map(
+    before.lines
+      .filter((line) => state.lines.some((now) => now.id === line.id))
+      .map((line) => [line.id, line]),
+  );
+  const moved =
+    state.nodes.some((node) => {
+      const was = nodes.get(node.id);
+      return was !== undefined && !samePoint(was.position, node.position);
+    }) ||
+    state.lines.some((line) => {
+      const was = lines.get(line.id);
+      return (
+        was !== undefined &&
+        was.segments.length === line.segments.length &&
+        was.segments.some((c, i) => !sameCubic(c, line.segments[i]!))
+      );
+    });
+  settleRun++;
+  if (!moved || state.reducedMotion) {
+    state.settling = null;
+    return;
+  }
+  const run = settleRun;
+  const epoch = gameEpoch;
+  const target = state.nodes;
+  const started = performance.now();
+  const frame = (now: number): void => {
+    if (run !== settleRun || epoch !== gameEpoch || state.nodes !== target) return;
+    const t = Math.min(1, (now - started) / SETTLE_MS);
+    const eased = 1 - (1 - t) * (1 - t);
+    state.settling = {
+      nodes: state.nodes.map((node) => {
+        const was = nodes.get(node.id);
+        return was ? { ...node, position: lerp(was.position, node.position, eased) } : node;
+      }),
+      lines: state.lines.map((line): Line => {
+        const was = lines.get(line.id);
+        if (!was || was.segments.length !== line.segments.length) return line;
+        return {
+          ...line,
+          newNodePos: lerp(was.newNodePos, line.newNodePos, eased),
+          segments: line.segments.map((c, i) => {
+            const from = was.segments[i]!;
+            return {
+              p0: lerp(from.p0, c.p0, eased),
+              p1: lerp(from.p1, c.p1, eased),
+              p2: lerp(from.p2, c.p2, eased),
+              p3: lerp(from.p3, c.p3, eased),
+            };
+          }),
+        };
+      }),
+    };
+    if (t < 1) requestAnimationFrame(frame);
+    else state.settling = null;
+  };
+  requestAnimationFrame(frame);
 }
 
 async function refreshBoard(): Promise<void> {
@@ -1187,6 +1272,6 @@ trackCanvasSize(canvas, view, () => {
   invalidate();
 });
 wireInput();
-wireRecording(state, () => timeline.boardSize);
+wireRecording(() => timeline.record());
 requestAnimationFrame(frame);
 void boot();
