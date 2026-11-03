@@ -258,26 +258,19 @@ pub fn ai_move(state: &mut GameState) -> AiReply {
 }
 
 /// Every legal move with `node` at one end. The search lists one move per
-/// class of interchangeable bare nodes, so a listed move from another bare
-/// node of the same face is relabelled onto `node`; a chord between two
-/// different boundary pieces is listed with its lower node first.
+/// class of interchangeable bare nodes, so each listed move is expanded
+/// into the members of its class that touch `node`; a chord between two
+/// different boundary pieces is listed with its lower node first and
+/// `enclosed` is sorted.
 pub fn moves_from(state: &GameState, node: usize) -> MovesFrom {
     let face = &state.face;
     let mut moves: Vec<ModelMove> = Vec::new();
     if node < face.node_count() {
-        let bare = |v: usize| face.degree(v) == 0;
-        let home = |v: usize| face.corner_face(v, None).ok();
+        let touches = |mv: &ModelMove| mv.a == node || mv.b == node;
         for listed in face.search_moves() {
-            let mut variants = vec![listed.clone()];
-            if bare(node) {
-                for end in [listed.a, listed.b] {
-                    if end != node && bare(end) && home(end) == home(node) {
-                        variants.push(relabel(&listed, end, node));
-                    }
-                }
-            }
-            for mut mv in variants {
-                if mv.a != node && mv.b != node {
+            let members = ai::class_members_where(state, &listed, usize::MAX, touches);
+            for mut mv in std::iter::once(listed).chain(members) {
+                if !touches(&mv) {
                     continue;
                 }
                 let split = face.component_of(mv.a, mv.at_a) == face.component_of(mv.b, mv.at_b);
@@ -285,6 +278,7 @@ pub fn moves_from(state: &GameState, node: usize) -> MovesFrom {
                     std::mem::swap(&mut mv.a, &mut mv.b);
                     std::mem::swap(&mut mv.at_a, &mut mv.at_b);
                 }
+                mv.enclosed.sort_unstable();
                 if face.check(&mv).is_ok() && !moves.contains(&mv) {
                     moves.push(mv);
                 }
@@ -294,28 +288,6 @@ pub fn moves_from(state: &GameState, node: usize) -> MovesFrom {
     MovesFrom {
         node,
         moves: moves.into_iter().map(FaceMove::from).collect(),
-    }
-}
-
-/// `mv` with the bare nodes `from` and `to` swapped.
-fn relabel(mv: &ModelMove, from: usize, to: usize) -> ModelMove {
-    let swap = |v: usize| {
-        if v == from {
-            to
-        } else if v == to {
-            from
-        } else {
-            v
-        }
-    };
-    let mut enclosed: Vec<usize> = mv.enclosed.iter().map(|&v| swap(v)).collect();
-    enclosed.sort_unstable();
-    ModelMove {
-        a: swap(mv.a),
-        at_a: mv.at_a,
-        b: swap(mv.b),
-        at_b: mv.at_b,
-        enclosed,
     }
 }
 
@@ -1005,10 +977,13 @@ mod tests {
     }
 
     /// Four bare nodes: the search lists a loop at 0 round nothing, a loop
-    /// at 0 round node 1, and the chord 0 to 1. Node 0 gets exactly those;
-    /// node 2 gets them relabelled, so both chords 2 can make are there.
+    /// at 0 round node 1, and the chord 0 to 1. Node 0 gets every member
+    /// of those classes it touches: the bare loop, a loop round each other
+    /// node, and a chord to each other node. A bare loop's two sides are
+    /// one position, so node 2 holds the lowest other node outside and
+    /// lists loops round 1 and 3 only.
     #[test]
-    fn moves_from_lists_the_search_moves_at_the_node_and_relabels_them_for_its_peers() {
+    fn moves_from_lists_every_member_of_the_search_classes_at_the_node() {
         let state = GameState::new(4);
         let listed: Vec<FaceMove> = state
             .face
@@ -1024,14 +999,27 @@ mod tests {
                 face_move(0, 1, vec![]),
             ]
         );
-        assert_eq!(moves_from(&state, 0).moves, listed);
+        assert_eq!(
+            moves_from(&state, 0).moves,
+            vec![
+                face_move(0, 0, vec![]),
+                face_move(0, 0, vec![1]),
+                face_move(0, 0, vec![2]),
+                face_move(0, 0, vec![3]),
+                face_move(0, 1, vec![]),
+                face_move(0, 2, vec![]),
+                face_move(0, 3, vec![]),
+            ]
+        );
         assert_eq!(
             moves_from(&state, 2).moves,
             vec![
                 face_move(2, 2, vec![]),
                 face_move(2, 2, vec![1]),
-                face_move(1, 2, vec![]),
+                face_move(2, 2, vec![3]),
                 face_move(0, 2, vec![]),
+                face_move(1, 2, vec![]),
+                face_move(2, 3, vec![]),
             ]
         );
         for node in 0..4 {
