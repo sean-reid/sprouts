@@ -7,6 +7,7 @@ import {
   dropHash,
   History,
   loadSaved,
+  pendingFace,
   recordFromHash,
   sameGame,
   save,
@@ -546,15 +547,15 @@ async function executeMove(): Promise<void> {
     return;
   }
 
-  recordMove(move, outcome.snapshot);
+  recordMove(move, outcome);
   clearStroke();
   if (state.gameOver) showGameOver();
   else startAITurn();
 }
 
-function recordMove(move: Move, snapshot: Snapshot): void {
-  timeline.push(move);
-  applySnapshot(snapshot);
+function recordMove(move: Move, outcome: Extract<Outcome, { kind: "applied" }>): void {
+  timeline.push(move, outcome.topology);
+  applySnapshot(outcome.snapshot);
   persist();
 }
 
@@ -640,7 +641,7 @@ async function finishAIMove(move: Move, epoch: number): Promise<void> {
   } else if (outcome.kind === "rejected") {
     setStatus("AI error: " + outcome.rejection.message, "lose");
   } else {
-    recordMove(move, outcome.snapshot);
+    recordMove(move, outcome);
     if (state.gameOver) showGameOver();
     else setStatus("Your turn!");
   }
@@ -648,8 +649,9 @@ async function finishAIMove(move: Move, epoch: number): Promise<void> {
 }
 
 // Moves the engine to the board after move number target by undoing or
-// re-applying stored moves. A stored move the engine now rejects ends the
-// list; the result says whether the target was reached in this game.
+// re-applying stored moves; a move that arrived as topology is drawn by
+// the engine. A stored move the engine now rejects ends the list; the
+// result says whether the target was reached in this game.
 async function seek(target: number): Promise<boolean> {
   const epoch = gameEpoch;
   const from = timeline.cursor;
@@ -670,7 +672,10 @@ async function seek(target: number): Promise<boolean> {
       if (!move) break;
       let outcome: Outcome;
       try {
-        outcome = await engine.call("applyMove", toMove(move));
+        const face = pendingFace(move);
+        outcome = face
+          ? await engine.call("applyFaceMove", face)
+          : await engine.call("applyMove", toMove(move));
       } catch (error) {
         if (epoch === gameEpoch) setStatus("Replay failed: " + describe(error), "lose");
         return false;
@@ -682,6 +687,7 @@ async function seek(target: number): Promise<boolean> {
         setStatus(`Replay stopped at move ${timeline.cursor + 1}: ${message}`, "lose");
         return false;
       }
+      timeline.applied(timeline.cursor, outcome);
       timeline.cursor++;
     }
     return true;

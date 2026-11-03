@@ -5,7 +5,7 @@ import {
   type BrowserContextOptions,
   type Page,
 } from "@playwright/test";
-import { decodeRecord } from "../../web/history";
+import { decodeRecord, hasStroke } from "../../web/history";
 import type { Fixture } from "../../web/record";
 
 // Every step here replays moves through the engine, which on the 1000
@@ -273,10 +273,10 @@ test("a version 1 link of the saved game reopens the live game", async ({ page }
   if (!linked) throw new Error("the version 1 link does not decode");
   const saved = {
     ...linked,
-    moves: linked.moves.map((m) => ({
-      ...m,
-      newNode: [m.newNode[0] + 0.24, m.newNode[1] - 0.24],
-    })),
+    moves: linked.moves.map((m) => {
+      if (!hasStroke(m)) throw new Error("a version 1 link carries strokes");
+      return { ...m, newNode: [m.newNode[0] + 0.24, m.newNode[1] - 0.24] };
+    }),
   };
   await page.addInitScript((s) => localStorage.setItem("sprouts.game", s), JSON.stringify(saved));
   await page.goto("/" + VERSION_1_LINK);

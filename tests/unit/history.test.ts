@@ -1,17 +1,20 @@
 import { readdirSync, readFileSync } from "node:fs";
 import { basename, join } from "node:path";
 import { describe, expect, it } from "vitest";
-import type { Cubic, Point } from "../../pkg/sprouts";
+import type { Cubic, FaceMove, Line, Point } from "../../pkg/sprouts";
 import {
   decodeRecord,
   encodeRecord,
+  hasStroke,
   History,
   LINK_QUANTUM,
   loadSaved,
+  pendingFace,
   sameGame,
   STROKE_TOLERANCE,
   type GameRecord,
   type RecordedMove,
+  type RecordMove,
 } from "../../web/history";
 import { circleLayout, openingLayout } from "../../web/layout";
 import type { Fixture, FixtureMove } from "../../web/record";
@@ -21,11 +24,20 @@ import type { Fixture, FixtureMove } from "../../web/record";
 const SHAPE_OFFSET = 12;
 const SHAPE_STROKE = 0;
 const SHAPE_CUBICS = 1;
+const SHAPE_FACE = 2;
+const LINK_VERSION = 4;
 const VERSION_1_PAYLOAD =
   "AQAEAPQBAgACAAAAAQACABwMxAmvCbAJ8ArwCgIAAAAFAGwHxAn4A88BpgpR3gIe5AGEAvsKMwk";
 // The first exchange of fixtures/saved/first-exchange.json as a version 2
 // link, which carried no layout.
 const VERSION_2_PAYLOAD = "AgAEAOgDAgACAAABAALYCegH7wHwAXh3AgAAA_gF6AeaAyVGJkUl";
+// The same exchange as a version 3 link, with its layout.
+const VERSION_3_PAYLOAD =
+  "AwIEAOgDAgACANgJ6AfvAfAB7wHvAfAB7wEAAQAC2AnoB-8B8AF4dwIAAAP4BegHmgMlRiZFJQ";
+// A version 4 link of two moves: a stroke from 0 to 1, then a loop on 2
+// carried as its face move, leaving spoke 3 and enclosing nodes 0 and 4.
+const VERSION_4_PAYLOAD = "BAAEAOgDAgACAAABAALYBOgHoAYAjwMAAgICBAQCAAQ";
+const LOOP_FACE: FaceMove = { a: 2, atA: 3, b: 2, atB: 3, enclosed: [0, 4] };
 
 function bytesOf(payload: string): Uint8Array {
   return new Uint8Array(Buffer.from(payload, "base64url"));
@@ -63,10 +75,20 @@ function arcCubics(): Cubic[] {
   ];
 }
 
-function only(record: GameRecord | null) {
-  const move = record?.moves[0];
+function stroke(move: RecordMove | undefined): FixtureMove {
   if (!move) throw new Error("no move decoded");
+  if (!hasStroke(move)) throw new Error("the move decoded as topology");
   return move;
+}
+
+function only(record: GameRecord | null) {
+  return stroke(record?.moves[0]);
+}
+
+function faceOf(move: RecordMove | undefined): FaceMove {
+  if (!move) throw new Error("no move decoded");
+  if (hasStroke(move)) throw new Error("the move decoded with a stroke");
+  return move.face;
 }
 
 describe("the share link codec", () => {
@@ -180,7 +202,7 @@ describe("the share link codec", () => {
     ]);
   });
 
-  it("rejects the reserved shape, trailing bytes and a truncated link", () => {
+  it("rejects an unknown shape, trailing bytes and a truncated link", () => {
     const move: RecordedMove = {
       fromNode: 0,
       toNode: 1,
@@ -189,12 +211,84 @@ describe("the share link codec", () => {
     };
     const bytes = bytesOf(encodeRecord(game(move)));
     expect(decodeRecord(payloadOf(bytes))).not.toBeNull();
-    const reserved = bytes.slice();
-    reserved[SHAPE_OFFSET] = 2;
-    expect(decodeRecord(payloadOf(reserved))).toBeNull();
+    const unknown = bytes.slice();
+    unknown[SHAPE_OFFSET] = 3;
+    expect(decodeRecord(payloadOf(unknown))).toBeNull();
     expect(decodeRecord(payloadOf(new Uint8Array([...bytes, 0])))).toBeNull();
     expect(decodeRecord(payloadOf(bytes.slice(0, -1)))).toBeNull();
     expect(decodeRecord("not base64url!")).toBeNull();
+  });
+
+  it("sends a move the router redraws as its face move alone", () => {
+    const move: RecordedMove = {
+      fromNode: 0,
+      toNode: 1,
+      polyline: handDrawn(),
+      newNodePos: at(500, 340),
+      segments: arcCubics(),
+      topology: { a: 0, atA: undefined, b: 1, atB: undefined, enclosed: [] },
+    };
+    const payload = encodeRecord(game(move));
+    expect(bytesOf(payload)[SHAPE_OFFSET]).toBe(SHAPE_FACE);
+    expect(payload.length).toBeLessThanOrEqual(24);
+    expect(faceOf(decodeRecord(payload)?.moves[0])).toEqual(move.topology);
+  });
+
+  it("keeps the stroke when the topology names other endpoints", () => {
+    const move: RecordedMove = {
+      fromNode: 0,
+      toNode: 1,
+      polyline: [at(100, 100), at(400, 400)],
+      newNodePos: at(250, 250),
+      topology: { a: 1, atA: undefined, b: 0, atB: undefined, enclosed: [] },
+    };
+    const payload = encodeRecord(game(move));
+    expect(bytesOf(payload)[SHAPE_OFFSET]).toBe(SHAPE_STROKE);
+    expect(only(decodeRecord(payload)).newNode).toEqual([250, 250]);
+  });
+
+  it("decodes a version 4 link with a face move and rejects it in version 3", () => {
+    const record = decodeRecord(VERSION_4_PAYLOAD);
+    expect(record?.moves).toHaveLength(2);
+    expect(only(record).polyline).toEqual([
+      [300, 500],
+      [700, 500],
+    ]);
+    expect(faceOf(record?.moves[1])).toEqual(LOOP_FACE);
+    const bytes = bytesOf(VERSION_4_PAYLOAD);
+    expect(bytes[0]).toBe(LINK_VERSION);
+    const older = bytes.slice();
+    older[0] = 3;
+    expect(decodeRecord(payloadOf(older))).toBeNull();
+  });
+
+  it("refuses a face move that names what does not exist yet", () => {
+    const bytes = bytesOf(VERSION_4_PAYLOAD);
+    // The second move's eight bytes: from, to, shape, two spokes one above
+    // their half-edge ids, the count and two ids. One move before it made
+    // four half-edges and one node.
+    const second = bytes.length - 8;
+    expect(bytes[second + 2]).toBe(SHAPE_FACE);
+    expect(bytes[second + 3]).toBe(4);
+    const lateSpoke = bytes.slice();
+    lateSpoke[second + 3] = 6;
+    expect(decodeRecord(payloadOf(lateSpoke))).toBeNull();
+    const lateNode = bytes.slice();
+    lateNode[second + 7] = 5;
+    expect(decodeRecord(payloadOf(lateNode))).toBeNull();
+    const twice = bytes.slice();
+    twice[second + 7] = 0;
+    expect(decodeRecord(payloadOf(twice))).toBeNull();
+  });
+
+  it("decodes a version 3 link", () => {
+    const record = decodeRecord(VERSION_3_PAYLOAD);
+    expect(record?.nodes).toHaveLength(4);
+    expect(record?.moves.map((m) => [m.from, m.to])).toEqual([
+      [0, 1],
+      [2, 0],
+    ]);
+    expect(record?.moves.every(hasStroke)).toBe(true);
   });
 
   it("decodes a version 1 link", () => {
@@ -222,7 +316,7 @@ describe("sameGame", () => {
   function nudged(dx: number, dy: number): GameRecord {
     return {
       ...linked,
-      moves: linked.moves.map((m) => ({
+      moves: linked.moves.map(stroke).map((m) => ({
         ...m,
         newNode: [m.newNode[0] + dx, m.newNode[1] + dy] as [number, number],
       })),
@@ -240,6 +334,63 @@ describe("sameGame", () => {
     expect(sameGame(nudged(0.6, 0), linked)).toBe(false);
     const other = { ...linked, moves: linked.moves.map((m) => ({ ...m, to: m.to + 1 })) };
     expect(sameGame(other, linked)).toBe(false);
+  });
+
+  it("matches a move carried as topology by its endpoints", () => {
+    const topology: GameRecord = {
+      ...linked,
+      moves: linked.moves.map((m) => ({
+        from: m.from,
+        to: m.to,
+        face: { a: m.from, atA: undefined, b: m.to, atB: undefined, enclosed: [] },
+      })),
+    };
+    expect(sameGame(linked, topology)).toBe(true);
+    const other = { ...topology, moves: topology.moves.map((m) => ({ ...m, to: m.to + 1 })) };
+    expect(sameGame(linked, other)).toBe(false);
+  });
+});
+
+describe("a move that arrives as topology", () => {
+  const record = decodeRecord(VERSION_4_PAYLOAD);
+  if (!record) throw new Error("the version 4 link does not decode");
+
+  it("is pending until the engine reports the line it drew", () => {
+    const history = History.from(record);
+    const loop = history.moves[1];
+    if (!loop) throw new Error("no second move");
+    expect(pendingFace(history.moves[0]!)).toBeUndefined();
+    expect(pendingFace(loop)).toEqual(LOOP_FACE);
+    expect(history.positionOf(5)).toBeNull();
+    expect(history.record().moves[1]).toEqual({ from: 2, to: 2, face: LOOP_FACE });
+    expect(encodeRecord(history)).toBe(VERSION_4_PAYLOAD);
+
+    const line: Line = {
+      id: 1,
+      fromNode: 2,
+      toNode: 2,
+      polyline: [at(500, 500), at(560, 440), at(620, 500), at(500, 500)],
+      segments: [],
+      newNodePos: at(620, 500),
+      player: "ai",
+    };
+    history.settle(1, LOOP_FACE, line);
+    expect(pendingFace(loop)).toBeUndefined();
+    expect(history.positionOf(5)).toEqual(at(620, 500));
+    const saved = stroke(history.record().moves[1]);
+    expect(saved.polyline).toHaveLength(4);
+    expect(saved.newNode).toEqual([620, 500]);
+    expect(encodeRecord(history)).toBe(VERSION_4_PAYLOAD);
+  });
+
+  it("takes the topology the engine reports for a drawn move", () => {
+    const history = new History(4, 1000);
+    history.push(
+      { fromNode: 0, toNode: 1, polyline: [at(300, 500), at(700, 500)], newNodePos: at(500, 500) },
+      { a: 0, atA: undefined, b: 1, atB: undefined, enclosed: [] },
+    );
+    expect(bytesOf(encodeRecord(history))[SHAPE_OFFSET]).toBe(SHAPE_FACE);
+    expect(stroke(history.record().moves[0]).polyline).toHaveLength(2);
   });
 });
 
@@ -294,8 +445,7 @@ describe("every recorded game through the link", () => {
         Math.round(p[1] / quantum) * quantum,
       ];
       fixture.moves.forEach((move: FixtureMove, i) => {
-        const got = decoded?.moves[i];
-        if (!got) throw new Error(`move ${i + 1} missing`);
+        const got = stroke(decoded?.moves[i]);
         expect(got.from).toBe(move.from);
         expect(got.to).toBe(move.to);
         expect(got.newNode).toEqual(rounded(move.newNode));
@@ -331,7 +481,7 @@ describe("starting positions in a link", () => {
     const plain = encodeRecord(withNodes(null));
     const laidOut = encodeRecord(withNodes(openingLayout(4, 1000)));
     expect(laidOut).toBe(plain);
-    expect(bytesOf(plain)[0]).toBe(3);
+    expect(bytesOf(plain)[0]).toBe(LINK_VERSION);
     expect(bytesOf(plain)[1]! & 2).toBe(0);
     expect(decodeRecord(plain)?.nodes).toEqual(openingLayout(4, 1000));
   });
