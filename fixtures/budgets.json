@@ -2,7 +2,7 @@
   "skeleton": 6700,
   "classification": 40,
   "generation": 8100,
-  "search": 29200,
+  "search": 600,
   "validation": 1,
-  "game_over": 2200
+  "game_over": 1
 }

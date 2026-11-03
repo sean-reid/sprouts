@@ -45,7 +45,7 @@ fn print_table(name: &str, fixture: &Fixture, timings: &[MoveTiming]) -> [f64; 6
         fixture.board_size,
         fixture.moves.len()
     );
-    print!("{:>4} {:>6}", "move", "player");
+    print!("{:>4} {:>6} {:>5}", "move", "player", "over");
     for phase in PHASES {
         print!(" {phase:>14}");
     }
@@ -57,14 +57,14 @@ fn print_table(name: &str, fixture: &Fixture, timings: &[MoveTiming]) -> [f64; 6
             (false, replay::Player::Human) => "human",
             (false, replay::Player::AI) => "ai",
         };
-        print!("{:>4} {:>6}", t.index, player);
+        print!("{:>4} {:>6} {:>5}", t.index, player, t.game_over);
         for d in t.phases.as_array() {
             print!(" {:>14.2}", ms(d));
         }
         println!(" {:>10.2}", ms(t.phases.total()));
     }
     let max = replay::max_per_phase(timings);
-    print!("{:>4} {:>6}", "max", "");
+    print!("{:>4} {:>6} {:>5}", "max", "", "");
     for v in max {
         print!(" {v:>14.2}");
     }

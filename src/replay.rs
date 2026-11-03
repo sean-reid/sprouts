@@ -2,7 +2,7 @@
 
 use crate::ai;
 use crate::components::label_components;
-use crate::game_over::is_game_over;
+use crate::face::Move as FaceMove;
 use crate::morphology::generate_skeleton;
 use crate::node_classifier::classify_nodes;
 use crate::protocol;
@@ -102,6 +102,8 @@ pub struct MoveTiming {
     pub player: Player,
     /// The position after the last move, where no move is validated.
     pub terminal: bool,
+    /// What the face model says of the position.
+    pub game_over: bool,
     pub phases: Phases,
 }
 
@@ -188,17 +190,20 @@ pub fn replay(fixture: &Fixture) -> Replay {
         phases.classification = t.elapsed();
 
         let t = Instant::now();
-        let moves = ai::generate_concrete_moves_from_classification(&mut state, &classification);
+        let generated =
+            ai::generate_concrete_moves_from_classification(&mut state, &classification);
+        let candidates = ai::embedded_moves(&state, generated);
         phases.generation = t.elapsed();
 
         let t = Instant::now();
-        if moves.len() > 1 {
-            black_box(ai::search_best_index(&state, &classification, &moves));
+        if candidates.len() > 1 {
+            let topologies: Vec<FaceMove> = candidates.iter().map(|(_, t)| t.clone()).collect();
+            black_box(ai::search_best_index(&state, &topologies));
         }
         phases.search = t.elapsed();
 
         let t = Instant::now();
-        black_box(is_game_over(&state, &classification));
+        let game_over = black_box(state.face.is_game_over());
         phases.game_over = t.elapsed();
 
         let recorded = fixture.moves.get(index);
@@ -214,11 +219,17 @@ pub fn replay(fixture: &Fixture) -> Replay {
             index,
             player: state.current_player,
             terminal: recorded.is_none(),
+            game_over,
             phases,
         });
 
         match verdict {
-            Some((mov, Ok(()))) => state.apply_move(mov),
+            Some((mov, Ok(()))) => {
+                if let Err(e) = state.apply_move(mov) {
+                    failure = Some(format!("move {index} rejected: {}", e.message));
+                    break;
+                }
+            }
             Some((_, Err(e))) => {
                 failure = Some(format!("move {index} rejected: {}", e.message));
                 break;
@@ -237,7 +248,7 @@ pub fn record(initial_nodes: usize, board_size: usize) -> Fixture {
     let mut moves = Vec::new();
     while let Some(mov) = next_accepted_move(&mut state) {
         moves.push(FixtureMove::from_move(&mov));
-        state.apply_move(mov);
+        state.apply_move(mov).expect("an accepted move applies");
     }
     Fixture {
         version: FIXTURE_VERSION,
@@ -253,16 +264,17 @@ fn next_accepted_move(state: &mut GameState) -> Option<Move> {
         return Some(preferred);
     }
     let classification = classify_nodes(state);
-    let mut accepted: Vec<Move> =
-        ai::generate_concrete_moves_from_classification(state, &classification)
-            .into_iter()
-            .filter(|m| validate_for(state, m).is_ok())
-            .collect();
+    let generated = ai::generate_concrete_moves_from_classification(state, &classification);
+    let mut accepted: Vec<(Move, FaceMove)> = ai::embedded_moves(state, generated)
+        .into_iter()
+        .filter(|(m, _)| validate_for(state, m).is_ok())
+        .collect();
     if accepted.len() > 1 {
-        let best = ai::search_best_index(state, &classification, &accepted);
+        let topologies: Vec<FaceMove> = accepted.iter().map(|(_, t)| t.clone()).collect();
+        let best = ai::search_best_index(state, &topologies);
         accepted.swap(0, best);
     }
-    accepted.into_iter().next()
+    accepted.into_iter().next().map(|(m, _)| m)
 }
 
 #[cfg(test)]
@@ -300,6 +312,53 @@ mod tests {
         let run = replay(&fixture);
         assert_eq!(run.failure, None);
         assert!(run.timings[2].terminal);
+    }
+
+    /// The board after every recorded move, each checked as the page would.
+    fn play(fixture: &Fixture) -> GameState {
+        let mut state = GameState::with_board_size(fixture.initial_nodes, fixture.board_size);
+        for (index, recorded) in fixture.moves.iter().enumerate() {
+            let mov = recorded.to_move(state.current_player, state.board_size);
+            if let Err(e) = validate_for(&state, &mov) {
+                panic!("move {index} rejected: {}", e.message);
+            }
+            state.apply_move(mov).unwrap();
+        }
+        state
+    }
+
+    /// Recorded on the live site on 2026-11-03, where the page declared the
+    /// human the winner with nodes 8 and 12 still joinable.
+    #[test]
+    fn a_false_game_over_from_the_site_is_still_live() {
+        let fixture = load(&fixtures_dir().join("false-game-over-4n-1000.json")).unwrap();
+        assert_eq!(fixture.moves.len(), 9);
+        let run = replay(&fixture);
+        assert_eq!(run.failure, None);
+        let last = run.timings.last().unwrap();
+        assert!(last.terminal);
+        assert!(!last.game_over);
+        assert!(!run.timings[0].game_over);
+
+        let state = play(&fixture);
+        assert_eq!(state.face.degree(8), 2);
+        assert_eq!(state.face.degree(12), 2);
+        let moves = state.face.moves();
+        assert_eq!(moves.len(), 1);
+        assert_eq!((moves[0].a, moves[0].b), (8, 12));
+        assert!(moves[0].enclosed.is_empty());
+    }
+
+    /// The face model knows the move, but the AI still generates through
+    /// the raster pipeline, which cannot draw it, so it returns no move and
+    /// the page declares the game over anyway.
+    #[test]
+    fn the_ai_forfeits_the_false_game_over_until_it_generates_from_the_model() {
+        let fixture = load(&fixtures_dir().join("false-game-over-4n-1000.json")).unwrap();
+        let mut state = play(&fixture);
+        assert!(!state.face.is_game_over());
+        assert_eq!(state.current_player, Player::AI);
+        assert!(ai::select_ai_move(&mut state).is_none());
     }
 
     #[test]

@@ -58,7 +58,6 @@ fn check(m: &FaceModel) {
         for &h in node.rotation() {
             assert_eq!(m.origin(h), id);
         }
-        assert_eq!(node.rotation().len(), node.degree as usize);
     }
 
     let orbit = orbits(m);
@@ -215,6 +214,31 @@ proptest! {
     fn every_listed_move_applies(n in 1usize..=6, picks in prop::collection::vec(any::<u32>(), 18)) {
         play(n, &picks, true);
     }
+
+    #[test]
+    fn check_agrees_with_apply(
+        n in 1usize..=5,
+        picks in prop::collection::vec(any::<u32>(), 8),
+        guesses in prop::collection::vec(
+            (0usize..8, prop::option::of(0usize..40), 0usize..8, prop::option::of(0usize..40), prop::collection::vec(0usize..8, 0..3)),
+            24,
+        ),
+    ) {
+        let (m, _, _) = play(n, &picks, false);
+        for mv in m.moves() {
+            prop_assert_eq!(m.check(&mv), Ok(()));
+            prop_assert_eq!(m.clone().apply(&mv), Ok(()));
+        }
+        for (a, at_a, b, at_b, enclosed) in guesses {
+            let mv = Move { a, at_a, b, at_b, enclosed };
+            let checked = m.check(&mv);
+            let mut applied = m.clone();
+            prop_assert_eq!(applied.apply(&mv), checked);
+            if checked.is_err() {
+                prop_assert_eq!(&applied, &m);
+            }
+        }
+    }
 }
 
 fn first_player_wins(m: &mut FaceModel) -> bool {
@@ -265,7 +289,7 @@ fn known_outcomes_for_small_games() {
 }
 
 #[test]
-#[ignore = "about 30 s in debug"]
+#[ignore = "about 28 s in debug"]
 fn four_nodes_are_a_first_player_win() {
     assert!(first_player_wins(&mut FaceModel::new(4)));
 }

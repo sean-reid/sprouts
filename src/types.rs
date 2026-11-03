@@ -3,6 +3,9 @@ use std::collections::{HashMap, HashSet};
 use tsify::Tsify;
 
 use crate::curve::{self, Cubic};
+use crate::embedding;
+use crate::face::FaceModel;
+use crate::validation::Rejection;
 
 pub const BOARD_SIZE: usize = 1000;
 
@@ -145,6 +148,7 @@ impl Move {
 pub struct GameState {
     pub nodes: Vec<Node>,
     pub lines: Vec<Line>,
+    pub face: FaceModel,
     pub skeleton_cache: SkeletonCache,
     pub move_history: Vec<Move>,
     pub current_player: Player,
@@ -179,6 +183,7 @@ impl GameState {
         Self {
             nodes,
             lines: Vec::new(),
+            face: FaceModel::new(initial_nodes),
             skeleton_cache: SkeletonCache::new_with_size(board_size),
             move_history: Vec::new(),
             current_player: Player::Human,
@@ -204,8 +209,13 @@ impl GameState {
             .collect()
     }
 
-    pub fn apply_move(&mut self, mov: Move) {
-        // Increment connection counts — handle self-loops explicitly
+    /// Fails, changing nothing, when the line cannot be placed in a face.
+    pub fn apply_move(&mut self, mov: Move) -> Result<(), Rejection> {
+        let topology = embedding::embed(self, &mov)?;
+        self.face
+            .apply(&topology)
+            .expect("the embedding checked the move");
+
         if mov.from_node == mov.to_node {
             // Self-loop: node gets +2 connections
             if let Some(node) = self.find_node_mut(mov.from_node) {
@@ -250,8 +260,8 @@ impl GameState {
             Player::AI => Player::Human,
         };
 
-        // Invalidate skeleton cache
         self.skeleton_cache.invalidate();
+        Ok(())
     }
 
     /// O(1) undo: directly reverse the last move instead of replaying history.
@@ -260,6 +270,7 @@ impl GameState {
             Some(m) => m,
             None => return false,
         };
+        self.face.undo();
 
         // Remove the created node (always the last one added)
         self.nodes.pop();
@@ -482,7 +493,7 @@ mod tests {
     fn apply_move_increments_connections() {
         let mut gs = GameState::new(2);
         let mov = make_move(0, 1);
-        gs.apply_move(mov);
+        gs.apply_move(mov).unwrap();
         assert_eq!(gs.find_node(0).unwrap().connection_count, 1);
         assert_eq!(gs.find_node(1).unwrap().connection_count, 1);
     }
@@ -491,7 +502,7 @@ mod tests {
     fn apply_move_adds_node_with_2_connections() {
         let mut gs = GameState::new(2);
         let mov = make_move(0, 1);
-        gs.apply_move(mov);
+        gs.apply_move(mov).unwrap();
         assert_eq!(gs.nodes.len(), 3);
         let new_node = gs.find_node(2).unwrap();
         assert_eq!(new_node.connection_count, 2);
@@ -501,7 +512,7 @@ mod tests {
     fn apply_move_adds_line() {
         let mut gs = GameState::new(2);
         let mov = make_move(0, 1);
-        gs.apply_move(mov);
+        gs.apply_move(mov).unwrap();
         assert_eq!(gs.lines.len(), 1);
         assert_eq!(gs.lines[0].from_node, 0);
         assert_eq!(gs.lines[0].to_node, 1);
@@ -511,7 +522,7 @@ mod tests {
     fn apply_move_switches_player() {
         let mut gs = GameState::new(2);
         assert_eq!(gs.current_player, Player::Human);
-        gs.apply_move(make_move(0, 1));
+        gs.apply_move(make_move(0, 1)).unwrap();
         assert_eq!(gs.current_player, Player::AI);
     }
 
@@ -530,7 +541,7 @@ mod tests {
             Player::Human,
             BOARD_SIZE,
         );
-        gs.apply_move(mov);
+        gs.apply_move(mov).unwrap();
         assert_eq!(gs.find_node(0).unwrap().connection_count, 2);
     }
 
@@ -545,11 +556,12 @@ mod tests {
             .map(|n| (n.id, n.connection_count))
             .collect();
 
-        gs.apply_move(make_move(0, 1));
+        gs.apply_move(make_move(0, 1)).unwrap();
         assert_eq!(gs.nodes.len(), 3);
 
         let undone = gs.undo_move();
         assert!(undone);
+        assert_eq!(gs.face, FaceModel::new(2));
         assert_eq!(gs.nodes.len(), 2);
         assert_eq!(gs.lines.len(), 0);
         assert_eq!(gs.current_player, Player::Human);
@@ -575,7 +587,7 @@ mod tests {
             .collect();
 
         for _ in 0..5 {
-            gs.apply_move(make_move(0, 1));
+            gs.apply_move(make_move(0, 1)).unwrap();
             gs.undo_move();
         }
 

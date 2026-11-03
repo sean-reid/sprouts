@@ -70,7 +70,7 @@ mod tests {
             Player::Human,
             gs.board_size,
         );
-        gs.apply_move(mov);
+        gs.apply_move(mov).unwrap();
         gs
     }
 
@@ -120,7 +120,7 @@ mod tests {
             Player::AI,
             gs.board_size,
         );
-        gs.apply_move(mov);
+        gs.apply_move(mov).unwrap();
         assert!(lookup_opening(&gs).is_none());
     }
 
