@@ -1,4 +1,4 @@
-import { BOARD_BACKGROUND, drawBoard, setCssPixelTransform } from "./render";
+import { BOARD_BACKGROUND, boardCentre, drawBoard, setCssPixelTransform } from "./render";
 import type { GameState, Point } from "./state";
 import type { View } from "./view";
 
@@ -110,7 +110,7 @@ export class Loupe {
     ctx.clip();
     ctx.fillStyle = BOARD_BACKGROUND;
     ctx.fillRect(centre.x - RADIUS, centre.y - RADIUS, LOUPE_DIAMETER, LOUPE_DIAMETER);
-    drawBoard(ctx, state, project);
+    drawBoard(ctx, state, project, boardCentre(view));
     ctx.strokeStyle = LOUPE_RING;
     ctx.lineWidth = 1;
     ctx.beginPath();

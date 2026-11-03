@@ -42,6 +42,8 @@ function minStrokeLength(boardSize: number): number {
 }
 const AI_ANIMATION_MS = 500;
 const FLASH_MS = 600;
+// How long the board points out the move a seek landed on.
+const HIGHLIGHT_MS = 2000;
 const DEFAULT_NODES = 4;
 // Screen pixels around the placement dot where a press takes hold of it.
 const DOT_GRAB_PX = 22;
@@ -93,6 +95,12 @@ const state: GameState = watched(
 let timeline = new History(DEFAULT_NODES, view.boardSize);
 let firstPlayer: Player = "human";
 let flashTimer: ReturnType<typeof setTimeout> | null = null;
+// The row under the pointer, the row focused from the keyboard, and the
+// move the last seek landed on; the board points out the first one set.
+let pointedMove: number | null = null;
+let focusedMove: number | null = null;
+let recentMove: number | null = null;
+let highlightTimer: ReturnType<typeof setTimeout> | null = null;
 // A page opened from a share link reviews that game and leaves the saved one alone.
 let shared = false;
 // A review the player opened, a link, or a finished game stays a review
@@ -139,6 +147,35 @@ function flash(at: BoardLocation, path: Point[]): void {
   }, FLASH_MS);
 }
 
+function showHighlight(): void {
+  state.highlightedMove = pointedMove ?? focusedMove ?? recentMove;
+}
+
+function pointOutCurrent(): void {
+  if (highlightTimer !== null) clearTimeout(highlightTimer);
+  recentMove = timeline.cursor > 0 ? timeline.cursor - 1 : null;
+  showHighlight();
+  highlightTimer = setTimeout(() => {
+    recentMove = null;
+    highlightTimer = null;
+    showHighlight();
+  }, HIGHLIGHT_MS);
+}
+
+function clearHighlight(): void {
+  if (highlightTimer !== null) clearTimeout(highlightTimer);
+  highlightTimer = null;
+  pointedMove = null;
+  focusedMove = null;
+  recentMove = null;
+  showHighlight();
+}
+
+function rowIndex(target: EventTarget | null): number | null {
+  const row = target instanceof Element ? target.closest<HTMLElement>("[data-move]") : null;
+  return row ? Number(row.dataset.move) : null;
+}
+
 function startAITurn(): void {
   state.thinking = true;
   setStatus("AI is thinking");
@@ -170,6 +207,8 @@ function renderMoveList(): void {
     const button = document.createElement("button");
     button.type = "button";
     button.textContent = timeline.label(index);
+    button.title = timeline.ids(index);
+    button.dataset.move = String(index);
     if (index === timeline.cursor - 1) button.setAttribute("aria-current", "step");
     button.addEventListener("click", () => void jumpTo(index + 1));
     item.append(button);
@@ -528,6 +567,7 @@ async function finishAIMove(move: Move, epoch: number): Promise<void> {
 // list; the result says whether the target was reached in this game.
 async function seek(target: number): Promise<boolean> {
   const epoch = gameEpoch;
+  const from = timeline.cursor;
   seeking = true;
   updateControls();
   try {
@@ -565,6 +605,7 @@ async function seek(target: number): Promise<boolean> {
       await resyncCursor(epoch).catch(() => setStatus("Lost contact with the engine", "lose"));
       if (epoch === gameEpoch) {
         seeking = false;
+        if (timeline.cursor !== from) pointOutCurrent();
         persist();
       }
     }
@@ -697,6 +738,7 @@ function resetTable(): void {
   engine.cancel("turn");
   seeking = false;
   submitting = false;
+  clearHighlight();
   closeModal();
 }
 
@@ -878,6 +920,26 @@ function wireInput(): void {
   for (const button of firstPlayerButtons) {
     button.addEventListener("click", () => pickFirstPlayer(button.dataset.first as Player));
   }
+  moveListEl.addEventListener("pointerover", (e) => {
+    pointedMove = rowIndex(e.target);
+    showHighlight();
+  });
+  moveListEl.addEventListener("pointerleave", () => {
+    pointedMove = null;
+    showHighlight();
+  });
+  // A row reached with Tab shows its move; one focused by a click or tap
+  // does not, so the pointer and the seek timer decide instead.
+  moveListEl.addEventListener("focusin", (e) => {
+    const target = e.target instanceof Element ? e.target : null;
+    focusedMove = target?.matches(":focus-visible") ? rowIndex(target) : null;
+    showHighlight();
+  });
+  moveListEl.addEventListener("focusout", (e) => {
+    if (e.relatedTarget instanceof Node && moveListEl.contains(e.relatedTarget)) return;
+    focusedMove = null;
+    showHighlight();
+  });
   backBtn.addEventListener("click", () => void step(-1));
   forwardBtn.addEventListener("click", () => void step(1));
   shareBtn.addEventListener("click", () => void share());

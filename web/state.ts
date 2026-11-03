@@ -39,6 +39,8 @@ export interface Board {
   flash: Flash | null;
   gameOver: boolean;
   reviewing: boolean;
+  // Index of the move whose line and nodes the board points out.
+  highlightedMove: number | null;
 }
 
 export interface GameState extends Board {
@@ -64,6 +66,7 @@ export function freshBoard(): Board {
     flash: null,
     gameOver: false,
     reviewing: false,
+    highlightedMove: null,
   };
 }
 
