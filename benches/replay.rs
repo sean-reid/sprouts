@@ -1,8 +1,7 @@
-use sprouts::replay::{self, Fixture, MoveTiming, PHASES};
+use sprouts::replay::{self, ms, Fixture, MoveTiming, PHASES};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-use std::time::Duration;
 
 const RECORD_NODES: [usize; 3] = [4, 5, 6];
 const RECORD_BOARDS: [usize; 2] = [1000, 500];
@@ -13,10 +12,6 @@ fn fixtures_dir() -> PathBuf {
 
 fn games_dir() -> PathBuf {
     fixtures_dir().join("games")
-}
-
-fn ms(d: Duration) -> f64 {
-    d.as_secs_f64() * 1000.0
 }
 
 fn game_paths() -> Result<Vec<PathBuf>, String> {
@@ -56,20 +51,18 @@ fn print_table(name: &str, fixture: &Fixture, timings: &[MoveTiming]) -> [f64; 5
     }
     println!(" {:>10}", "total");
 
-    let mut max = [0.0f64; 5];
     for t in timings {
         let player = match t.player {
             replay::Player::Human => "human",
             replay::Player::AI => "ai",
         };
         print!("{:>4} {:>6}", t.index, player);
-        for (i, d) in t.phases.as_array().iter().enumerate() {
-            let v = ms(*d);
-            max[i] = max[i].max(v);
-            print!(" {v:>14.2}");
+        for d in t.phases.as_array() {
+            print!(" {:>14.2}", ms(d));
         }
         println!(" {:>10.2}", ms(t.phases.total()));
     }
+    let max = replay::max_per_phase(timings);
     print!("{:>4} {:>6}", "max", "");
     for v in max {
         print!(" {v:>14.2}");
@@ -85,22 +78,20 @@ fn run_bench() -> Result<bool, String> {
         return Err(format!("no fixtures under {}", games_dir().display()));
     }
 
-    let mut breaches = Vec::new();
+    let mut failures = Vec::new();
     for path in &paths {
         let name = path
             .file_stem()
             .and_then(|s| s.to_str())
             .unwrap_or("fixture");
-        let fixture = replay::load(path)?;
-        let timings = replay::replay(&fixture).map_err(|e| format!("{name}: {e}"))?;
-        let max = print_table(name, &fixture, &timings);
-        for (i, phase) in PHASES.iter().enumerate() {
-            let budget = budgets[*phase];
-            if max[i] > budget {
-                breaches.push(format!(
-                    "{name}: {phase} {:.2} ms over budget {budget:.2} ms",
-                    max[i]
-                ));
+        let timings = replay::load(path).and_then(|fixture| {
+            replay::replay(&fixture).map(|timings| print_table(name, &fixture, &timings))
+        });
+        match timings {
+            Ok(max) => failures.extend(replay::breaches(name, &max, &budgets)),
+            Err(e) => {
+                println!("\n{name}: {e}");
+                failures.push(format!("{name}: {e}"));
             }
         }
     }
@@ -109,15 +100,15 @@ fn run_bench() -> Result<bool, String> {
     for phase in PHASES {
         println!("  {phase:>14} {:>10.2}", budgets[phase]);
     }
-    if breaches.is_empty() {
+    if failures.is_empty() {
         println!("\nall phases within budget");
     } else {
-        println!("\nbudget breaches:");
-        for b in &breaches {
-            println!("  {b}");
+        println!("\nfailures:");
+        for f in &failures {
+            println!("  {f}");
         }
     }
-    Ok(breaches.is_empty())
+    Ok(failures.is_empty())
 }
 
 fn run_record() -> Result<(), String> {

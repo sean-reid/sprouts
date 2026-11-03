@@ -8,6 +8,8 @@ pub use crate::types::Player;
 use crate::types::{GameState, Move, Point};
 use crate::validation::{validate_ai_move, validate_move};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
+use std::hint::black_box;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -96,6 +98,33 @@ pub struct MoveTiming {
     pub phases: Phases,
 }
 
+pub fn ms(d: Duration) -> f64 {
+    d.as_secs_f64() * 1000.0
+}
+
+/// Slowest run of each phase across the replay, in milliseconds.
+pub fn max_per_phase(timings: &[MoveTiming]) -> [f64; 5] {
+    let mut max = [0.0f64; 5];
+    for t in timings {
+        for (slot, d) in max.iter_mut().zip(t.phases.as_array()) {
+            *slot = slot.max(ms(d));
+        }
+    }
+    max
+}
+
+/// One line per phase whose max is over its budget.
+pub fn breaches(name: &str, max: &[f64; 5], budgets: &BTreeMap<String, f64>) -> Vec<String> {
+    PHASES
+        .iter()
+        .zip(max)
+        .filter_map(|(phase, v)| {
+            let budget = budgets.get(*phase)?;
+            (v > budget).then(|| format!("{name}: {phase} {v:.2} ms over budget {budget:.2} ms"))
+        })
+        .collect()
+}
+
 pub fn parse(json: &str) -> Result<Fixture, String> {
     let fixture: Fixture = serde_json::from_str(json).map_err(|e| e.to_string())?;
     if fixture.version != FIXTURE_VERSION {
@@ -152,7 +181,7 @@ pub fn replay(fixture: &Fixture) -> Result<Vec<MoveTiming>, String> {
 
         let t = Instant::now();
         if moves.len() > 1 {
-            ai::search_best_index(&state, &classification, &moves);
+            black_box(ai::search_best_index(&state, &classification, &moves));
         }
         phases.search = t.elapsed();
 
@@ -225,6 +254,26 @@ mod tests {
         assert_eq!(timings.len(), fixture.moves.len());
         assert_eq!(timings[0].player, Player::Human);
         assert_eq!(timings[1].player, Player::AI);
+        let max = max_per_phase(&timings);
+        assert!(max[0] > 0.0 && max[1] > 0.0 && max[2] > 0.0 && max[4] > 0.0);
+    }
+
+    #[test]
+    fn self_play_records_a_game_that_replays() {
+        let fixture = record(4, 500);
+        assert!(fixture.moves.len() >= 2);
+        let timings = replay(&fixture).unwrap();
+        assert_eq!(timings.len(), fixture.moves.len());
+    }
+
+    #[test]
+    fn breaches_name_only_phases_over_budget() {
+        let budgets: BTreeMap<String, f64> = PHASES.iter().map(|p| (p.to_string(), 10.0)).collect();
+        let max = [5.0, 10.0, 10.5, 0.0, 200.0];
+        let hits = breaches("g", &max, &budgets);
+        assert_eq!(hits.len(), 2);
+        assert!(hits[0].starts_with("g: generation 10.50 ms over budget 10.00 ms"));
+        assert!(hits[1].starts_with("g: validation 200.00 ms"));
     }
 
     #[test]
