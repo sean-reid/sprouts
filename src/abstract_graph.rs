@@ -198,9 +198,11 @@ impl<C: Clock> Budget<C> {
 }
 
 /// What a budgeted search settled on.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Pick {
     pub index: usize,
+    /// Every candidate, best first, as of the last iteration that finished.
+    pub order: Vec<usize>,
     /// Depth of the last iteration that finished within the budget.
     pub depth: usize,
     pub cut_off: bool,
@@ -408,13 +410,16 @@ pub fn choose_within<C: Clock>(
         let heuristic = root.quick_move_score(&candidates[idx]);
         (winning, if winning { 0 } else { room }, heuristic)
     };
-    // Reversed so `max_by`, which keeps the last of equals, leaves the lowest index winning.
-    let index = (0..candidates.len())
-        .rev()
-        .max_by(|&a, &b| rank(a).partial_cmp(&rank(b)).expect("finite scores"))
-        .expect("a candidate");
+    let mut order: Vec<usize> = (0..candidates.len()).collect();
+    order.sort_by(|&a, &b| {
+        rank(b)
+            .partial_cmp(&rank(a))
+            .expect("finite scores")
+            .then(a.cmp(&b))
+    });
     Pick {
-        index,
+        index: order[0],
+        order,
         depth: root.max_depth(),
         cut_off: false,
         spent: 0,
@@ -446,6 +451,7 @@ pub fn best_candidate_to<C: Clock>(
 ) -> Pick {
     let mut pick = Pick {
         index: 0,
+        order: (0..candidates.len()).collect(),
         depth: 0,
         cut_off: false,
         spent: 0,
@@ -489,7 +495,8 @@ pub fn best_candidate_to<C: Clock>(
         }
         pick.index = best.1;
         pick.depth = depth;
-        order.sort_by(|&a, &b| scores[b].total_cmp(&scores[a]));
+        order.sort_by(|&a, &b| scores[b].total_cmp(&scores[a]).then(a.cmp(&b)));
+        pick.order.clone_from(&order);
     }
     drop(search);
     pick.spent = budget.spent();

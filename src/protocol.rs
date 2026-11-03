@@ -64,11 +64,14 @@ pub enum Outcome {
 
 /// The AI's move with the spline it commits as, so the page animates the
 /// curve the board will show.
+/// The AI's answer: a move, no move because the game is over, or no move
+/// because none of the listed moves could be drawn while the game is open.
 #[derive(Debug, Clone, Serialize, Tsify)]
-#[serde(rename_all = "camelCase")]
-pub struct AiMove {
-    pub mov: Move,
-    pub segments: Vec<Cubic>,
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum AiReply {
+    Move { mov: Move, segments: Vec<Cubic> },
+    GameOver,
+    Undrawn,
 }
 
 #[derive(Debug, Clone, Deserialize, Tsify)]
@@ -168,11 +171,15 @@ pub fn apply(state: &mut GameState, mov: Move) -> Outcome {
     }
 }
 
-pub fn ai_move(state: &mut GameState) -> Option<AiMove> {
-    ai::select_ai_move(state).map(|mov| AiMove {
-        segments: mov.segments.clone(),
-        mov: Move::from(mov),
-    })
+pub fn ai_move(state: &mut GameState) -> AiReply {
+    match ai::select_ai_move(state) {
+        ai::Reply::Move(mov) => AiReply::Move {
+            segments: mov.segments.clone(),
+            mov: Move::from(mov),
+        },
+        ai::Reply::GameOver => AiReply::GameOver,
+        ai::Reply::Undrawn => AiReply::Undrawn,
+    }
 }
 
 /// The spline a stroke commits as, so the page can show it before the move.
@@ -375,8 +382,10 @@ mod tests {
     #[test]
     fn the_ai_opening_on_a_full_size_board_is_accepted() {
         let mut state = start(4, 1000, Player::AI, None).unwrap();
-        let reply = ai_move(&mut state).expect("the AI has an opening move");
-        match apply(&mut state, reply.mov) {
+        let AiReply::Move { mov, .. } = ai_move(&mut state) else {
+            panic!("the AI has an opening move");
+        };
+        match apply(&mut state, mov) {
             Outcome::Applied { snapshot } => assert_eq!(snapshot.current_player, Player::Human),
             Outcome::Rejected { rejection } => panic!("opening rejected: {}", rejection.message),
         }
@@ -400,8 +409,10 @@ mod tests {
         ) else {
             panic!("the opening chord was rejected");
         };
-        let reply = ai_move(&mut state).expect("the AI has a reply");
-        match apply(&mut state, reply.mov) {
+        let AiReply::Move { mov, .. } = ai_move(&mut state) else {
+            panic!("the AI has a reply");
+        };
+        match apply(&mut state, mov) {
             Outcome::Applied { snapshot } => {
                 assert_eq!(snapshot.current_player, Player::Human);
                 assert_eq!(snapshot.lines.len(), 2);
@@ -580,11 +591,13 @@ mod tests {
             apply(&mut state, opening),
             Outcome::Applied { .. }
         ));
-        let reply = ai_move(&mut state).expect("the AI has a move on an open board");
-        let Outcome::Applied { snapshot } = apply(&mut state, reply.mov) else {
+        let AiReply::Move { mov, segments } = ai_move(&mut state) else {
+            panic!("the AI has a move on an open board");
+        };
+        let Outcome::Applied { snapshot } = apply(&mut state, mov) else {
             panic!("the AI's own move was rejected");
         };
-        assert_eq!(snapshot.lines.last().unwrap().segments, reply.segments);
+        assert_eq!(snapshot.lines.last().unwrap().segments, segments);
     }
 
     #[test]
@@ -782,5 +795,49 @@ mod tests {
             suggested(&state, vec![]),
             AutoPlacement::Rejected { .. }
         ));
+    }
+
+    /// A pocket where the three listed moves are all too cramped to draw:
+    /// the AI reports that it cannot draw, and the game stays open. The
+    /// pocket serves only while the router cannot draw it; if routing
+    /// improves, record a tighter one.
+    #[test]
+    fn an_undrawn_position_does_not_end_the_game() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("fixtures/undrawn/pocket-6n-1000.json");
+        let raw: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        let nodes: Vec<Point> = raw["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| Point::new(p[0].as_f64().unwrap(), p[1].as_f64().unwrap()))
+            .collect();
+        let mut state = start(6, 1000, Player::AI, Some(nodes)).unwrap();
+        for m in raw["moves"].as_array().unwrap() {
+            let polyline: Vec<Point> = m["polyline"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|p| Point::new(p[0].as_f64().unwrap(), p[1].as_f64().unwrap()))
+                .collect();
+            let new_node = Point::new(
+                m["newNode"][0].as_f64().unwrap(),
+                m["newNode"][1].as_f64().unwrap(),
+            );
+            let mov = types::Move::new(
+                m["from"].as_u64().unwrap() as usize,
+                m["to"].as_u64().unwrap() as usize,
+                polyline,
+                new_node,
+                Player::AI,
+                1000,
+            );
+            state.apply_move(mov).unwrap();
+            state.current_player = Player::AI;
+        }
+        assert!(!state.face.search_moves().is_empty());
+        assert!(matches!(ai_move(&mut state), AiReply::Undrawn));
+        assert!(!snapshot(&state).game_over);
     }
 }

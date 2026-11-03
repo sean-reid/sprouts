@@ -29,6 +29,24 @@ pub const LINE_RASTER_WIDTH: f64 = 3.0;
 pub const NODE_PROTECTION_RADIUS: i32 = 6;
 pub const MAX_ASTAR_ITERATIONS: usize = 300_000;
 
+/// Radius of a node disc on the page, in CSS pixels.
+pub const NODE_DISC_PX: f64 = 8.0;
+/// Width of the board on the narrowest layout, the 375 px phone page, in
+/// CSS pixels.
+pub const NARROWEST_BOARD_PX: f64 = 340.0;
+
+/// Radius of a node disc in board units on the narrowest layout, where the
+/// discs are largest against the board.
+pub fn node_disc(board_size: usize) -> f64 {
+    NODE_DISC_PX * board_size as f64 / NARROWEST_BOARD_PX
+}
+
+/// Nearest an AI line comes to the centre of a node it does not touch: the
+/// disc, plus the line clearance.
+pub fn ai_node_clearance(board_size: usize) -> f64 {
+    node_disc(board_size) + MIN_PATH_CLEARANCE_AI * scale(board_size)
+}
+
 /// Fraction of the board the outermost starting node sits from the centre.
 pub const LAYOUT_REACH: f64 = 0.35;
 
@@ -147,6 +165,27 @@ impl Move {
         board_size: usize,
     ) -> Self {
         let segments = curve::fit(&polyline, curve::tolerance(board_size));
+        let new_node_pos =
+            curve::nearest(&segments, &new_node_pos).map_or(new_node_pos, |hit| hit.point);
+        Self {
+            from_node,
+            to_node,
+            polyline,
+            segments,
+            new_node_pos,
+            player,
+        }
+    }
+
+    /// A move whose spline is already fit, with its node on that curve.
+    pub fn from_segments(
+        from_node: usize,
+        to_node: usize,
+        polyline: Vec<Point>,
+        segments: Vec<Cubic>,
+        new_node_pos: Point,
+        player: Player,
+    ) -> Self {
         let new_node_pos =
             curve::nearest(&segments, &new_node_pos).map_or(new_node_pos, |hit| hit.point);
         Self {

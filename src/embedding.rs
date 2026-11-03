@@ -190,12 +190,12 @@ fn corner(
 }
 
 /// Counterclockwise angle from `from` to `to`, in [0, 2π).
-fn turn(from: f64, to: f64) -> f64 {
+pub(crate) fn turn(from: f64, to: f64) -> f64 {
     (to - from).rem_euclid(TAU)
 }
 
 /// Direction `path` leaves `center` in, read where it first clears `radius`.
-fn leaving_angle(center: Point, path: &[Point], radius: f64) -> f64 {
+pub(crate) fn leaving_angle(center: Point, path: &[Point], radius: f64) -> f64 {
     let farther = |p: &&Point, q: &&Point| {
         p.distance_to(&center)
             .partial_cmp(&q.distance_to(&center))
@@ -209,7 +209,7 @@ fn leaving_angle(center: Point, path: &[Point], radius: f64) -> f64 {
 }
 
 /// Geometry of half-edge `h`, from its origin to its head.
-fn half_edge_path(state: &GameState, h: HalfEdgeId) -> Vec<Point> {
+pub(crate) fn half_edge_path(state: &GameState, h: HalfEdgeId) -> Vec<Point> {
     let line = &state.lines[h / 4];
     let curve = line_path(state, h / 4);
     let (to_mid, from_mid) = split_at(&curve, &line.new_node_pos);

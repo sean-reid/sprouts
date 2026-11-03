@@ -1,8 +1,7 @@
 {
-  "skeleton": 6700,
-  "classification": 40,
-  "generation": 8100,
+  "face_update": 1,
+  "enumeration": 1,
+  "routing": 500,
   "search": 1000,
-  "validation": 1,
-  "game_over": 1
+  "validation": 1
 }

@@ -1,12 +1,11 @@
 //! Replays recorded games natively and times each engine phase per move.
 
 use crate::ai;
+#[cfg(feature = "bench")]
 pub use crate::ai::nimber_stats;
-use crate::components::label_components;
-use crate::face::Move as FaceMove;
-use crate::morphology::generate_skeleton;
-use crate::node_classifier::classify_nodes;
 use crate::protocol;
+#[cfg(feature = "bench")]
+pub use crate::route::sweep::{sweep, Tally};
 pub use crate::types::Player;
 use crate::types::{opening_layout, GameState, Move, Point};
 use crate::validation::Rejection;
@@ -80,34 +79,35 @@ impl FixtureMove {
     }
 }
 
-pub const PHASES: [&str; 6] = [
-    "skeleton",
-    "classification",
-    "generation",
+pub const PHASE_COUNT: usize = 5;
+
+pub const PHASES: [&str; PHASE_COUNT] = [
+    "face_update",
+    "enumeration",
+    "routing",
     "search",
     "validation",
-    "game_over",
 ];
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Phases {
-    pub skeleton: Duration,
-    pub classification: Duration,
-    pub generation: Duration,
+    /// Applying the recorded move to the position, face model included.
+    pub face_update: Duration,
+    pub enumeration: Duration,
+    /// Drawing the move the search picked, with any fallbacks.
+    pub routing: Duration,
     pub search: Duration,
     pub validation: Duration,
-    pub game_over: Duration,
 }
 
 impl Phases {
-    pub fn as_array(&self) -> [Duration; 6] {
+    pub fn as_array(&self) -> [Duration; PHASE_COUNT] {
         [
-            self.skeleton,
-            self.classification,
-            self.generation,
+            self.face_update,
+            self.enumeration,
+            self.routing,
             self.search,
             self.validation,
-            self.game_over,
         ]
     }
 
@@ -124,6 +124,10 @@ pub struct MoveTiming {
     pub terminal: bool,
     /// What the face model says of the position.
     pub game_over: bool,
+    /// Moves the search preferred that could not be drawn here.
+    pub routing_failures: usize,
+    /// No listed move could be drawn, though the position had some.
+    pub undrawn: bool,
     pub phases: Phases,
 }
 
@@ -133,13 +137,24 @@ pub struct Replay {
     pub failure: Option<String>,
 }
 
+impl Replay {
+    pub fn routing_failures(&self) -> usize {
+        self.timings.iter().map(|t| t.routing_failures).sum()
+    }
+
+    /// Positions where the AI had moves and could draw none of them.
+    pub fn undrawn(&self) -> usize {
+        self.timings.iter().filter(|t| t.undrawn).count()
+    }
+}
+
 pub fn ms(d: Duration) -> f64 {
     d.as_secs_f64() * 1000.0
 }
 
 /// Slowest run of each phase across the replay, in milliseconds.
-pub fn max_per_phase(timings: &[MoveTiming]) -> [f64; 6] {
-    let mut max = [0.0f64; 6];
+pub fn max_per_phase(timings: &[MoveTiming]) -> [f64; PHASE_COUNT] {
+    let mut max = [0.0f64; PHASE_COUNT];
     for t in timings {
         for (slot, d) in max.iter_mut().zip(t.phases.as_array()) {
             *slot = slot.max(ms(d));
@@ -149,7 +164,11 @@ pub fn max_per_phase(timings: &[MoveTiming]) -> [f64; 6] {
 }
 
 /// One line per phase whose max is over its budget.
-pub fn breaches(name: &str, max: &[f64; 6], budgets: &BTreeMap<String, f64>) -> Vec<String> {
+pub fn breaches(
+    name: &str,
+    max: &[f64; PHASE_COUNT],
+    budgets: &BTreeMap<String, f64>,
+) -> Vec<String> {
     PHASES
         .iter()
         .zip(max)
@@ -205,35 +224,22 @@ pub fn replay(fixture: &Fixture) -> Replay {
         let mut phases = Phases::default();
 
         let t = Instant::now();
-        let (skeleton, distance_transform) = generate_skeleton(&state);
-        state.skeleton_cache.skeleton = skeleton;
-        state.skeleton_cache.distance_transform = distance_transform;
-        let (labels, components) = label_components(&state.skeleton_cache.skeleton, &state);
-        state.skeleton_cache.component_labels = labels;
-        state.skeleton_cache.components = components;
-        state.skeleton_cache.is_valid = true;
-        phases.skeleton = t.elapsed();
+        let candidates = state.face.search_moves();
+        phases.enumeration = t.elapsed();
+        let game_over = candidates.is_empty();
 
         let t = Instant::now();
-        let classification = classify_nodes(&mut state);
-        phases.classification = t.elapsed();
-
-        let t = Instant::now();
-        let generated =
-            ai::generate_concrete_moves_from_classification(&mut state, &classification);
-        let candidates = ai::embedded_moves(&state, generated);
-        phases.generation = t.elapsed();
-
-        let t = Instant::now();
-        if candidates.len() > 1 {
-            let topologies: Vec<FaceMove> = candidates.iter().map(|(_, t)| t.clone()).collect();
-            black_box(ai::search_best_index(&state, &topologies));
-        }
+        let order = ai::rank(&state, &candidates);
         phases.search = t.elapsed();
 
         let t = Instant::now();
-        let game_over = black_box(state.face.is_game_over());
-        phases.game_over = t.elapsed();
+        let (routing_failures, undrawn) = if candidates.is_empty() {
+            (0, false)
+        } else {
+            let (drawn, failures) = ai::draw(&state, &candidates, &order);
+            (failures, black_box(drawn).is_none())
+        };
+        phases.routing = t.elapsed();
 
         let recorded = fixture.moves.get(index);
         let verdict = recorded.map(|recorded| {
@@ -244,26 +250,37 @@ pub fn replay(fixture: &Fixture) -> Replay {
             (mov, verdict)
         });
 
+        let applied = match verdict {
+            Some((mov, Ok(()))) => {
+                let t = Instant::now();
+                let applied = state.apply_move(mov);
+                phases.face_update = t.elapsed();
+                applied.map_err(|e| format!("move {index} rejected: {}", e.message))
+            }
+            Some((_, Err(e))) => Err(format!("move {index} rejected: {}", e.message)),
+            None => Ok(()),
+        };
+
         timings.push(MoveTiming {
             index,
-            player: state.current_player,
+            player: if recorded.is_some() {
+                state
+                    .move_history
+                    .last()
+                    .map_or(state.current_player, |m| m.player)
+            } else {
+                state.current_player
+            },
             terminal: recorded.is_none(),
             game_over,
+            routing_failures,
+            undrawn,
             phases,
         });
 
-        match verdict {
-            Some((mov, Ok(()))) => {
-                if let Err(e) = state.apply_move(mov) {
-                    failure = Some(format!("move {index} rejected: {}", e.message));
-                    break;
-                }
-            }
-            Some((_, Err(e))) => {
-                failure = Some(format!("move {index} rejected: {}", e.message));
-                break;
-            }
-            None => {}
+        if let Err(e) = applied {
+            failure = Some(e);
+            break;
         }
     }
 
@@ -273,18 +290,15 @@ pub fn replay(fixture: &Fixture) -> Replay {
 /// Positions the search charged, summed over the fixture's positions with a
 /// choice to make, when deepening to each depth from 1 to `max_depth`
 /// without a time limit.
+#[cfg(feature = "bench")]
 pub fn nodes_per_depth(fixture: &Fixture, max_depth: usize) -> Vec<usize> {
     let mut state = fixture.start();
     let mut totals = vec![0; max_depth];
     for recorded in &fixture.moves {
-        let classification = classify_nodes(&mut state);
-        let generated =
-            ai::generate_concrete_moves_from_classification(&mut state, &classification);
-        let candidates = ai::embedded_moves(&state, generated);
+        let candidates = state.face.search_moves();
         if candidates.len() > 1 {
-            let topologies: Vec<FaceMove> = candidates.iter().map(|(_, t)| t.clone()).collect();
             for (slot, depth) in totals.iter_mut().zip(1..) {
-                *slot += ai::nodes_to_depth(&state, &topologies, depth);
+                *slot += ai::nodes_to_depth(&state, &candidates, depth);
             }
         }
         let mov = recorded.to_move(state.current_player, state.board_size);
@@ -318,23 +332,33 @@ pub fn record(initial_nodes: usize, board_size: usize) -> Fixture {
     }
 }
 
+/// The AI's move for the position, or none when the game is over, the AI
+/// could not draw a move, or its move fails the validation the page would
+/// apply; the last two are reported on stderr since they end the recording
+/// early.
 fn next_accepted_move(state: &mut GameState) -> Option<Move> {
-    let preferred = ai::select_ai_move(state)?;
-    if validate_for(state, &preferred).is_ok() {
-        return Some(preferred);
+    let mov = match ai::choose(state) {
+        ai::Reply::Move(mov) => mov,
+        ai::Reply::GameOver => return None,
+        ai::Reply::Undrawn => {
+            eprintln!(
+                "recording stopped after {} moves: no listed move could be drawn",
+                state.move_history.len()
+            );
+            return None;
+        }
+    };
+    match validate_for(state, &mov) {
+        Ok(()) => Some(mov),
+        Err(e) => {
+            eprintln!(
+                "recording stopped after {} moves: the AI's move was rejected: {}",
+                state.move_history.len(),
+                e.message
+            );
+            None
+        }
     }
-    let classification = classify_nodes(state);
-    let generated = ai::generate_concrete_moves_from_classification(state, &classification);
-    let mut accepted: Vec<(Move, FaceMove)> = ai::embedded_moves(state, generated)
-        .into_iter()
-        .filter(|(m, _)| validate_for(state, m).is_ok())
-        .collect();
-    if accepted.len() > 1 {
-        let topologies: Vec<FaceMove> = accepted.iter().map(|(_, t)| t.clone()).collect();
-        let best = ai::search_best_index(state, &topologies);
-        accepted.swap(0, best);
-    }
-    accepted.into_iter().next().map(|(m, _)| m)
 }
 
 #[cfg(test)]
@@ -358,6 +382,7 @@ mod tests {
         assert!(run.timings[2].terminal);
         let max = max_per_phase(&run.timings);
         assert!(max.iter().all(|v| *v > 0.0), "{max:?}");
+        assert_eq!(run.undrawn(), 0);
     }
 
     #[test]
@@ -403,22 +428,38 @@ mod tests {
         let state = play(&fixture);
         assert_eq!(state.face.degree(8), 2);
         assert_eq!(state.face.degree(12), 2);
-        let moves = state.face.moves();
+        let moves = state.face.search_moves();
         assert_eq!(moves.len(), 1);
         assert_eq!((moves[0].a, moves[0].b), (8, 12));
         assert!(moves[0].enclosed.is_empty());
     }
 
-    /// The face model knows the move, but the AI still generates through
-    /// the raster pipeline, which cannot draw it, so it returns no move and
-    /// the page declares the game over anyway.
+    /// The one move left runs between nodes 8 and 12 inside the spiral; the
+    /// AI has to draw it.
     #[test]
-    fn the_ai_forfeits_the_false_game_over_until_it_generates_from_the_model() {
+    fn the_ai_plays_the_last_move_of_the_false_game_over() {
         let fixture = load(&fixtures_dir().join("false-game-over-4n-1000.json")).unwrap();
         let mut state = play(&fixture);
         assert!(!state.face.is_game_over());
         assert_eq!(state.current_player, Player::AI);
-        assert!(ai::select_ai_move(&mut state).is_none());
+        let moves = state.face.search_moves();
+        let order = ai::rank(&state, &moves);
+        let (Some(mov), failures) = ai::draw(&state, &moves, &order) else {
+            panic!("the AI draws the last move");
+        };
+        assert_eq!(failures, 0);
+        assert_eq!(
+            (mov.from_node, mov.to_node),
+            (8, 12),
+            "{}",
+            serde_json::to_string(&FixtureMove::from_move(&mov)).unwrap()
+        );
+        assert_eq!(validate_for(&state, &mov), Ok(()));
+        state.apply_move(mov).unwrap();
+        assert!(state.face.is_game_over());
+        let run = replay(&fixture);
+        assert_eq!(run.failure, None);
+        assert_eq!(run.undrawn(), 0);
     }
 
     #[test]
@@ -459,10 +500,10 @@ mod tests {
     #[test]
     fn breaches_name_only_phases_over_budget() {
         let budgets: BTreeMap<String, f64> = PHASES.iter().map(|p| (p.to_string(), 10.0)).collect();
-        let max = [5.0, 10.0, 10.5, 0.0, 200.0, 1.0];
+        let max = [5.0, 10.0, 10.5, 0.0, 200.0];
         let hits = breaches("g", &max, &budgets);
         assert_eq!(hits.len(), 2);
-        assert!(hits[0].starts_with("g: generation 10.50 ms over budget 10.00 ms"));
+        assert!(hits[0].starts_with("g: routing 10.50 ms over budget 10.00 ms"));
         assert!(hits[1].starts_with("g: validation 200.00 ms"));
     }
 
