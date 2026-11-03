@@ -24,15 +24,18 @@ const STROKE_LINK_VERSION = 1;
 // Coordinates travel as tenths of a world unit in a version 1 link.
 const TENTHS = 10;
 // Geometry below is in units of a 1000 board and scales with the board.
-// A stroke point this close to the chord of its neighbours is left out of
-// the link; the tightest clearance is 3 units.
-const LINK_TOLERANCE = 0.25;
-// The fit tolerance of src/curve.rs; a curve from a link is flattened for
-// the engine's refit at a quarter of it.
+// The fit tolerance of src/curve.rs: the engine keeps a curve within it of
+// the stroke, so a curve flattened at it refits inside the error the
+// engine already accepts. A stroke point closer than STROKE_TOLERANCE to
+// the chord of its neighbours is left out of the link.
 const CURVE_TOLERANCE = 1.5;
-const FLATTEN_RATIO = 0.25;
-// Control points travel in half units, which moves a curve by at most 0.36.
-const LINK_QUANTUM = 0.5;
+const STROKE_TOLERANCE = 3;
+// Per move shape in the link; 2 is reserved for the face-model move once
+// the router can draw one.
+const SHAPE_STROKE = 0;
+const SHAPE_CUBICS = 1;
+// Points travel in whole units, which moves one by at most 0.71.
+const LINK_QUANTUM = 1;
 // A link can claim any control point; the subdivision is capped so a
 // hostile one costs at most this many points per cubic.
 const MAX_SUBDIVISIONS = 256;
@@ -235,14 +238,14 @@ function scaleOf(boardSize: number): number {
 
 // Share link layout, little endian: version u8, flags u8 (bit 0 is AI
 // first), initial nodes u16, board size u16, move count u16, cursor u16,
-// then per move: from, to and cubic count as varints, and every point as
-// zigzag varint deltas from the previous point in link quanta, starting at
-// the origin: the first cubic's start, the other three control points of
-// each cubic, then the new node. A move travels as whichever is shorter,
-// its cubics or its thinned stroke; a stroke has count 0, then a point
-// count and the points. A version 1 link has from, to and point count as
-// u16, the first point as two u16 tenths, later points as zigzag varint
-// deltas in tenths, and the new node as two u16 tenths.
+// then per move: from and to as varints, a shape u8, a varint count, the
+// shape's points and the new node, every point as zigzag varint deltas
+// from the previous point in link quanta, starting at the origin. A stroke
+// counts its points; cubics count segments and carry the first start then
+// the other three control points of each. A move travels as whichever is
+// shorter. A version 1 link has from, to and point count as u16, the first
+// point as two u16 tenths, later points as zigzag varint deltas in tenths,
+// and the new node as two u16 tenths.
 export function encodeRecord(history: History): string {
   const out = new ByteWriter();
   out.u8(LINK_VERSION);
@@ -256,10 +259,11 @@ export function encodeRecord(history: History): string {
     out.varint(move.fromNode);
     out.varint(move.toNode);
     const point = deltaWriter(out, LINK_QUANTUM * scale);
-    const stroke = simplify(move.polyline, LINK_TOLERANCE * scale);
+    const stroke = simplify(move.polyline, STROKE_TOLERANCE * scale);
     const segments = move.segments ?? [];
     const first = segments[0];
     if (first && 3 * segments.length + 1 < stroke.length) {
+      out.u8(SHAPE_CUBICS);
       out.varint(segments.length);
       point(first.p0);
       for (const cubic of segments) {
@@ -268,7 +272,7 @@ export function encodeRecord(history: History): string {
         point(cubic.p3);
       }
     } else {
-      out.varint(0);
+      out.u8(SHAPE_STROKE);
       out.varint(stroke.length);
       for (const p of stroke) point(p);
     }
@@ -318,11 +322,12 @@ export function decodeRecord(payload: string): GameRecord | null {
 function readCurveMove(reader: ByteReader, boardSize: number): Move | null {
   const fromNode = reader.varint();
   const toNode = reader.varint();
+  const shape = reader.u8();
   const count = reader.varint();
   const scale = scaleOf(boardSize);
   const point = deltaReader(reader, LINK_QUANTUM * scale);
   let polyline: Point[];
-  if (count > 0) {
+  if (shape === SHAPE_CUBICS) {
     const segments: Cubic[] = [];
     let p0 = point();
     for (let i = 0; i < count; i++) {
@@ -330,12 +335,13 @@ function readCurveMove(reader: ByteReader, boardSize: number): Move | null {
       segments.push(cubic);
       p0 = cubic.p3;
     }
-    polyline = flatten(segments, CURVE_TOLERANCE * FLATTEN_RATIO * scale);
-  } else {
-    const points = reader.varint();
-    if (points < 2) return null;
+    polyline = flatten(segments, CURVE_TOLERANCE * scale);
+  } else if (shape === SHAPE_STROKE) {
+    if (count < 2) return null;
     polyline = [];
-    for (let i = 0; i < points; i++) polyline.push(point());
+    for (let i = 0; i < count; i++) polyline.push(point());
+  } else {
+    return null;
   }
   return { fromNode, toNode, polyline, newNodePos: point() };
 }

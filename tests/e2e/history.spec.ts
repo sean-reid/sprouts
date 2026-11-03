@@ -37,8 +37,8 @@ const current = (page: Page) => page.locator("#moveList [aria-current]");
 
 // Link lengths in characters: one exchange on the 1000 board, and the
 // nine move game, both measured on the desktop project with headroom.
-const EXCHANGE_LINK_BUDGET = 120;
-const NINE_MOVE_LINK_BUDGET = 700;
+const EXCHANGE_LINK_BUDGET = 100;
+const NINE_MOVE_LINK_BUDGET = 450;
 const NINE_MOVES = "fixtures/saved/nine-moves-4n-1000.json";
 // One exchange on the 500 board, shared before links carried cubics.
 const VERSION_1_LINK =
