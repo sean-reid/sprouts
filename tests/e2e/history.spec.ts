@@ -170,13 +170,10 @@ test("a share link reopens the game in review and steps through it", async ({ pa
 });
 
 test("a finished game reopens in review and steps single moves", async ({ page }) => {
-  const played = JSON.parse(
-    await readFile("fixtures/games/selfplay-4n-500.json", "utf8"),
-  ) as Fixture;
-  const record = JSON.stringify({ ...played, firstPlayer: "human", cursor: played.moves.length });
+  const record = await readFile("fixtures/saved/finished-4n-500.json", "utf8");
+  const total = (JSON.parse(record) as Fixture).moves.length;
   await page.addInitScript((saved) => localStorage.setItem("sprouts.game", saved), record);
   await page.goto("/");
-  const total = played.moves.length;
   await expect(page.locator("#status")).toHaveText(`Reviewing: move ${total} of ${total}.`, {
     timeout: 60_000,
   });
