@@ -1,6 +1,7 @@
 //! Replays recorded games natively and times each engine phase per move.
 
 use crate::ai;
+pub use crate::ai::nimber_stats;
 use crate::components::label_components;
 use crate::face::Move as FaceMove;
 use crate::morphology::generate_skeleton;

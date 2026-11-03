@@ -102,6 +102,13 @@ fn run_bench() -> Result<bool, String> {
         }
     }
 
+    let (forms, hits, misses, (lives, nodes)) = replay::nimber_stats();
+    let rate = 100.0 * hits as f64 / (hits + misses).max(1) as f64;
+    println!(
+        "\nnimbers: {forms} forms stored, {hits} hits, {misses} misses ({rate:.1}% hit rate), \
+         largest region solved {nodes} nodes with {lives} lives"
+    );
+
     println!("\nbudgets (ms):");
     for phase in PHASES {
         println!("  {phase:>14} {:>10.2}", budgets[phase]);

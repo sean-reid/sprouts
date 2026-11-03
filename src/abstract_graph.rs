@@ -1,14 +1,19 @@
-//! Time-boxed alpha-beta search over the face model.
+//! Move choice: exact play from region nimbers where every region
+//! solves, else a time-boxed alpha-beta search over the face model that
+//! scores solved positions exactly.
 
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 
-use crate::face::{canonical_form, FaceModel, Move, NodeId};
+use crate::face::{FaceModel, Move, NodeId, Region};
+use crate::nimber::{Nimbers, EXACT_LIVES, NIMBER_BUDGET};
 
 /// Thinking time per move.
 pub const SEARCH_BUDGET_MS: f64 = 800.0;
 /// Searched positions between two reads of the clock.
 pub const CHECK_EVERY: usize = 64;
+/// Score of a position the nimbers settle, from the winner's side.
+const SOLVED: f64 = 10000.0;
 
 /// Milliseconds since the clock started.
 pub trait Clock {
@@ -201,21 +206,26 @@ pub struct Pick {
     pub cut_off: bool,
     /// Positions charged to the budget over the whole search.
     pub spent: usize,
+    /// Chosen from the nimbers of every region, with no search.
+    pub exact: bool,
 }
 
-/// One search: the table, one killer move per ply, and the budget.
+/// One search: the table, one killer move per ply, the budget, and the
+/// solved regions it scores exactly.
 pub struct Search<'a, C: Clock> {
     pub tt: TranspositionTable,
     killers: Vec<Option<Move>>,
     budget: &'a mut Budget<C>,
+    nimbers: &'a mut Nimbers,
 }
 
 impl<'a, C: Clock> Search<'a, C> {
-    pub fn new(budget: &'a mut Budget<C>) -> Self {
+    pub fn new(budget: &'a mut Budget<C>, nimbers: &'a mut Nimbers) -> Self {
         Self {
             tt: TranspositionTable::new(),
             killers: Vec::new(),
             budget,
+            nimbers,
         }
     }
 
@@ -230,13 +240,23 @@ impl<'a, C: Clock> Search<'a, C> {
         mut beta: f64,
         maximizing: bool,
     ) -> f64 {
-        let key = state.hash_key();
+        let regions = state.face.regions();
+        let key = key_of(&regions, state.is_ai_turn);
         if let Some(score) = self.tt.probe(key, depth, alpha, beta) {
             return score;
         }
         self.budget.spend();
         if self.budget.exhausted() {
             return 0.0;
+        }
+        if let Some(lost) = self.nimbers.known_lost(&regions) {
+            let score = if lost == state.is_ai_turn {
+                -SOLVED
+            } else {
+                SOLVED
+            };
+            self.tt.store(key, score, usize::MAX, Bound::Exact, None);
+            return score;
         }
         if depth == 0 || state.face.is_game_over() {
             let score = state.evaluate();
@@ -317,6 +337,52 @@ impl<'a, C: Clock> Search<'a, C> {
     }
 }
 
+/// Index into `candidates` of the move to play from `root`. When no
+/// region of the root has more than `EXACT_LIVES` lives and each
+/// candidate's child settles as won or lost within `NIMBER_BUDGET` child
+/// positions, the pick is exact: a move leaving a lost position, the one
+/// the quick heuristic ranks highest among them, or when none does the
+/// move leaving the opponent the most room by `mobility`. Otherwise the
+/// time-boxed search decides.
+pub fn choose<C: Clock>(
+    mut root: AbstractState,
+    candidates: &[Move],
+    budget: &mut Budget<C>,
+    nimbers: &mut Nimbers,
+) -> Pick {
+    let mut work = NIMBER_BUDGET;
+    let mut children = Vec::with_capacity(candidates.len());
+    let small = root.face.regions().iter().all(|r| r.lives() <= EXACT_LIVES);
+    let solved = small
+        && candidates.iter().all(|mov| {
+            root.apply_move(mov);
+            let lost = nimbers.lost_in(&root.face, &mut work);
+            let room = root.mobility();
+            root.undo_move();
+            children.push((lost.unwrap_or(false), room));
+            lost.is_some()
+        });
+    if !solved || candidates.is_empty() {
+        return best_candidate(root, candidates, budget, nimbers);
+    }
+    let rank = |idx: usize| {
+        let (winning, room) = children[idx];
+        let heuristic = root.quick_move_score(&candidates[idx]);
+        (winning, if winning { 0 } else { room }, heuristic)
+    };
+    let index = (0..candidates.len())
+        .rev()
+        .max_by(|&a, &b| rank(a).partial_cmp(&rank(b)).expect("finite scores"))
+        .expect("a candidate");
+    Pick {
+        index,
+        depth: root.max_depth(),
+        cut_off: false,
+        spent: 0,
+        exact: true,
+    }
+}
+
 /// Index into `candidates` of the move the search prefers from `root`:
 /// iterative deepening as far as the game can last, keeping the pick of
 /// the last depth that finished. Depth 1 always finishes.
@@ -324,9 +390,10 @@ pub fn best_candidate<C: Clock>(
     root: AbstractState,
     candidates: &[Move],
     budget: &mut Budget<C>,
+    nimbers: &mut Nimbers,
 ) -> Pick {
     let max_depth = root.max_depth();
-    best_candidate_to(root, candidates, budget, max_depth)
+    best_candidate_to(root, candidates, budget, nimbers, max_depth)
 }
 
 /// Each iteration tries the candidates in the order the last one ranked
@@ -335,6 +402,7 @@ pub fn best_candidate_to<C: Clock>(
     mut root: AbstractState,
     candidates: &[Move],
     budget: &mut Budget<C>,
+    nimbers: &mut Nimbers,
     max_depth: usize,
 ) -> Pick {
     let mut pick = Pick {
@@ -342,11 +410,12 @@ pub fn best_candidate_to<C: Clock>(
         depth: 0,
         cut_off: false,
         spent: 0,
+        exact: false,
     };
     if candidates.is_empty() {
         return pick;
     }
-    let mut search = Search::new(budget);
+    let mut search = Search::new(budget, nimbers);
     let mut order: Vec<usize> = (0..candidates.len()).collect();
     let mut scores = vec![f64::NEG_INFINITY; candidates.len()];
     for depth in 1..=max_depth {
@@ -388,6 +457,17 @@ pub fn best_candidate_to<C: Clock>(
     pick
 }
 
+/// Two positions with the same regions have the same game and the same
+/// evaluation, whatever dead pieces lie elsewhere.
+fn key_of(regions: &[Region], is_ai_turn: bool) -> u64 {
+    let mut forms: Vec<&[u32]> = regions.iter().map(Region::form).collect();
+    forms.sort_unstable();
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    forms.hash(&mut hasher);
+    is_ai_turn.hash(&mut hasher);
+    hasher.finish()
+}
+
 impl AbstractState {
     pub fn new(face: FaceModel, is_ai_turn: bool) -> Self {
         Self { face, is_ai_turn }
@@ -417,12 +497,10 @@ impl AbstractState {
         self.degrees().map(|d| 3 - i32::from(d)).sum()
     }
 
-    /// Hashes the position up to renaming, and whose turn it is.
+    /// Hashes the position's regions up to renaming, and whose turn it is.
+    #[cfg(test)]
     pub fn hash_key(&self) -> u64 {
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        canonical_form(&self.face).hash(&mut hasher);
-        self.is_ai_turn.hash(&mut hasher);
-        hasher.finish()
+        key_of(&self.face.regions(), self.is_ai_turn)
     }
 
     pub fn quick_move_score(&self, mov: &Move) -> f64 {
@@ -596,7 +674,8 @@ mod tests {
 
     fn search_to(state: &mut AbstractState, depth: usize, maximizing: bool) -> f64 {
         let mut budget = unlimited();
-        let mut search = Search::new(&mut budget);
+        let mut nimbers = Nimbers::new();
+        let mut search = Search::new(&mut budget, &mut nimbers);
         search.minimax(
             state,
             depth,
@@ -880,7 +959,8 @@ mod tests {
         let moves = state.generate_moves();
         assert!(moves.len() >= 3);
         let mut budget = unlimited();
-        let mut search = Search::new(&mut budget);
+        let mut nimbers = Nimbers::new();
+        let mut search = Search::new(&mut budget, &mut nimbers);
         let plain = search.ordered_moves(&state, key, 0);
         let killer = plain[plain.len() - 1].clone();
         let table_move = plain[plain.len() - 2].clone();
@@ -903,7 +983,7 @@ mod tests {
         assert_eq!(root.face.node_count(), 23);
         let candidates = root.generate_moves();
         let limit = 5000;
-        let pick = best_candidate(root, &candidates, &mut nodes(limit));
+        let pick = best_candidate(root, &candidates, &mut nodes(limit), &mut Nimbers::new());
         assert!(pick.cut_off);
         assert!(pick.depth >= 1);
         assert!(pick.spent >= limit, "{pick:?}");
@@ -916,8 +996,14 @@ mod tests {
     fn a_budget_spent_by_depth_one_stops_before_depth_two_starts() {
         let root = after(24, 2);
         let candidates = root.generate_moves();
-        let one = best_candidate_to(root.clone(), &candidates, &mut unlimited(), 1);
-        let pick = best_candidate(root, &candidates, &mut nodes(1));
+        let one = best_candidate_to(
+            root.clone(),
+            &candidates,
+            &mut unlimited(),
+            &mut Nimbers::new(),
+            1,
+        );
+        let pick = best_candidate(root, &candidates, &mut nodes(1), &mut Nimbers::new());
         assert_eq!(pick.depth, 1);
         assert!(pick.cut_off);
         assert_eq!(pick.spent, one.spent);
@@ -928,17 +1014,33 @@ mod tests {
     fn a_cut_off_search_keeps_a_finished_depth_and_repeats_itself() {
         let root = fresh(6);
         let candidates: Vec<Move> = root.face.moves().into_iter().take(12).collect();
-        let first = best_candidate(root.clone(), &candidates, &mut nodes(0));
-        let second = best_candidate(root.clone(), &candidates, &mut nodes(0));
+        let first = best_candidate(
+            root.clone(),
+            &candidates,
+            &mut nodes(0),
+            &mut Nimbers::new(),
+        );
+        let second = best_candidate(
+            root.clone(),
+            &candidates,
+            &mut nodes(0),
+            &mut Nimbers::new(),
+        );
         assert_eq!(first, second);
         assert!(first.cut_off);
         assert!(first.depth >= 1);
-        let same = best_candidate_to(root.clone(), &candidates, &mut unlimited(), first.depth);
+        let same = best_candidate_to(
+            root.clone(),
+            &candidates,
+            &mut unlimited(),
+            &mut Nimbers::new(),
+            first.depth,
+        );
         assert_eq!(first.index, same.index);
 
         let small = fresh(2);
         let all = small.generate_moves();
-        let roomy = best_candidate(small, &all, &mut unlimited());
+        let roomy = best_candidate(small, &all, &mut unlimited(), &mut Nimbers::new());
         assert!(!roomy.cut_off);
         assert!(roomy.depth > 1);
     }
@@ -947,7 +1049,13 @@ mod tests {
     fn the_depth_one_pick_is_the_best_by_evaluation() {
         let root = fresh(6);
         let candidates: Vec<Move> = root.face.moves().into_iter().take(12).collect();
-        let one = best_candidate_to(root.clone(), &candidates, &mut unlimited(), 1);
+        let one = best_candidate_to(
+            root.clone(),
+            &candidates,
+            &mut unlimited(),
+            &mut Nimbers::new(),
+            1,
+        );
         assert_eq!(one.depth, 1);
         let mut by_eval = (f64::NEG_INFINITY, 0);
         let mut probe = root;
@@ -966,12 +1074,29 @@ mod tests {
     fn a_cut_off_search_keeps_the_pick_of_the_depth_it_finished() {
         let root = fresh(5);
         let candidates = root.generate_moves();
-        let two = best_candidate_to(root.clone(), &candidates, &mut unlimited(), 2);
+        let two = best_candidate_to(
+            root.clone(),
+            &candidates,
+            &mut unlimited(),
+            &mut Nimbers::new(),
+            2,
+        );
         assert_eq!(two.depth, 2);
-        let cut = best_candidate(root.clone(), &candidates, &mut nodes(two.spent + 1));
+        let cut = best_candidate(
+            root.clone(),
+            &candidates,
+            &mut nodes(two.spent + 1),
+            &mut Nimbers::new(),
+        );
         assert!(cut.cut_off);
         assert!(cut.depth >= 2);
-        let same = best_candidate_to(root, &candidates, &mut unlimited(), cut.depth);
+        let same = best_candidate_to(
+            root,
+            &candidates,
+            &mut unlimited(),
+            &mut Nimbers::new(),
+            cut.depth,
+        );
         assert_eq!(cut.index, same.index);
     }
 
@@ -979,7 +1104,7 @@ mod tests {
     fn depth_one_finishes_under_any_budget() {
         let root = fresh(6);
         let candidates = root.face.moves();
-        let pick = best_candidate(root, &candidates, &mut nodes(0));
+        let pick = best_candidate(root, &candidates, &mut nodes(0), &mut Nimbers::new());
         assert_eq!(pick.depth, 1);
         assert!(pick.cut_off);
         assert!(pick.spent > 0);
@@ -989,7 +1114,12 @@ mod tests {
     fn a_search_that_reaches_the_end_of_the_game_is_not_cut_off() {
         let root = fresh(2);
         let candidates = root.face.moves();
-        let pick = best_candidate(root.clone(), &candidates, &mut nodes(1 << 20));
+        let pick = best_candidate(
+            root.clone(),
+            &candidates,
+            &mut nodes(1 << 20),
+            &mut Nimbers::new(),
+        );
         assert!(!pick.cut_off);
         assert_eq!(pick.depth, root.max_depth());
     }
@@ -1009,8 +1139,9 @@ mod tests {
     #[test]
     fn an_expired_budget_stops_the_search_before_it_changes_or_stores_anything() {
         let mut budget = Budget::new(Expired, SEARCH_BUDGET_MS);
+        let mut nimbers = Nimbers::new();
         budget.arm(true);
-        Search::new(&mut budget).minimax(
+        Search::new(&mut budget, &mut nimbers).minimax(
             &mut fresh(6),
             6,
             0,
@@ -1023,7 +1154,7 @@ mod tests {
 
         let mut state = fresh(5);
         let before = state.clone();
-        let mut search = Search::new(&mut budget);
+        let mut search = Search::new(&mut budget, &mut nimbers);
         let score = search.minimax(&mut state, 4, 0, f64::NEG_INFINITY, f64::INFINITY, true);
         assert_eq!(score, 0.0);
         assert!(search.tt.table.is_empty());
@@ -1031,7 +1162,12 @@ mod tests {
         assert_eq!(state.is_ai_turn, before.is_ai_turn);
         assert_eq!(budget.spent(), spent + 1);
 
-        let pick = best_candidate(fresh(5), &fresh(5).generate_moves(), &mut budget);
+        let pick = best_candidate(
+            fresh(5),
+            &fresh(5).generate_moves(),
+            &mut budget,
+            &mut nimbers,
+        );
         assert_eq!(pick.depth, 1);
         assert!(pick.cut_off);
     }
@@ -1046,7 +1182,8 @@ mod tests {
         let root = fresh(5);
         let candidates = root.generate_moves();
         let mut budget = unlimited();
-        let mut search = Search::new(&mut budget);
+        let mut nimbers = Nimbers::new();
+        let mut search = Search::new(&mut budget, &mut nimbers);
         let mut probe = root.clone();
         let mut values = Vec::new();
         for mov in &candidates {
@@ -1069,16 +1206,147 @@ mod tests {
             budget.spent()
         );
         let mut boxed = Budget::new(WallClock::start(), SEARCH_BUDGET_MS);
-        let pick = best_candidate(root, &candidates, &mut boxed);
+        let pick = best_candidate(root, &candidates, &mut boxed, &mut Nimbers::new());
         println!(
             "at {SEARCH_BUDGET_MS} ms: opening {} at depth {}, worth {} to the end",
             pick.index, pick.depth, values[pick.index]
         );
     }
 
+    /// Plays `n` nodes out, the AI choosing through `choose` over the
+    /// model's move list and the opponent through `opponent`; whether the
+    /// AI made the last move. Every AI choice must be exact.
+    fn ai_wins(
+        n: usize,
+        ai_first: bool,
+        nimbers: &mut Nimbers,
+        opponent: impl Fn(&AbstractState, &[Move]) -> usize,
+    ) -> bool {
+        let mut state = AbstractState::new(FaceModel::new(n), ai_first);
+        loop {
+            let candidates = state.generate_moves();
+            if candidates.is_empty() {
+                return !state.is_ai_turn;
+            }
+            let index = if state.is_ai_turn {
+                let pick = choose(state.clone(), &candidates, &mut unlimited(), nimbers);
+                assert!(pick.exact, "{n} nodes, {} lives left", state.lives());
+                pick.index
+            } else {
+                opponent(&state, &candidates)
+            };
+            state.apply_move(&candidates[index]);
+        }
+    }
+
+    fn greedy(state: &AbstractState, candidates: &[Move]) -> usize {
+        let mut probe = state.clone();
+        let mut best = (f64::NEG_INFINITY, 0);
+        for (idx, mov) in candidates.iter().enumerate() {
+            probe.apply_move(mov);
+            let score = -probe.evaluate();
+            probe.undo_move();
+            if score > best.0 {
+                best = (score, idx);
+            }
+        }
+        best.1
+    }
+
+    /// The AI in the seat the known result favours, against the first
+    /// listed move, the one-ply evaluation, and itself.
+    fn exact_play_wins(n: usize, ai_first: bool, nimbers: &mut Nimbers) {
+        assert!(ai_wins(n, ai_first, nimbers, |_, _| 0), "{n} first");
+        assert!(ai_wins(n, ai_first, nimbers, greedy), "{n} greedy");
+        let mirror = |state: &AbstractState, candidates: &[Move]| {
+            let mut flipped = state.clone();
+            flipped.is_ai_turn = true;
+            choose(flipped, candidates, &mut unlimited(), &mut Nimbers::new()).index
+        };
+        assert!(ai_wins(n, ai_first, nimbers, mirror), "{n} self");
+    }
+
+    /// The first player wins from 3 and 4 nodes.
+    #[test]
+    fn exact_play_wins_the_three_and_four_node_games_as_first_player() {
+        let mut nimbers = Nimbers::new();
+        exact_play_wins(3, true, &mut nimbers);
+        exact_play_wins(4, true, &mut nimbers);
+    }
+
+    /// The first player wins from 5 nodes and loses from 6. Run with
+    /// `cargo test --release exact_play_wins_the_five -- --ignored`.
+    #[test]
+    #[ignore = "solves five and six nodes, run in release"]
+    fn exact_play_wins_the_five_and_six_node_games_from_the_winning_seat() {
+        let mut nimbers = Nimbers::new();
+        exact_play_wins(5, true, &mut nimbers);
+        exact_play_wins(6, false, &mut nimbers);
+    }
+
+    /// Among winning moves the quick heuristic decides; a losing position
+    /// keeps the move that leaves the opponent the most room.
+    #[test]
+    fn the_exact_pick_prefers_a_winning_move_by_the_heuristic() {
+        let mut nimbers = Nimbers::new();
+        let root = fresh(3);
+        let candidates = root.generate_moves();
+        let pick = choose(root.clone(), &candidates, &mut unlimited(), &mut nimbers);
+        assert!(pick.exact);
+        let mut probe = root.clone();
+        let mut winning = Vec::new();
+        for (idx, mov) in candidates.iter().enumerate() {
+            probe.apply_move(mov);
+            if nimbers.lost_in(&probe.face, &mut 100_000) == Some(true) {
+                winning.push(idx);
+            }
+            probe.undo_move();
+        }
+        assert!(winning.contains(&pick.index));
+        let best = winning
+            .iter()
+            .map(|&idx| root.quick_move_score(&candidates[idx]))
+            .fold(f64::NEG_INFINITY, f64::max);
+        assert_eq!(root.quick_move_score(&candidates[pick.index]), best);
+
+        let lost = fresh(2);
+        let candidates = lost.generate_moves();
+        let pick = choose(lost.clone(), &candidates, &mut unlimited(), &mut nimbers);
+        assert!(pick.exact);
+        let mut probe = lost.clone();
+        let rooms: Vec<usize> = candidates
+            .iter()
+            .map(|mov| {
+                probe.apply_move(mov);
+                let room = probe.mobility();
+                probe.undo_move();
+                room
+            })
+            .collect();
+        assert_eq!(rooms[pick.index], *rooms.iter().max().unwrap());
+    }
+
+    /// With the budget spent the choice is the search's, which still
+    /// scores a position exactly once its regions are in the table.
+    #[test]
+    fn a_solved_table_ends_the_search_at_the_first_solved_position() {
+        let root = fresh(3);
+        let candidates = root.generate_moves();
+        let mut nimbers = Nimbers::new();
+        nimbers.solve_all(&root.face, &mut 100_000).unwrap();
+        let mut budget = unlimited();
+        let pick = best_candidate(root.clone(), &candidates, &mut budget, &mut nimbers);
+        assert!(!pick.exact);
+        assert!(!pick.cut_off);
+        assert!(pick.spent <= candidates.len() * root.max_depth());
+        let mut probe = root;
+        probe.apply_move(&candidates[pick.index]);
+        assert_eq!(nimbers.lost_in(&probe.face, &mut 100_000), Some(true));
+    }
+
     #[test]
     fn no_candidates_give_the_empty_pick() {
-        let pick = best_candidate(fresh(2), &[], &mut unlimited());
+        let pick = best_candidate(fresh(2), &[], &mut unlimited(), &mut Nimbers::new());
         assert_eq!(pick.depth, 0);
         assert_eq!(pick.index, 0);
     }
@@ -1088,7 +1356,13 @@ mod tests {
         for played in [0, 1, 2] {
             let root = after(4, played);
             let candidates = root.generate_moves();
-            let boxed = best_candidate_to(root.clone(), &candidates, &mut unlimited(), 4);
+            let boxed = best_candidate_to(
+                root.clone(),
+                &candidates,
+                &mut unlimited(),
+                &mut Nimbers::new(),
+                4,
+            );
             assert_eq!(boxed.depth, 4);
             assert_eq!(
                 boxed.index,
@@ -1106,7 +1380,7 @@ mod tests {
         for _ in 0..10 {
             let started = std::time::Instant::now();
             let mut budget = Budget::new(WallClock::start(), SEARCH_BUDGET_MS);
-            let pick = best_candidate(root.clone(), &candidates, &mut budget);
+            let pick = best_candidate(root.clone(), &candidates, &mut budget, &mut Nimbers::new());
             let took = started.elapsed().as_secs_f64() * 1000.0;
             println!(
                 "{took:.1} ms, depth {}, {} positions",

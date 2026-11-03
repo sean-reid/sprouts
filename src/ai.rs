@@ -1,6 +1,9 @@
-use crate::abstract_graph::{best_candidate, AbstractState, Budget, WallClock, SEARCH_BUDGET_MS};
+use std::cell::RefCell;
+
+use crate::abstract_graph::{choose, AbstractState, Budget, WallClock, SEARCH_BUDGET_MS};
 use crate::embedding;
 use crate::face::Move as FaceMove;
+use crate::nimber::Nimbers;
 use crate::node_classifier::{classify_nodes, NodeClassification};
 use crate::pathfinding::{
     find_path_on_skeleton, find_path_relaxed, find_path_tight, find_self_loop_on_skeleton,
@@ -161,11 +164,27 @@ pub fn find_best_move(state: &mut GameState) -> Option<Move> {
     candidates.into_iter().nth(best_idx).map(|(mov, _)| mov)
 }
 
-/// Index into `candidates` of the move the search prefers.
+thread_local! {
+    /// Settled regions, kept across turns and games.
+    static NIMBERS: RefCell<Nimbers> = RefCell::new(Nimbers::new());
+}
+
+/// Index into `candidates` of the move to play. A caller that routes
+/// from the model passes `state.face.search_moves()` here instead.
 pub(crate) fn search_best_index(state: &GameState, candidates: &[FaceMove]) -> usize {
     let root = AbstractState::new(state.face.clone(), state.current_player == Player::AI);
     let mut budget = Budget::new(WallClock::start(), SEARCH_BUDGET_MS);
-    best_candidate(root, candidates, &mut budget).index
+    NIMBERS.with(|nimbers| choose(root, candidates, &mut budget, &mut nimbers.borrow_mut()).index)
+}
+
+/// Size of the worker's nimber table, its hit and miss counts, and the
+/// lives and node count of the largest region it settled.
+#[cfg(feature = "bench")]
+pub fn nimber_stats() -> (usize, usize, usize, (usize, usize)) {
+    NIMBERS.with(|nimbers| {
+        let n = nimbers.borrow();
+        (n.len(), n.hits(), n.misses(), n.largest())
+    })
 }
 
 /// Positions charged when deepening to `depth` with no time limit.
@@ -180,7 +199,7 @@ pub(crate) fn nodes_to_depth(state: &GameState, candidates: &[FaceMove], depth: 
     }
     let root = AbstractState::new(state.face.clone(), state.current_player == Player::AI);
     let mut budget = Budget::new(Still, f64::INFINITY);
-    best_candidate_to(root, candidates, &mut budget, depth).spent
+    best_candidate_to(root, candidates, &mut budget, &mut Nimbers::new(), depth).spent
 }
 
 pub fn find_optimal_node_placement(
