@@ -102,6 +102,8 @@ pub struct MoveTiming {
     pub player: Player,
     /// The position after the last move, where no move is validated.
     pub terminal: bool,
+    /// What the face model says of the position.
+    pub game_over: bool,
     pub phases: Phases,
 }
 
@@ -201,7 +203,7 @@ pub fn replay(fixture: &Fixture) -> Replay {
         phases.search = t.elapsed();
 
         let t = Instant::now();
-        black_box(state.face.is_game_over());
+        let game_over = black_box(state.face.is_game_over());
         phases.game_over = t.elapsed();
 
         let recorded = fixture.moves.get(index);
@@ -217,6 +219,7 @@ pub fn replay(fixture: &Fixture) -> Replay {
             index,
             player: state.current_player,
             terminal: recorded.is_none(),
+            game_over,
             phases,
         });
 
@@ -309,6 +312,41 @@ mod tests {
         let run = replay(&fixture);
         assert_eq!(run.failure, None);
         assert!(run.timings[2].terminal);
+    }
+
+    /// The board after every recorded move, each checked as the page would.
+    fn play(fixture: &Fixture) -> GameState {
+        let mut state = GameState::with_board_size(fixture.initial_nodes, fixture.board_size);
+        for (index, recorded) in fixture.moves.iter().enumerate() {
+            let mov = recorded.to_move(state.current_player, state.board_size);
+            if let Err(e) = validate_for(&state, &mov) {
+                panic!("move {index} rejected: {}", e.message);
+            }
+            state.apply_move(mov).unwrap();
+        }
+        state
+    }
+
+    /// Recorded on the live site on 2026-11-03, where the page declared the
+    /// human the winner with nodes 8 and 12 still joinable.
+    #[test]
+    fn a_false_game_over_from_the_site_is_still_live() {
+        let fixture = load(&fixtures_dir().join("false-game-over-4n-1000.json")).unwrap();
+        assert_eq!(fixture.moves.len(), 9);
+        let run = replay(&fixture);
+        assert_eq!(run.failure, None);
+        let last = run.timings.last().unwrap();
+        assert!(last.terminal);
+        assert!(!last.game_over);
+        assert!(!run.timings[0].game_over);
+
+        let state = play(&fixture);
+        assert_eq!(state.face.degree(8), 2);
+        assert_eq!(state.face.degree(12), 2);
+        let moves = state.face.moves();
+        assert_eq!(moves.len(), 1);
+        assert_eq!((moves[0].a, moves[0].b), (8, 12));
+        assert!(moves[0].enclosed.is_empty());
     }
 
     #[test]
