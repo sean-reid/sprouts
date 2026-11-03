@@ -3,6 +3,7 @@ import type { Move, Outcome, Snapshot } from "../pkg/sprouts";
 import { Engine, StaleRequest } from "./engine";
 import { attachInput, type PointerKind } from "./input";
 import { healPath } from "./path";
+import { wireRecording } from "./record";
 import { draw } from "./render";
 import {
   freshBoard,
@@ -442,5 +443,6 @@ function frame(): void {
 view.onChange(invalidate);
 trackCanvasSize(canvas, view, invalidate);
 wireInput();
+wireRecording(state, BOARD_SIZE);
 requestAnimationFrame(frame);
 void newGame(DEFAULT_NODES);

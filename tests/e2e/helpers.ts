@@ -186,10 +186,18 @@ export function shot(page: Page, name: string) {
   });
 }
 
-export async function openBoard(page: Page): Promise<void> {
-  await page.goto("/");
+export async function openBoard(page: Page, path = "/"): Promise<void> {
+  await page.goto(path);
   // Fetching the wasm and building the 1000 grid takes a few seconds on a shared runner.
   await expect(page.locator("#status")).toHaveText("Draw a line between two nodes", {
     timeout: 20_000,
   });
+}
+
+// One human move and the AI's reply, with the mouse.
+export async function playExchange(page: Page): Promise<void> {
+  const mid = await drawBetween(page, 0, 1);
+  await page.waitForTimeout(350);
+  await page.mouse.click(mid.x, mid.y);
+  await expect(page.locator("#status")).toHaveText("Your turn!", { timeout: 60_000 });
 }
