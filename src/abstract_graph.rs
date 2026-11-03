@@ -13,6 +13,9 @@ pub const CHECK_EVERY: usize = 64;
 /// Milliseconds since the clock started.
 pub trait Clock {
     fn elapsed_ms(&mut self) -> f64;
+
+    /// Called once per searched position, for a clock that counts them.
+    fn tick(&mut self) {}
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -157,6 +160,7 @@ impl<C: Clock> Budget<C> {
     /// runs out.
     fn spend(&mut self) {
         self.spent += 1;
+        self.clock.tick();
         if !self.over && self.spent.is_multiple_of(CHECK_EVERY) {
             self.check();
         }
@@ -167,11 +171,14 @@ impl<C: Clock> Budget<C> {
         self.over = self.armed && late;
     }
 
-    /// Only an armed budget runs out; disarming also clears a cut, so the
-    /// depth-1 pass of a later search always finishes.
+    /// Only an armed budget runs out. Arming reads the clock at once, so
+    /// time the depth-1 pass already used up is noticed before the next
+    /// position; disarming clears a cut, so that pass always finishes.
     pub fn arm(&mut self, armed: bool) {
         self.armed = armed;
-        if !armed {
+        if armed {
+            self.check();
+        } else {
             self.over = false;
         }
     }
@@ -344,6 +351,10 @@ pub fn best_candidate_to<C: Clock>(
     let mut scores = vec![f64::NEG_INFINITY; candidates.len()];
     for depth in 1..=max_depth {
         search.budget.arm(depth > 1);
+        if search.budget.exhausted() {
+            pick.cut_off = true;
+            break;
+        }
         let mut best = (f64::NEG_INFINITY, usize::MAX);
         for &idx in &order {
             root.apply_move(&candidates[idx]);
@@ -527,15 +538,18 @@ mod tests {
         }
     }
 
-    /// One millisecond per searched position, read on the check cadence.
+    /// One millisecond per searched position.
     struct NodeClock {
-        reads: usize,
+        positions: usize,
     }
 
     impl Clock for NodeClock {
         fn elapsed_ms(&mut self) -> f64 {
-            self.reads += 1;
-            (self.reads * CHECK_EVERY) as f64
+            self.positions as f64
+        }
+
+        fn tick(&mut self) {
+            self.positions += 1;
         }
     }
 
@@ -544,7 +558,7 @@ mod tests {
     }
 
     fn nodes(limit: usize) -> Budget<NodeClock> {
-        Budget::new(NodeClock { reads: 0 }, limit as f64)
+        Budget::new(NodeClock { positions: 0 }, limit as f64)
     }
 
     fn fresh(n: usize) -> AbstractState {
@@ -893,7 +907,21 @@ mod tests {
         assert!(pick.cut_off);
         assert!(pick.depth >= 1);
         assert!(pick.spent >= limit, "{pick:?}");
-        assert!(pick.spent <= limit + CHECK_EVERY, "{pick:?}");
+        assert!(pick.spent < limit + CHECK_EVERY, "{pick:?}");
+    }
+
+    /// A depth-1 pass that alone outruns the budget is noticed as depth 2
+    /// is armed, before it lists a position.
+    #[test]
+    fn a_budget_spent_by_depth_one_stops_before_depth_two_starts() {
+        let root = after(24, 2);
+        let candidates = root.generate_moves();
+        let one = best_candidate_to(root.clone(), &candidates, &mut unlimited(), 1);
+        let pick = best_candidate(root, &candidates, &mut nodes(1));
+        assert_eq!(pick.depth, 1);
+        assert!(pick.cut_off);
+        assert_eq!(pick.spent, one.spent);
+        assert_eq!(pick.index, one.index);
     }
 
     #[test]
@@ -947,17 +975,14 @@ mod tests {
         assert_eq!(cut.index, same.index);
     }
 
-    /// Depth 2 from here lists far more than one check interval of
-    /// positions, so a budget that is over at the first read still leaves
-    /// the depth-1 pick.
     #[test]
     fn depth_one_finishes_under_any_budget() {
-        let root = after(24, 2);
-        let candidates = root.generate_moves();
+        let root = fresh(6);
+        let candidates = root.face.moves();
         let pick = best_candidate(root, &candidates, &mut nodes(0));
         assert_eq!(pick.depth, 1);
         assert!(pick.cut_off);
-        assert!(pick.spent >= candidates.len());
+        assert!(pick.spent > 0);
     }
 
     #[test]
@@ -1007,8 +1032,48 @@ mod tests {
         assert_eq!(budget.spent(), spent + 1);
 
         let pick = best_candidate(fresh(5), &fresh(5).generate_moves(), &mut budget);
-        assert!(pick.depth >= 1);
+        assert_eq!(pick.depth, 1);
         assert!(pick.cut_off);
+    }
+
+    /// Prints what the search makes of the 5-node openings: each one's
+    /// value searched to the end of the game, and the pick at the shipped
+    /// budget. Run with `cargo test --release opening_values -- --ignored
+    /// --nocapture`; about a minute.
+    #[test]
+    #[ignore = "about a minute in release"]
+    fn five_node_opening_values() {
+        let root = fresh(5);
+        let candidates = root.generate_moves();
+        let mut budget = unlimited();
+        let mut search = Search::new(&mut budget);
+        let mut probe = root.clone();
+        let mut values = Vec::new();
+        for mov in &candidates {
+            probe.apply_move(mov);
+            let depth = probe.max_depth();
+            let value = search.minimax(
+                &mut probe,
+                depth,
+                1,
+                f64::NEG_INFINITY,
+                f64::INFINITY,
+                false,
+            );
+            probe.undo_move();
+            values.push(value);
+        }
+        println!("openings {candidates:?}");
+        println!(
+            "values to the end of the game {values:?}, {} positions",
+            budget.spent()
+        );
+        let mut boxed = Budget::new(WallClock::start(), SEARCH_BUDGET_MS);
+        let pick = best_candidate(root, &candidates, &mut boxed);
+        println!(
+            "at {SEARCH_BUDGET_MS} ms: opening {} at depth {}, worth {} to the end",
+            pick.index, pick.depth, values[pick.index]
+        );
     }
 
     #[test]
