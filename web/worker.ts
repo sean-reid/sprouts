@@ -23,6 +23,7 @@ async function handle(request: Request): Promise<Results[Request["type"]]> {
       wasmLoaded ??= init({ module_or_path: wasmUrl });
       await wasmLoaded;
       game?.free();
+      game = null;
       game = SproutsGame.new_with_board_size(request.nodeCount, request.boardSize);
       return null;
     case "get_state":
