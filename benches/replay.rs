@@ -143,6 +143,28 @@ fn run_bench() -> Result<bool, String> {
          largest region solved {nodes} nodes with {lives} lives"
     );
 
+    let mut settle_paths: Vec<PathBuf> = std::fs::read_dir(fixtures_dir().join("settle"))
+        .map_err(|e| format!("fixtures/settle: {e}"))?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|p| p.extension().is_some_and(|e| e == "json"))
+        .collect();
+    settle_paths.sort();
+    for path in &settle_paths {
+        let name = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("fixture");
+        let fixture = replay::load(path)?;
+        let times = replay::settle_times(&fixture);
+        let peak = times.iter().copied().fold(0.0, f64::max);
+        println!(
+            "\nsettle only, {name}: {} nodes, {} moves, peak {peak:.2} ms",
+            fixture.initial_nodes,
+            times.len()
+        );
+    }
+
     for settled in [false, true] {
         let (moves, stop) = replay::self_play(SELF_PLAY_NODES, 1000, settled);
         println!(

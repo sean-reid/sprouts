@@ -360,6 +360,24 @@ pub fn nodes_per_depth(fixture: &Fixture, max_depth: usize) -> Vec<usize> {
     totals
 }
 
+/// Applies and settles each recorded move without the AI's phases and
+/// returns the settle time per move in milliseconds, for games too large
+/// for the full replay.
+pub fn settle_times(fixture: &Fixture) -> Vec<f64> {
+    let mut state = fixture.start();
+    let mut times = Vec::with_capacity(fixture.moves.len());
+    for recorded in &fixture.moves {
+        let mov = recorded.to_move(state.current_player, state.board_size);
+        if state.apply_move(mov).is_err() {
+            break;
+        }
+        let t = Instant::now();
+        settle::settle(&mut state);
+        times.push(ms(t.elapsed()));
+    }
+    times
+}
+
 /// Why a self-play game stopped.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Stop {
