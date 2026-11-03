@@ -2,6 +2,8 @@ import { readFileSync } from "node:fs";
 import { basename } from "node:path";
 import { expect, test } from "@playwright/test";
 import type { Fixture } from "../../web/record";
+import { PLAYER_COLORS } from "../../web/render";
+import { recordNodesOnScreen, ringSamplesAround } from "./helpers";
 
 // A recorded game must survive a share: the engine refits each move from
 // the link's thinned geometry, and a move it then rejects stops the
@@ -44,6 +46,16 @@ for (const file of fixtures) {
       { timeout: 240_000 },
     );
     await expect(entries(other)).toHaveCount(total);
+
+    // The visitor lands on the last move, which the board points out.
+    const last = fixture.moves[total - 1]!;
+    const nodes = await recordNodesOnScreen(other, fixture);
+    const colour = PLAYER_COLORS[(total - 1) % 2 === 0 ? "human" : "ai"];
+    for (const id of [last.from, last.to]) {
+      await expect
+        .poll(() => ringSamplesAround(other, nodes[id]!, 14, colour))
+        .toBeGreaterThanOrEqual(8);
+    }
     await visitor.close();
   });
 }

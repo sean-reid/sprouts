@@ -539,3 +539,100 @@ export async function inkPixels(page: Page): Promise<number> {
     return ink;
   });
 }
+
+// Counts samples on a ring `radius` px out from a client point that are
+// within tolerance of a colour, out of twelve.
+export async function ringSamplesAround(
+  page: Page,
+  at: Client,
+  radius: number,
+  hex: string,
+): Promise<number> {
+  await nextFrame(page);
+  return page.evaluate(
+    ({ x, y, radius, hex }) => {
+      const canvas = document.getElementById("canvas") as HTMLCanvasElement;
+      const ctx = canvas.getContext("2d");
+      if (!ctx) return 0;
+      const rect = canvas.getBoundingClientRect();
+      const dpr = canvas.width / rect.width;
+      const want = [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16));
+      let hits = 0;
+      for (let k = 0; k < 12; k++) {
+        const angle = (Math.PI * 2 * k) / 12;
+        const px = Math.round((x - rect.left + radius * Math.cos(angle)) * dpr);
+        const py = Math.round((y - rect.top + radius * Math.sin(angle)) * dpr);
+        const [r, g, b] = ctx.getImageData(px, py, 1, 1).data;
+        if (Math.hypot(r! - want[0]!, g! - want[1]!, b! - want[2]!) < 40) hits++;
+      }
+      return hits;
+    },
+    { x: at.x, y: at.y, radius, hex },
+  );
+}
+
+// Counts pixels within `half` CSS px of a client point that are within
+// tolerance of a colour.
+export async function colourPixelsNear(
+  page: Page,
+  at: Client,
+  half: number,
+  hex: string,
+): Promise<number> {
+  await nextFrame(page);
+  return page.evaluate(
+    ({ x, y, half, hex }) => {
+      const canvas = document.getElementById("canvas") as HTMLCanvasElement;
+      const ctx = canvas.getContext("2d");
+      if (!ctx) return 0;
+      const rect = canvas.getBoundingClientRect();
+      const dpr = canvas.width / rect.width;
+      const want = [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16));
+      const size = Math.round(2 * half * dpr);
+      const left = Math.round((x - rect.left - half) * dpr);
+      const top = Math.round((y - rect.top - half) * dpr);
+      const { data } = ctx.getImageData(left, top, size, size);
+      let hits = 0;
+      for (let i = 0; i < data.length; i += 4) {
+        const [r, g, b] = [data[i] ?? 0, data[i + 1] ?? 0, data[i + 2] ?? 0];
+        if (Math.hypot(r - want[0]!, g - want[1]!, b - want[2]!) < 40) hits++;
+      }
+      return hits;
+    },
+    { x: at.x, y: at.y, half, hex },
+  );
+}
+
+export interface NodeRecord {
+  boardSize: number;
+  nodes?: [number, number][];
+  moves: { newNode: [number, number] }[];
+}
+
+// Every node of a record on screen at the fitted view, by id: the starting
+// ones from the layout, then one per move where it put its node.
+export async function recordNodesOnScreen(page: Page, record: NodeRecord): Promise<Client[]> {
+  const frame = await frameOf(page);
+  const scale = Math.min(frame.width, frame.height) / record.boardSize;
+  const world = [...(record.nodes ?? []), ...record.moves.map((m) => m.newNode)];
+  return world.map(([x, y]) => ({
+    x: frame.left + (frame.width - record.boardSize * scale) / 2 + x * scale,
+    y: frame.top + (frame.height - record.boardSize * scale) / 2 + y * scale,
+  }));
+}
+
+export function savedRecord(page: Page): Promise<NodeRecord> {
+  return page.evaluate(() => JSON.parse(localStorage.getItem("sprouts.game") ?? "null"));
+}
+
+// The ids a move row names in its title: from, to and the node it created.
+export async function rowIds(page: Page, index: number): Promise<[number, number, number]> {
+  const title = await page
+    .locator("#moveList li")
+    .nth(index)
+    .locator("button")
+    .getAttribute("title");
+  const ids = (title ?? "").match(/\d+/g)?.map(Number) ?? [];
+  if (ids.length !== 3) throw new Error(`row ${index} title "${title}" names no move`);
+  return ids as [number, number, number];
+}

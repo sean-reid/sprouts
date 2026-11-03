@@ -1,6 +1,7 @@
 import type { Cubic, Line, Move, Player, Point } from "../pkg/sprouts";
 import { circleLayout, openingLayout, sameLayout, type Position } from "./layout";
 import type { Fixture, FixtureMove } from "./record";
+import { enclosedCount, shapeText } from "./shape";
 
 // A replay fixture plus the fields a resumed session needs, so a saved
 // game loads in the bench unchanged.
@@ -112,11 +113,42 @@ export class History {
     });
   }
 
+  // The id of the node move number index + 1 created.
+  newNodeOf(index: number): number {
+    return this.initialNodes + index;
+  }
+
+  // Where a node sits: a starting one from the layout, a later one where
+  // its move put it. Unknown until the engine has laid the board out.
+  positionOf(id: number): Point | null {
+    if (id < this.initialNodes) {
+      const start = this.nodes?.[id];
+      return start ? { x: start[0], y: start[1] } : null;
+    }
+    return this.moves[id - this.initialNodes]?.newNodePos ?? null;
+  }
+
   label(index: number): string {
     const move = this.moves[index];
     if (!move) return "";
     const who = this.moverOf(index) === "human" ? "You" : "AI";
-    return `${index + 1}. ${who} ${move.fromNode} to ${move.toNode}`;
+    const loop = move.fromNode === move.toNode;
+    let enclosed = 0;
+    if (loop && this.nodes) {
+      const before = Array.from({ length: this.newNodeOf(index) }, (_, id) => id)
+        .filter((id) => id !== move.fromNode)
+        .map((id) => this.positionOf(id))
+        .filter((p): p is Point => p !== null);
+      enclosed = enclosedCount(move.polyline, before);
+    }
+    return `${index + 1}. ${who}, ${shapeText(loop, enclosed)}`;
+  }
+
+  // The node ids of a move, for the row's title.
+  ids(index: number): string {
+    const move = this.moves[index];
+    if (!move) return "";
+    return `${move.fromNode} to ${move.toNode}, new node ${this.newNodeOf(index)}`;
   }
 
   record(): GameRecord {

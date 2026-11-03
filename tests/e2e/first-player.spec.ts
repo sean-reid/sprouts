@@ -41,7 +41,7 @@ test("the first-player toggle restarts an empty board and waits on one in play",
   await expect(page.locator("#status")).toHaveText("AI is thinking", { timeout: 20_000 });
   await expect(page.locator("#status")).toHaveText("Your turn!", { timeout: 60_000 });
   await expect(page.locator("#turnText")).toHaveText("Your turn");
-  await expect(page.locator("#moveList li")).toHaveText([/^1\. AI \d+ to \d+$/]);
+  await expect(page.locator("#moveList li")).toHaveText([/^1\. AI, /]);
   await expect.poll(() => inkPixels(page)).toBeGreaterThan(empty);
 
   const opened = await strokeCells(page);
@@ -76,5 +76,5 @@ test("the first-player toggle restarts an empty board and waits on one in play",
   await startGame(page, 4);
   await expect(page.locator("#status")).toHaveText("AI is thinking", { timeout: 20_000 });
   await expect(page.locator("#status")).toHaveText("Your turn!", { timeout: 60_000 });
-  await expect(page.locator("#moveList li")).toHaveText([/^1\. AI \d+ to \d+$/]);
+  await expect(page.locator("#moveList li")).toHaveText([/^1\. AI, /]);
 });

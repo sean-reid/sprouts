@@ -10,6 +10,7 @@ const FLASH_COLOR = "#EF4444";
 const FLASH_WIDTH = 6;
 const FLASH_MIN_LENGTH = 24;
 const FLASH_RING_RADIUS = NODE_RADIUS + 6;
+const ID_OFFSET = NODE_RADIUS + 10;
 
 export type Project = (world: Point) => Point;
 
@@ -132,10 +133,63 @@ function strokeSegments(
   ctx.stroke();
 }
 
+// Strokes the move's line again, wider, rings its two end nodes and labels
+// the three nodes it touched with their ids. Ids sit on the side of the
+// disc facing the board centre so they stay inside the canvas edge.
+function drawHighlight(
+  ctx: CanvasRenderingContext2D,
+  state: GameState,
+  index: number,
+  project: Project,
+  centre: Point,
+): void {
+  const line = state.lines[index];
+  if (!line) return;
+  const colour = PLAYER_COLORS[line.player];
+  const created = state.nodes.length - state.lines.length + index;
+  const nodeAt = (id: number): Point | undefined =>
+    state.nodes.find((node) => node.id === id)?.position;
+  ctx.save();
+  ctx.strokeStyle = colour;
+  ctx.fillStyle = colour;
+  ctx.lineCap = "round";
+  ctx.lineJoin = "round";
+  ctx.lineWidth = LINE_WIDTH + 2;
+  strokeSegments(ctx, line.segments, project);
+  ctx.lineWidth = LINE_WIDTH;
+  for (const id of new Set([line.fromNode, line.toNode])) {
+    const world = nodeAt(id);
+    if (!world) continue;
+    const at = project(world);
+    ctx.beginPath();
+    ctx.arc(at.x, at.y, FLASH_RING_RADIUS, 0, Math.PI * 2);
+    ctx.stroke();
+  }
+  const origin = project(centre);
+  for (const id of new Set([line.fromNode, line.toNode, created])) {
+    const world = nodeAt(id);
+    if (!world) continue;
+    const at = project(world);
+    const dx = origin.x - at.x;
+    const dy = origin.y - at.y;
+    const span = Math.hypot(dx, dy) || 1;
+    const x = at.x + (dx / span) * ID_OFFSET;
+    const y = at.y + (dy / span) * ID_OFFSET;
+    ctx.fillText(String(id), x, y + 0.5);
+  }
+  ctx.restore();
+}
+
 export const BOARD_BACKGROUND = "#1A1A1A";
 
-// Points are mapped to screen before stroking so widths stay constant under zoom.
-export function drawBoard(ctx: CanvasRenderingContext2D, state: GameState, project: Project): void {
+// Points are mapped to screen before stroking so widths stay constant under
+// zoom. `centre` is the board centre in world units.
+export function drawBoard(
+  ctx: CanvasRenderingContext2D,
+  state: GameState,
+  project: Project,
+  centre: Point,
+): void {
   const screen = (points: Point[]): Point[] => points.map(project);
 
   ctx.lineWidth = LINE_WIDTH;
@@ -180,6 +234,10 @@ export function drawBoard(ctx: CanvasRenderingContext2D, state: GameState, proje
     ctx.fillText(String(remaining), at.x, at.y + 0.5);
   }
 
+  if (state.highlightedMove !== null) {
+    drawHighlight(ctx, state, state.highlightedMove, project, centre);
+  }
+
   if (state.mode === "animating_ai" && state.animatingLine) {
     ctx.strokeStyle = PLAYER_COLORS.ai;
     ctx.lineWidth = LINE_WIDTH;
@@ -199,6 +257,10 @@ export function draw(ctx: CanvasRenderingContext2D, state: GameState, view: View
   setCssPixelTransform(ctx, view);
   ctx.fillStyle = BOARD_BACKGROUND;
   ctx.fillRect(0, 0, view.width, view.height);
-  drawBoard(ctx, state, (p) => view.toScreen(p));
+  drawBoard(ctx, state, (p) => view.toScreen(p), boardCentre(view));
   drawRing(ctx, state, view);
+}
+
+export function boardCentre(view: View): Point {
+  return { x: view.boardSize / 2, y: view.boardSize / 2 };
 }

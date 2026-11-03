@@ -97,7 +97,7 @@ test("a reload restores the game and New Game clears it", async ({ page }) => {
   await openBoard(page);
   await expect(page.locator("#history")).toBeHidden();
   await playDetourExchange(page);
-  await expect(entries(page)).toHaveText(["1. You 0 to 1", /^2\. AI \d+ to \d+$/]);
+  await expect(entries(page)).toHaveText(["1. You, joins two nodes", /^2\. AI, /]);
   await expect(current(page)).toHaveText(/^2\. AI/);
 
   const saved = await page.evaluate(() => localStorage.getItem("sprouts.game"));
@@ -133,7 +133,7 @@ test("jumping to a board where the AI is to move enters review and keeps the tai
   await entries(page).nth(0).locator("button").click();
   await expect(page.locator("#status")).toHaveText("Reviewing: move 1 of 2.");
   await expect(entries(page)).toHaveCount(2);
-  await expect(current(page)).toHaveText("1. You 0 to 1");
+  await expect(current(page)).toHaveText("1. You, joins two nodes");
 
   await page.locator("#forwardBtn").click();
   await expect(page.locator("#status")).toHaveText("Your turn!");
@@ -180,7 +180,7 @@ test("a share link reopens the game in review and steps through it", async ({ pa
   expectSameStrokes(before, await strokeCells(other));
 
   await other.locator("#backBtn").click();
-  await expect(current(other)).toHaveText("1. You 0 to 1");
+  await expect(current(other)).toHaveText("1. You, joins two nodes");
   await expect(other.locator("#forwardBtn")).toBeEnabled();
   await other.locator("#backBtn").click();
   await expect(other.locator("#backBtn")).toBeDisabled();
@@ -189,7 +189,7 @@ test("a share link reopens the game in review and steps through it", async ({ pa
   await shot(other, "history-review-start");
 
   await other.keyboard.press("ArrowRight");
-  await expect(current(other)).toHaveText("1. You 0 to 1");
+  await expect(current(other)).toHaveText("1. You, joins two nodes");
   await entries(other).nth(1).locator("button").click();
   await expect(current(other)).toHaveText(/^2\. AI/);
   await expect(other.locator("#forwardBtn")).toBeDisabled();
@@ -282,7 +282,7 @@ test("a version 1 link of the saved game reopens the live game", async ({ page }
   await page.goto("/" + VERSION_1_LINK);
   await expect(page.locator("#status")).toHaveText("Your turn!", { timeout: 20_000 });
   expect(page.url()).not.toContain("#");
-  await expect(entries(page)).toHaveText(["1. You 0 to 1", "2. AI 2 to 0"]);
+  await expect(entries(page)).toHaveText(["1. You, joins two nodes", "2. AI, joins two nodes"]);
   await expect(page.locator("#undoBtn")).toBeEnabled();
 });
 
@@ -291,7 +291,7 @@ test("a version 2 link opens on the circle with both moves replayed", async ({ p
   await expect(page.locator("#status")).toHaveText(/^Reviewing: move 2 of 2/, {
     timeout: 20_000,
   });
-  await expect(entries(page)).toHaveText(["1. You 0 to 1", "2. AI 2 to 0"]);
+  await expect(entries(page)).toHaveText(["1. You, joins two nodes", "2. AI, joins two nodes"]);
   const record = JSON.parse(await readFile("fixtures/saved/first-exchange.json", "utf8")) as {
     boardSize: number;
     nodes: [number, number][];
@@ -309,7 +309,7 @@ test("a saved game without positions restores onto the circle", async ({ page })
   await page.addInitScript((s) => localStorage.setItem("sprouts.game", s), JSON.stringify(saved));
   await page.goto("/");
   await expect(page.locator("#status")).toHaveText("Your turn!", { timeout: 20_000 });
-  await expect(entries(page)).toHaveText(["1. You 0 to 1", "2. AI 2 to 0"]);
+  await expect(entries(page)).toHaveText(["1. You, joins two nodes", "2. AI, joins two nodes"]);
   await expect(page.locator("#undoBtn")).toBeEnabled();
 });
 
@@ -318,8 +318,9 @@ test("a version 1 link opens in review with its moves", async ({ page }) => {
   await expect(page.locator("#status")).toHaveText(/^Reviewing: move 2 of 2/, {
     timeout: 20_000,
   });
-  await expect(entries(page)).toHaveText(["1. You 0 to 1", "2. AI 2 to 0"]);
-  await expect(current(page)).toHaveText("2. AI 2 to 0");
+  await expect(entries(page)).toHaveText(["1. You, joins two nodes", "2. AI, joins two nodes"]);
+  await expect(current(page)).toHaveText("2. AI, joins two nodes");
+  await expect(current(page)).toHaveAttribute("title", "2 to 0, new node 5");
   await expect(page.locator("#forwardBtn")).toBeDisabled();
   await shot(page, "history-version-1-link");
 });
@@ -358,18 +359,18 @@ test("a game the AI started restores with the AI as first player", async ({ page
   await page.locator("button[data-first='ai']").click();
   await startGame(page, 4);
   await expect(page.locator("#status")).toHaveText("Your turn!", { timeout: 60_000 });
-  await expect(entries(page)).toHaveText([/^1\. AI \d+ to \d+$/]);
+  await expect(entries(page)).toHaveText([/^1\. AI, /]);
 
   await page.reload();
   await expect(page.locator("#status")).toHaveText("Your turn!");
-  await expect(entries(page)).toHaveText([/^1\. AI \d+ to \d+$/]);
+  await expect(entries(page)).toHaveText([/^1\. AI, /]);
   await expect(page.locator("button[data-first='ai']")).toHaveAttribute("aria-pressed", "true");
   await expect(page.locator("#turn")).toHaveAttribute("data-player", "human");
   await expect(page.locator("#undoBtn")).toBeEnabled();
 
   await page.locator("#undoBtn").click();
   await expect(page.locator("#status")).toHaveText("Your turn!", { timeout: 60_000 });
-  await expect(entries(page)).toHaveText([/^1\. AI \d+ to \d+$/]);
+  await expect(entries(page)).toHaveText([/^1\. AI, /]);
 });
 
 test("the move list buttons meet the touch target size", async ({ page }) => {
