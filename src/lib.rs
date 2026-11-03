@@ -6,6 +6,7 @@ mod embedding;
 pub mod face;
 mod geometry;
 mod morphology;
+mod nimber;
 mod node_classifier;
 mod pathfinding;
 mod protocol;

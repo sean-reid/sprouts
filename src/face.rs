@@ -468,9 +468,13 @@ impl FaceModel {
 }
 
 mod canonical;
+mod live;
 mod moves;
+mod region;
 
 pub use canonical::canonical_form;
+pub use live::{live_form, parts};
+pub use region::Region;
 
 #[cfg(test)]
 mod tests;

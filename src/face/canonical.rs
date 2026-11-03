@@ -20,7 +20,7 @@ const ISOLATED: u32 = 2;
 type Piece = usize;
 
 /// Which piece each node belongs to, pieces numbered from zero.
-fn pieces(m: &FaceModel) -> (Vec<Piece>, usize) {
+pub(super) fn pieces(m: &FaceModel) -> (Vec<Piece>, usize) {
     let n = m.nodes.len();
     let mut parent: Vec<usize> = (0..n).collect();
     fn find(parent: &mut [usize], mut v: usize) -> usize {
