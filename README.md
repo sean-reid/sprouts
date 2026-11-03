@@ -10,7 +10,7 @@ Sprouts is a pen-and-paper game where players draw lines between nodes. Each lin
 
 - HTML5 Canvas with touch/mouse support
 - AI using Zhang-Suen thinning + A* pathfinding on morphological skeleton
-- Minimax search (2 ply) with alpha-beta pruning
+- Time-boxed alpha-beta search over an exact planar model of the position
 - Dynamic clearance and adaptive border margins for tight endgames
 - Rust/WASM core, Web Worker for async AI
 
@@ -38,7 +38,7 @@ Web Worker (game state)
 Rust/WASM (logic, AI, validation)
 ```
 
-**Modules:** `curve.rs` (spline fit, flatten, nearest point), `morphology.rs` (skeleton), `pathfinding.rs` (A*), `ai.rs` (minimax), `validation.rs` (collision), `node_classifier.rs` (reachability), `components.rs` (union-find), `geometry.rs` (segment and polyline helpers)
+**Modules:** `curve.rs` (spline fit, flatten, nearest point), `morphology.rs` (skeleton), `pathfinding.rs` (A*), `abstract_graph.rs` (time-boxed search), `ai.rs` (candidate moves), `validation.rs` (collision), `node_classifier.rs` (reachability), `components.rs` (union-find), `geometry.rs` (segment and polyline helpers)
 
 ## How to Play
 

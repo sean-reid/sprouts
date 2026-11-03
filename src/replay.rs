@@ -7,7 +7,7 @@ use crate::morphology::generate_skeleton;
 use crate::node_classifier::classify_nodes;
 use crate::protocol;
 pub use crate::types::Player;
-use crate::types::{GameState, Move, Point};
+use crate::types::{opening_layout, GameState, Move, Point};
 use crate::validation::Rejection;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -23,7 +23,26 @@ pub struct Fixture {
     pub version: u32,
     pub initial_nodes: usize,
     pub board_size: usize,
+    /// Where the starting nodes were; the default layout when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nodes: Option<Vec<[f64; 2]>>,
     pub moves: Vec<FixtureMove>,
+}
+
+impl Fixture {
+    /// The board before the first move; `parse` has checked the positions
+    /// match the count.
+    pub fn start(&self) -> GameState {
+        protocol::start(
+            self.initial_nodes,
+            self.board_size,
+            Player::Human,
+            self.nodes
+                .as_ref()
+                .map(|nodes| nodes.iter().map(|p| Point::new(p[0], p[1])).collect()),
+        )
+        .expect("a parsed fixture's positions match its count")
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -148,6 +167,15 @@ pub fn parse(json: &str) -> Result<Fixture, String> {
             fixture.version, FIXTURE_VERSION
         ));
     }
+    if let Some(nodes) = &fixture.nodes {
+        if nodes.len() != fixture.initial_nodes {
+            return Err(format!(
+                "{} starting positions for {} nodes",
+                nodes.len(),
+                fixture.initial_nodes
+            ));
+        }
+    }
     Ok(fixture)
 }
 
@@ -168,7 +196,7 @@ fn validate_for(state: &GameState, mov: &Move) -> Result<(), Rejection> {
 /// Runs every phase of a turn at each position, including the one after the
 /// last move, and applies each recorded move in turn.
 pub fn replay(fixture: &Fixture) -> Replay {
-    let mut state = GameState::with_board_size(fixture.initial_nodes, fixture.board_size);
+    let mut state = fixture.start();
     let mut timings = Vec::with_capacity(fixture.moves.len() + 1);
     let mut failure = None;
 
@@ -241,6 +269,31 @@ pub fn replay(fixture: &Fixture) -> Replay {
     Replay { timings, failure }
 }
 
+/// Positions the search charged, summed over the fixture's positions with a
+/// choice to make, when deepening to each depth from 1 to `max_depth`
+/// without a time limit.
+pub fn nodes_per_depth(fixture: &Fixture, max_depth: usize) -> Vec<usize> {
+    let mut state = fixture.start();
+    let mut totals = vec![0; max_depth];
+    for recorded in &fixture.moves {
+        let classification = classify_nodes(&mut state);
+        let generated =
+            ai::generate_concrete_moves_from_classification(&mut state, &classification);
+        let candidates = ai::embedded_moves(&state, generated);
+        if candidates.len() > 1 {
+            let topologies: Vec<FaceMove> = candidates.iter().map(|(_, t)| t.clone()).collect();
+            for (slot, depth) in totals.iter_mut().zip(1..) {
+                *slot += ai::nodes_to_depth(&state, &topologies, depth);
+            }
+        }
+        let mov = recorded.to_move(state.current_player, state.board_size);
+        if state.apply_move(mov).is_err() {
+            break;
+        }
+    }
+    totals
+}
+
 /// Plays the AI against itself, holding each side to the validation the page
 /// applies to that side.
 pub fn record(initial_nodes: usize, board_size: usize) -> Fixture {
@@ -254,6 +307,12 @@ pub fn record(initial_nodes: usize, board_size: usize) -> Fixture {
         version: FIXTURE_VERSION,
         initial_nodes,
         board_size,
+        nodes: Some(
+            opening_layout(initial_nodes, board_size)
+                .iter()
+                .map(|p| [p.x, p.y])
+                .collect(),
+        ),
         moves,
     }
 }
@@ -316,7 +375,7 @@ mod tests {
 
     /// The board after every recorded move, each checked as the page would.
     fn play(fixture: &Fixture) -> GameState {
-        let mut state = GameState::with_board_size(fixture.initial_nodes, fixture.board_size);
+        let mut state = fixture.start();
         for (index, recorded) in fixture.moves.iter().enumerate() {
             let mov = recorded.to_move(state.current_player, state.board_size);
             if let Err(e) = validate_for(&state, &mov) {
@@ -407,6 +466,41 @@ mod tests {
     }
 
     #[test]
+    fn a_fixture_without_positions_starts_on_the_default_layout() {
+        let bare = parse(r#"{"version":1,"initialNodes":3,"boardSize":500,"moves":[]}"#).unwrap();
+        assert_eq!(bare.nodes, None);
+        let state = bare.start();
+        let expected = opening_layout(3, 500);
+        assert_eq!(state.nodes.len(), 3);
+        assert_eq!(state.nodes[2].position, expected[2]);
+        assert!(!serde_json::to_string(&bare).unwrap().contains("nodes"));
+    }
+
+    #[test]
+    fn recorded_positions_place_the_starting_nodes() {
+        let fixture = load(&fixtures_dir().join("human-4n-1000.json")).unwrap();
+        let nodes = fixture.nodes.as_ref().unwrap();
+        assert_eq!(nodes.len(), 4);
+        let state = fixture.start();
+        assert_eq!(
+            state.nodes[0].position,
+            Point::new(nodes[0][0], nodes[0][1])
+        );
+        assert_ne!(state.nodes[0].position, opening_layout(4, 1000)[0]);
+        let recorded = record(4, 500);
+        assert_eq!(recorded.nodes.unwrap().len(), 4);
+    }
+
+    #[test]
+    fn rejects_positions_that_do_not_match_the_count() {
+        let json =
+            r#"{"version":1,"initialNodes":3,"boardSize":500,"nodes":[[1,2],[3,4]],"moves":[]}"#;
+        assert!(parse(json)
+            .unwrap_err()
+            .contains("2 starting positions for 3 nodes"));
+    }
+
+    #[test]
     fn rejects_other_versions() {
         let json = r#"{"version":2,"initialNodes":4,"boardSize":1000,"moves":[]}"#;
         assert!(parse(json).unwrap_err().contains("version 2"));
@@ -418,6 +512,7 @@ mod tests {
             version: FIXTURE_VERSION,
             initial_nodes: 4,
             board_size: 500,
+            nodes: None,
             moves: vec![FixtureMove {
                 from: 0,
                 to: 1,

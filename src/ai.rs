@@ -1,8 +1,7 @@
-use crate::abstract_graph::{best_candidate, AbstractState};
+use crate::abstract_graph::{best_candidate, AbstractState, Budget, WallClock, SEARCH_BUDGET_MS};
 use crate::embedding;
 use crate::face::Move as FaceMove;
 use crate::node_classifier::{classify_nodes, NodeClassification};
-use crate::opening_book;
 use crate::pathfinding::{
     find_path_on_skeleton, find_path_relaxed, find_path_tight, find_self_loop_on_skeleton,
     generate_geometric_self_loop,
@@ -144,27 +143,7 @@ pub fn find_best_move(state: &mut GameState) -> Option<Move> {
     // The skeleton pathfinder reads the grid the classifier builds.
     let classification = classify_nodes(state);
 
-    // 1. OPENING BOOK
-    if let Some((from, to)) = opening_book::lookup_opening(state) {
-        if let Some(path) = find_path_on_skeleton(state, from, to) {
-            if path.len() >= 3 {
-                let new_node_pos = find_optimal_node_placement(&path, state);
-                let mov = Move::new(
-                    from,
-                    to,
-                    path,
-                    new_node_pos,
-                    state.current_player,
-                    state.board_size,
-                );
-                if validate_ai_move(state, &mov).is_ok() && embedding::embed(state, &mov).is_ok() {
-                    return Some(mov);
-                }
-            }
-        }
-    }
-
-    // 2. GENERATE CONCRETE MOVES (pixel-level, once)
+    // 1. GENERATE CONCRETE MOVES (pixel-level, once)
     let generated = generate_concrete_moves_from_classification(state, &classification);
     let mut candidates = embedded_moves(state, generated);
     if candidates.is_empty() {
@@ -174,22 +153,34 @@ pub fn find_best_move(state: &mut GameState) -> Option<Move> {
         return candidates.pop().map(|(mov, _)| mov);
     }
 
-    // 3. SEARCH over the face model from each candidate.
+    // 2. SEARCH over the face model from each candidate.
     let topologies: Vec<FaceMove> = candidates.iter().map(|(_, t)| t.clone()).collect();
     let best_idx = search_best_index(state, &topologies);
 
-    // 4. RETURN best concrete move (already validated during generation)
+    // 3. RETURN best concrete move (already validated during generation)
     candidates.into_iter().nth(best_idx).map(|(mov, _)| mov)
 }
-
-/// Positions one search may list moves for past depth 1, over all its
-/// deeper iterations together.
-const SEARCH_NODES: usize = 50_000;
 
 /// Index into `candidates` of the move the search prefers.
 pub(crate) fn search_best_index(state: &GameState, candidates: &[FaceMove]) -> usize {
     let root = AbstractState::new(state.face.clone(), state.current_player == Player::AI);
-    best_candidate(root, candidates, SEARCH_NODES).index
+    let mut budget = Budget::new(WallClock::start(), SEARCH_BUDGET_MS);
+    best_candidate(root, candidates, &mut budget).index
+}
+
+/// Positions charged when deepening to `depth` with no time limit.
+#[cfg(feature = "bench")]
+pub(crate) fn nodes_to_depth(state: &GameState, candidates: &[FaceMove], depth: usize) -> usize {
+    use crate::abstract_graph::{best_candidate_to, Clock};
+    struct Still;
+    impl Clock for Still {
+        fn elapsed_ms(&mut self) -> f64 {
+            0.0
+        }
+    }
+    let root = AbstractState::new(state.face.clone(), state.current_player == Player::AI);
+    let mut budget = Budget::new(Still, f64::INFINITY);
+    best_candidate_to(root, candidates, &mut budget, depth).spent
 }
 
 pub fn find_optimal_node_placement(

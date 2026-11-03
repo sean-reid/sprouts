@@ -7,11 +7,13 @@ import {
   encodeRecord,
   History,
   LINK_QUANTUM,
+  loadSaved,
   sameGame,
   STROKE_TOLERANCE,
   type GameRecord,
   type RecordedMove,
 } from "../../web/history";
+import { circleLayout, openingLayout } from "../../web/layout";
 import type { Fixture, FixtureMove } from "../../web/record";
 
 // Header: version, flags, initial nodes, board size, move count and cursor,
@@ -21,6 +23,9 @@ const SHAPE_STROKE = 0;
 const SHAPE_CUBICS = 1;
 const VERSION_1_PAYLOAD =
   "AQAEAPQBAgACAAAAAQACABwMxAmvCbAJ8ArwCgIAAAAFAGwHxAn4A88BpgpR3gIe5AGEAvsKMwk";
+// The first exchange of fixtures/saved/first-exchange.json as a version 2
+// link, which carried no layout.
+const VERSION_2_PAYLOAD = "AgAEAOgDAgACAAABAALYCegH7wHwAXh3AgAAA_gF6AeaAyVGJkUl";
 
 function bytesOf(payload: string): Uint8Array {
   return new Uint8Array(Buffer.from(payload, "base64url"));
@@ -308,4 +313,70 @@ describe("every recorded game through the link", () => {
       });
     });
   }
+});
+
+describe("starting positions in a link", () => {
+  function withNodes(nodes: [number, number][] | null): History {
+    const history = game({
+      fromNode: 0,
+      toNode: 1,
+      polyline: [at(300, 500), at(500, 450), at(700, 500)],
+      newNodePos: at(500, 450),
+    });
+    history.nodes = nodes;
+    return history;
+  }
+
+  it("leaves the default layout out of the link and reads it back as the default", () => {
+    const plain = encodeRecord(withNodes(null));
+    const laidOut = encodeRecord(withNodes(openingLayout(4, 1000)));
+    expect(laidOut).toBe(plain);
+    expect(bytesOf(plain)[0]).toBe(3);
+    expect(bytesOf(plain)[1]! & 2).toBe(0);
+    expect(decodeRecord(plain)?.nodes).toEqual(openingLayout(4, 1000));
+  });
+
+  it("carries another layout and brings it back within a quantum", () => {
+    const circle = circleLayout(4, 1000);
+    const link = encodeRecord(withNodes(circle));
+    expect(bytesOf(link)[1]! & 2).toBe(2);
+    const record = decodeRecord(link);
+    expect(record?.nodes).toHaveLength(4);
+    for (const [i, [x, y]] of circle.entries()) {
+      expect(Math.abs(record!.nodes![i]![0] - x)).toBeLessThanOrEqual(LINK_QUANTUM / 2);
+      expect(Math.abs(record!.nodes![i]![1] - y)).toBeLessThanOrEqual(LINK_QUANTUM / 2);
+    }
+    expect(link.length - encodeRecord(withNodes(null)).length).toBeLessThanOrEqual(24);
+  });
+
+  it("reads version 1 and 2 links onto the circle they were drawn on", () => {
+    expect(decodeRecord(VERSION_1_PAYLOAD)?.nodes).toEqual(circleLayout(4, 500));
+    const second = decodeRecord(VERSION_2_PAYLOAD);
+    expect(second?.nodes).toEqual(circleLayout(4, 1000));
+    expect(second?.moves.map((m) => [m.from, m.to])).toEqual([
+      [0, 1],
+      [2, 0],
+    ]);
+  });
+
+  it("reads a saved record without positions as a circle game", () => {
+    const saved = JSON.parse(
+      readFileSync("fixtures/saved/first-exchange.json", "utf8"),
+    ) as GameRecord;
+    delete saved.nodes;
+    const storage = { getItem: () => JSON.stringify(saved) };
+    Object.defineProperty(globalThis, "localStorage", { value: storage, configurable: true });
+    const loaded = loadSaved();
+    expect(loaded?.nodes).toEqual(circleLayout(4, 1000));
+    expect(loaded?.moves).toHaveLength(2);
+  });
+
+  it("tells a saved game from a link on another layout", () => {
+    const saved = withNodes(circleLayout(4, 1000)).record();
+    const linked = decodeRecord(encodeRecord(withNodes(null)))!;
+    expect(sameGame(saved, linked)).toBe(false);
+    expect(sameGame(saved, decodeRecord(encodeRecord(withNodes(circleLayout(4, 1000))))!)).toBe(
+      true,
+    );
+  });
 });

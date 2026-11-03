@@ -16,7 +16,7 @@ import {
 import { attachInput, type InputOptions, type PointerKind } from "./input";
 import { Loupe } from "./loupe";
 import { healPath } from "./path";
-import { wireRecording } from "./record";
+import { startingNodes, wireRecording } from "./record";
 import { draw } from "./render";
 import {
   freshBoard,
@@ -58,6 +58,8 @@ function byId<T extends HTMLElement>(id: string): T {
 const canvas = byId<HTMLCanvasElement>("canvas");
 const statusEl = byId<HTMLElement>("status");
 const undoBtn = byId<HTMLButtonElement>("undoBtn");
+const nodeCountEl = byId<HTMLInputElement>("nodeCount");
+const startBtn = byId<HTMLButtonElement>("startBtn");
 const turnEl = byId<HTMLElement>("turn");
 const turnText = byId<HTMLElement>("turnText");
 const firstPlayerButtons = document.querySelectorAll<HTMLButtonElement>("button[data-first]");
@@ -96,7 +98,6 @@ let shared = false;
 // A review the player opened, a link, or a finished game stays a review
 // until Undo; one entered by stepping onto an AI-to-move board does not.
 let pinnedReview = false;
-let lastNodeCount = DEFAULT_NODES;
 // Bumped whenever the table is reset so replies and animations from the
 // previous game stop.
 let gameEpoch = 0;
@@ -701,8 +702,23 @@ function resetTable(): void {
 
 // A fresh game forgets the saved one and the link; the fallback after a
 // failed load keeps both so the next move, not the failure, replaces them.
+// The input's value, rounded and held to its range, written back so the
+// field shows what the game got.
+function chosenNodeCount(): number {
+  const typed = Math.round(nodeCountEl.valueAsNumber);
+  const low = Number(nodeCountEl.min);
+  const high = Number(nodeCountEl.max);
+  const count = Number.isFinite(typed) ? Math.min(Math.max(typed, low), high) : DEFAULT_NODES;
+  showNodeCount(count);
+  return count;
+}
+
+function showNodeCount(count: number): void {
+  nodeCountEl.value = String(count);
+}
+
 async function newGame(nodeCount: number, fresh = true): Promise<void> {
-  lastNodeCount = nodeCount;
+  showNodeCount(nodeCount);
   resetTable();
   shared = false;
   pinnedReview = false;
@@ -722,6 +738,7 @@ async function newGame(nodeCount: number, fresh = true): Promise<void> {
     if (epoch !== gameEpoch) return;
     await refreshBoard();
     if (epoch !== gameEpoch) return;
+    timeline.nodes = startingNodes(state.nodes, nodeCount);
     if (state.currentPlayer === "ai") startAITurn();
     else setStatus("Draw a line between two nodes");
   } catch (error) {
@@ -736,7 +753,7 @@ async function restore(record: GameRecord, fromLink: boolean): Promise<void> {
   const epoch = gameEpoch;
   shared = fromLink;
   pinnedReview = fromLink;
-  lastNodeCount = record.initialNodes;
+  showNodeCount(record.initialNodes);
   timeline = History.from(record);
   if (fromLink) timeline.cursor = timeline.moves.length;
   const target = timeline.cursor;
@@ -746,11 +763,13 @@ async function restore(record: GameRecord, fromLink: boolean): Promise<void> {
   updateTurn();
   setBoardSize(timeline.boardSize);
   setStatus("Initializing...");
-  await engine.call("init", timeline.initialNodes, timeline.boardSize, firstPlayer);
+  const layout = timeline.nodes ? { nodes: timeline.nodes.map(([x, y]) => ({ x, y })) } : undefined;
+  await engine.call("init", timeline.initialNodes, timeline.boardSize, firstPlayer, layout);
   if (epoch !== gameEpoch) return;
   state.reviewing = fromLink;
   const reached = await seek(target);
   if (epoch !== gameEpoch) return;
+  timeline.nodes ??= startingNodes(state.nodes, timeline.initialNodes);
   if (state.gameOver) {
     state.reviewing = true;
     pinnedReview = true;
@@ -773,7 +792,7 @@ function pickFirstPlayer(player: Player): void {
   chooseFirstPlayer(player);
   if (busy()) return;
   if (timeline.moves.length === 0) {
-    void newGame(lastNodeCount);
+    void newGame(chosenNodeCount());
   } else {
     setStatus(player === "human" ? "You start next game" : "AI starts next game");
   }
@@ -851,9 +870,10 @@ function wireInput(): void {
     if (e.key === "ArrowRight") void step(1);
   });
 
-  for (const button of document.querySelectorAll<HTMLButtonElement>("button[data-nodes]")) {
-    button.addEventListener("click", () => void newGame(Number(button.dataset.nodes)));
-  }
+  startBtn.addEventListener("click", () => void newGame(chosenNodeCount()));
+  nodeCountEl.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") void newGame(chosenNodeCount());
+  });
   undoBtn.addEventListener("click", () => void undoMove());
   for (const button of firstPlayerButtons) {
     button.addEventListener("click", () => pickFirstPlayer(button.dataset.first as Player));
@@ -868,7 +888,7 @@ function wireInput(): void {
     closeModal();
     updateControls();
   });
-  byId("newGameBtn").addEventListener("click", () => void newGame(lastNodeCount));
+  byId("newGameBtn").addEventListener("click", () => void newGame(chosenNodeCount()));
 }
 
 // The pulse on the ring is the one thing that animates without a state change.

@@ -1,4 +1,4 @@
-import type { GameState } from "./state";
+import type { GameState, Node } from "./state";
 
 // Matches FIXTURE_VERSION in src/replay.rs.
 const FIXTURE_VERSION = 1;
@@ -14,14 +14,26 @@ export interface Fixture {
   version: number;
   initialNodes: number;
   boardSize: number;
+  // Where the starting nodes were; the engine's default layout when absent.
+  nodes?: [number, number][];
   moves: FixtureMove[];
 }
 
+// Positions of the first `count` nodes by id, which are the starting ones.
+export function startingNodes(nodes: Node[], count: number): [number, number][] {
+  return nodes
+    .filter((node) => node.id < count)
+    .sort((a, b) => a.id - b.id)
+    .map((node) => [node.position.x, node.position.y]);
+}
+
 export function toFixture(state: GameState, boardSize: number): Fixture {
+  const initialNodes = state.nodes.length - state.lines.length;
   return {
     version: FIXTURE_VERSION,
-    initialNodes: state.nodes.length - state.lines.length,
+    initialNodes,
     boardSize,
+    nodes: startingNodes(state.nodes, initialNodes),
     moves: state.lines.map((line) => ({
       from: line.fromNode,
       to: line.toNode,

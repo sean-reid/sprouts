@@ -2,7 +2,16 @@ import { readFile } from "node:fs/promises";
 import { expect, test, type Page } from "@playwright/test";
 import type { GameRecord } from "../../web/history";
 import type { Player } from "../../web/state";
-import { frameOf, near, openBoard, pixelAt, playExchange, ringPixel, shot } from "./helpers";
+import {
+  frameOf,
+  near,
+  openBoard,
+  pixelAt,
+  playExchange,
+  ringPixel,
+  shot,
+  startGame,
+} from "./helpers";
 
 const COLOURS: Record<Player, string> = { human: "#60A5FA", ai: "#EF4444" };
 
@@ -95,7 +104,7 @@ test("the board and move list sit centred under one row of controls", async ({ p
   await expectSideBySide(page, "1024");
 
   await page.setViewportSize({ width: 1600, height: 900 });
-  await page.locator("button[data-nodes='4']").click();
+  await startGame(page, 4);
   await expect(page.locator("#status")).toHaveText("Draw a line between two nodes");
   await expectSideBySide(page, "1600");
 });

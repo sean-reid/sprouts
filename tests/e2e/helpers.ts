@@ -1,4 +1,5 @@
 import { expect, test, type CDPSession, type Page } from "@playwright/test";
+import { openingLayout } from "../../web/layout";
 
 export interface Client {
   x: number;
@@ -65,12 +66,10 @@ export function pinch(
   return { ...zoomed, tx: zoomed.tx + (m1.x - m0.x), ty: zoomed.ty + (m1.y - m0.y) };
 }
 
-// Mirrors the opening layout in src/types.rs: nodes on a circle around the
-// board centre, radius scaled to the board size.
+// A starting node in world units on the page's own mirror of the layout.
 export function nodeWorld(index: number, count: number, board: number): Client {
-  const radius = (count <= 4 ? 120 : 160) * (board / 1000);
-  const angle = (2 * Math.PI * index) / count;
-  return { x: board / 2 + radius * Math.cos(angle), y: board / 2 + radius * Math.sin(angle) };
+  const [x, y] = openingLayout(count, board)[index]!;
+  return { x, y };
 }
 
 export function toClient(frame: Frame, t: Transform, world: Client): Client {
@@ -86,9 +85,10 @@ export async function nodeOnScreen(page: Page, index: number, count: number): Pr
   return nodeAt(frame, fit(frame), index, count);
 }
 
-// Counts node-blue samples on a ring 5 px out from a client point, which
-// clears the white label and sits inside the 8 px disc.
-export function blueSamplesAround(page: Page, at: Client): Promise<number> {
+// Counts node-disc samples, active blue or spent grey, on a ring 5 px out
+// from a client point, which clears the white label and sits inside the
+// 8 px disc.
+export function nodeSamplesAround(page: Page, at: Client): Promise<number> {
   return page.evaluate(
     ([x, y]) => {
       const canvas = document.getElementById("canvas") as HTMLCanvasElement;
@@ -96,31 +96,61 @@ export function blueSamplesAround(page: Page, at: Client): Promise<number> {
       if (!ctx) return 0;
       const rect = canvas.getBoundingClientRect();
       const dpr = canvas.width / rect.width;
-      let blue = 0;
+      let hits = 0;
       for (let k = 0; k < 8; k++) {
         const angle = (Math.PI * 2 * k) / 8;
         const px = Math.round((x - rect.left + 5 * Math.cos(angle)) * dpr);
         const py = Math.round((y - rect.top + 5 * Math.sin(angle)) * dpr);
-        const [r, , b] = ctx.getImageData(px, py, 1, 1).data;
-        if (r !== undefined && b !== undefined && r < 100 && b > 200) blue++;
+        const [r, g, b] = ctx.getImageData(px, py, 1, 1).data;
+        if (r === undefined || g === undefined || b === undefined) continue;
+        const blue = r < 100 && b > 200;
+        const grey = Math.abs(r - 0x55) < 20 && Math.abs(g - 0x55) < 20 && Math.abs(b - 0x55) < 20;
+        if (blue || grey) hits++;
       }
-      return blue;
+      return hits;
     },
     [at.x, at.y] as const,
   );
 }
 
 export async function expectNodeDrawnAt(page: Page, at: Client): Promise<void> {
-  await expect.poll(() => blueSamplesAround(page, at)).toBeGreaterThanOrEqual(6);
+  await expect.poll(() => nodeSamplesAround(page, at)).toBeGreaterThanOrEqual(6);
 }
 
 export const PLACING_HINT = /Drag the dot/;
 
+// Sets the starting node count and starts a game with it.
+export async function startGame(page: Page, count: number): Promise<void> {
+  await page.locator("#nodeCount").fill(String(count));
+  await page.locator("#startBtn").click();
+}
+
+// A recorded game's starting node on screen at the fitted view, from the
+// positions the record carries.
+export async function recordedNodeOnScreen(
+  page: Page,
+  record: { boardSize: number; nodes?: [number, number][] },
+  index: number,
+): Promise<Client> {
+  const frame = await frameOf(page);
+  const [x, y] = record.nodes![index]!;
+  const scale = Math.min(frame.width, frame.height) / record.boardSize;
+  return {
+    x: frame.left + (frame.width - record.boardSize * scale) / 2 + x * scale,
+    y: frame.top + (frame.height - record.boardSize * scale) / 2 + y * scale,
+  };
+}
+
 // Locks a straight stroke between two nodes and returns its midpoint, where
 // the dot lands on an empty board.
-export async function drawBetween(page: Page, from: number, to: number): Promise<Client> {
-  const a = await nodeOnScreen(page, from, 4);
-  const b = await nodeOnScreen(page, to, 4);
+export async function drawBetween(
+  page: Page,
+  from: number,
+  to: number,
+  count = 4,
+): Promise<Client> {
+  const a = await nodeOnScreen(page, from, count);
+  const b = await nodeOnScreen(page, to, count);
   await mouseStroke(page, a, b);
   await expect(page.locator("#status")).toHaveText(PLACING_HINT);
   return { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
@@ -454,11 +484,13 @@ export async function openBoard(page: Page, path = "/"): Promise<void> {
   await expect(page.locator("#status")).toHaveText("Draw a line between two nodes", {
     timeout: 20_000,
   });
+  // The status lands a frame before the board is painted.
+  await nextFrame(page);
 }
 
 // One human move and the AI's reply, with the mouse.
-export async function playExchange(page: Page): Promise<void> {
-  const mid = await drawBetween(page, 0, 1);
+export async function playExchange(page: Page, count = 4): Promise<void> {
+  const mid = await drawBetween(page, 0, 1, count);
   await expectDotAt(page, mid);
   await clickAway(page);
   await expect(page.locator("#status")).toHaveText("Your turn!", { timeout: 60_000 });

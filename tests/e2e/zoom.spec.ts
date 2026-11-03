@@ -1,11 +1,13 @@
 import { expect, test } from "@playwright/test";
 import {
+  type Client,
   ctrlWheel,
   expectNodeDrawnAt,
   fit,
   frameOf,
   mouseStroke,
   nodeAt,
+  nodeSamplesAround,
   openBoard,
   pinch,
   pinchDrag,
@@ -15,7 +17,6 @@ import {
   touchDrag,
   touchStroke,
   zoomAt,
-  type Client,
 } from "./helpers";
 
 const status = (page: Parameters<typeof openBoard>[0]) => page.locator("#status");
@@ -49,11 +50,12 @@ test("plain wheel and space drag pan the zoomed board", async ({ page }) => {
   const centre = { x: frame.left + frame.width / 2, y: frame.top + frame.height / 2 };
   const delta = await ctrlWheel(page, centre, -100);
   let t = zoomAt(frame, fit(frame), centre, 2 ** (-delta / 100));
-  await expectNodeDrawnAt(page, nodeAt(frame, t, 2));
+  // Node 0 sits nearest the centre, so it stays on the zoomed canvas.
+  await expectNodeDrawnAt(page, nodeAt(frame, t, 0));
 
   const panned = await plainWheel(page, 40);
   t = { ...t, ty: t.ty - panned };
-  await expectNodeDrawnAt(page, nodeAt(frame, t, 2));
+  await expectNodeDrawnAt(page, nodeAt(frame, t, 0));
 
   await page.keyboard.down("Space");
   await page.mouse.move(centre.x, centre.y);
@@ -62,7 +64,7 @@ test("plain wheel and space drag pan the zoomed board", async ({ page }) => {
   await page.mouse.up();
   await page.keyboard.up("Space");
   t = { ...t, tx: t.tx + 30, ty: t.ty + 20 };
-  await expectNodeDrawnAt(page, nodeAt(frame, t, 2));
+  await expectNodeDrawnAt(page, nodeAt(frame, t, 0));
   await expect(status(page)).toHaveText("Draw a line between two nodes");
   await shot(page, "zoom-panned");
 });
@@ -109,18 +111,20 @@ test("double tap zooms in at a node and double tap again fits", async ({ page })
   const frame = await frameOf(page);
   const fitted = fit(frame);
   const a = nodeAt(frame, fitted, 0);
+  const b = nodeAt(frame, fitted, 1);
   await page.touchscreen.tap(a.x, a.y);
   await page.touchscreen.tap(a.x, a.y);
-  const zoomed = zoomAt(frame, fitted, a, 2.5);
+  // At 2.5 times every other node leaves the canvas, so the tapped node
+  // holding still while node 1 goes is the zoom.
   await expectNodeDrawnAt(page, a);
-  await expectNodeDrawnAt(page, nodeAt(frame, zoomed, 1));
+  await expect.poll(() => nodeSamplesAround(page, b)).toBeLessThan(6);
   await expect(status(page)).toHaveText("Draw a line between two nodes");
   await shot(page, "zoom-double-tap");
 
   await page.waitForTimeout(400);
   await page.touchscreen.tap(a.x, a.y);
   await page.touchscreen.tap(a.x, a.y);
-  await expectNodeDrawnAt(page, nodeAt(frame, fitted, 1));
+  await expectNodeDrawnAt(page, b);
   await expect(page.locator("#cancelBtn")).toBeHidden();
 });
 

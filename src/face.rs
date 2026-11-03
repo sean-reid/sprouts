@@ -260,9 +260,40 @@ impl FaceModel {
         }
     }
 
-    /// Builds the full move list, so it costs what `moves` costs.
     pub fn is_game_over(&self) -> bool {
-        self.moves().is_empty()
+        !(0..self.nodes.len()).any(|v| self.can_move(v))
+    }
+
+    /// Nodes with a legal move, ascending.
+    pub fn active_nodes(&self) -> Vec<NodeId> {
+        (0..self.nodes.len())
+            .filter(|&v| self.can_move(v))
+            .collect()
+    }
+
+    /// Whether `v` has a legal move. A node with two lives can always loop
+    /// in its own face; one with a single life needs a partner with a life
+    /// on the boundary of one of its faces. O(E) at worst.
+    pub fn can_move(&self, v: NodeId) -> bool {
+        match self.nodes[v].degree {
+            0 | 1 => true,
+            2 => self.nodes[v]
+                .rotation()
+                .iter()
+                .any(|&h| self.has_partner(self.half_edges[h].face, v)),
+            _ => false,
+        }
+    }
+
+    fn has_partner(&self, face: FaceId, v: NodeId) -> bool {
+        self.half_edges
+            .iter()
+            .any(|e| e.face == face && e.origin != v && self.nodes[e.origin].degree < 3)
+            || self
+                .nodes
+                .iter()
+                .enumerate()
+                .any(|(u, node)| u != v && node.degree == 0 && node.home == face)
     }
 
     /// O(E): walks every face to validate `enclosed`.
@@ -436,7 +467,10 @@ impl FaceModel {
     }
 }
 
+mod canonical;
 mod moves;
+
+pub use canonical::canonical_form;
 
 #[cfg(test)]
 mod tests;

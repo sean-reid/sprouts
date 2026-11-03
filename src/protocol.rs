@@ -106,26 +106,45 @@ pub enum AutoPlacement {
     Rejected { rejection: Rejection },
 }
 
-pub fn start(initial_nodes: usize, board_size: usize, first_player: Player) -> GameState {
-    let mut state = GameState::with_board_size(initial_nodes, board_size);
-    state.current_player = first_player;
-    state
+/// Starting node positions a restored game brings with it.
+#[derive(Debug, Clone, Deserialize, Tsify)]
+pub struct Layout {
+    pub nodes: Vec<Point>,
 }
 
-/// Lists the legal moves once; a node is active when one of them uses it.
+/// A fresh board on the recorded positions, or on the default layout when
+/// none are given. Positions that do not match the count are an error.
+pub fn start(
+    initial_nodes: usize,
+    board_size: usize,
+    first_player: Player,
+    nodes: Option<Vec<Point>>,
+) -> Result<GameState, String> {
+    let mut state = match nodes {
+        Some(nodes) if nodes.len() == initial_nodes => GameState::with_nodes(nodes, board_size),
+        Some(nodes) => {
+            return Err(format!(
+                "{} starting positions for {initial_nodes} nodes",
+                nodes.len()
+            ))
+        }
+        None => GameState::with_board_size(initial_nodes, board_size),
+    };
+    state.current_player = first_player;
+    Ok(state)
+}
+
+/// A node is active when the face model gives it a legal move.
 pub fn snapshot(state: &GameState) -> Snapshot {
-    let moves = state.face.moves();
-    let mut active_nodes: Vec<usize> = moves.iter().flat_map(|m| [m.a, m.b]).collect();
-    active_nodes.sort_unstable();
-    active_nodes.dedup();
+    let active_nodes = state.face.active_nodes();
     Snapshot {
         board_size: state.board_size,
         initial_nodes: state.initial_node_count,
         nodes: state.nodes.clone(),
         lines: state.lines.clone(),
         current_player: state.current_player,
+        game_over: active_nodes.is_empty(),
         active_nodes,
-        game_over: moves.is_empty(),
     }
 }
 
@@ -274,7 +293,7 @@ mod tests {
     /// but has nobody to reach, so it is not active either.
     #[test]
     fn snapshot_of_a_finished_game() {
-        let mut state = start(1, 1000, Player::Human);
+        let mut state = start(1, 1000, Player::Human, None).unwrap();
         let a = state.nodes[0].position;
         let ring: Vec<Point> = (0..=48)
             .map(|i| {
@@ -340,8 +359,22 @@ mod tests {
     }
 
     #[test]
+    fn start_takes_recorded_positions_and_refuses_a_count_mismatch() {
+        let given = vec![Point::new(100.0, 100.0), Point::new(400.0, 100.0)];
+        let placed = start(2, 500, Player::AI, Some(given.clone())).unwrap();
+        assert_eq!(placed.nodes[1].position, given[1]);
+        assert_eq!(placed.current_player, Player::AI);
+        let refused = start(3, 500, Player::Human, Some(given))
+            .err()
+            .expect("a count mismatch is refused");
+        assert!(refused.contains("2 starting positions for 3 nodes"));
+        let laid_out = start(3, 500, Player::Human, None).unwrap();
+        assert_eq!(laid_out.nodes[0].position, types::opening_layout(3, 500)[0]);
+    }
+
+    #[test]
     fn the_ai_opening_on_a_full_size_board_is_accepted() {
-        let mut state = start(4, 1000, Player::AI);
+        let mut state = start(4, 1000, Player::AI, None).unwrap();
         let reply = ai_move(&mut state).expect("the AI has an opening move");
         match apply(&mut state, reply.mov) {
             Outcome::Applied { snapshot } => assert_eq!(snapshot.current_player, Player::Human),
@@ -349,11 +382,9 @@ mod tests {
         }
     }
 
-    /// The book answers a human opening by joining an untouched node to the
-    /// one the human used, and needs the skeleton built to draw it.
     #[test]
-    fn the_ai_answers_a_human_opening_from_the_book() {
-        let mut state = start(4, 1000, Player::Human);
+    fn the_ai_answers_a_human_opening_with_a_move_that_applies() {
+        let mut state = start(4, 1000, Player::Human, None).unwrap();
         let a = state.nodes[0].position;
         let b = state.nodes[1].position;
         let polyline = straight(a, b, 20);
@@ -370,15 +401,18 @@ mod tests {
             panic!("the opening chord was rejected");
         };
         let reply = ai_move(&mut state).expect("the AI has a reply");
-        let ends = [reply.mov.from_node, reply.mov.to_node];
-        assert!(ends.iter().all(|&id| id < 4));
-        assert!(ends.contains(&2) || ends.contains(&3));
-        assert!(ends.contains(&0) || ends.contains(&1));
+        match apply(&mut state, reply.mov) {
+            Outcome::Applied { snapshot } => {
+                assert_eq!(snapshot.current_player, Player::Human);
+                assert_eq!(snapshot.lines.len(), 2);
+            }
+            Outcome::Rejected { rejection } => panic!("reply rejected: {}", rejection.message),
+        }
     }
 
     #[test]
     fn the_ai_can_open_and_the_turn_passes_to_the_human() {
-        let mut state = start(4, 1000, Player::AI);
+        let mut state = start(4, 1000, Player::AI, None).unwrap();
         assert_eq!(snapshot(&state).current_player, Player::AI);
         let a = state.nodes[0].position;
         let b = state.nodes[1].position;
@@ -443,11 +477,21 @@ mod tests {
     struct Recorded {
         initial_nodes: usize,
         board_size: usize,
+        nodes: Option<Vec<[f64; 2]>>,
         moves: Vec<Move>,
     }
 
     fn replay(recorded: Recorded) -> GameState {
-        let mut state = GameState::with_board_size(recorded.initial_nodes, recorded.board_size);
+        let nodes = recorded
+            .nodes
+            .map(|nodes| nodes.iter().map(|p| Point::new(p[0], p[1])).collect());
+        let mut state = start(
+            recorded.initial_nodes,
+            recorded.board_size,
+            Player::Human,
+            nodes,
+        )
+        .unwrap();
         for mov in recorded.moves {
             match apply(&mut state, mov) {
                 Outcome::Applied { .. } => {}
@@ -622,7 +666,8 @@ mod tests {
         let fixture = serde_json::to_string(&Recorded {
             initial_nodes: 4,
             board_size: 1000,
-            moves: vec![chord(0, 1), chord(2, 3)],
+            nodes: None,
+            moves: vec![chord(0, 3), chord(1, 2)],
         })
         .unwrap();
 

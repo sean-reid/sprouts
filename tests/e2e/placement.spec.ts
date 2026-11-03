@@ -1,8 +1,9 @@
 import { expect, test, type Page } from "@playwright/test";
 import {
-  blueSamplesAround,
+  nodeSamplesAround,
   clampToViewport,
   clickAway,
+  type Client,
   dotColourAt,
   drawBetween,
   expectDotAt,
@@ -24,12 +25,12 @@ import {
   playExchange,
   ringPixels,
   shot,
+  startGame,
   tapAway,
   toClient,
   touchDrag,
   touchStroke,
   wheelZoomTo,
-  type Client,
 } from "./helpers";
 
 const NO_ROOM = "No room for a new node on this line";
@@ -117,7 +118,7 @@ test("dragging the dot moves the committed node", async ({ page }) => {
   await clickAway(page);
   await expect(page.locator("#status")).toHaveText("Your turn!", { timeout: 60_000 });
   await expectNodeDrawnAt(page, target);
-  expect(await blueSamplesAround(page, mid)).toBeLessThan(6);
+  expect(await nodeSamplesAround(page, mid)).toBeLessThan(6);
 });
 
 test("a curve with no room for a node is rejected when it locks", async ({ page }) => {
@@ -160,7 +161,7 @@ test("Escape and Cancel each abort, and Undo and New Game still work", async ({ 
   await page.keyboard.press("Escape");
   await expect(page.locator("#status")).toHaveText("Move cancelled");
   await expect(page.locator("#cancelBtn")).toBeHidden();
-  await page.locator("button[data-nodes='4']").click();
+  await startGame(page, 4);
   await expect(page.locator("#status")).toHaveText("Draw a line between two nodes");
   await expect(page.locator("#undoBtn")).toBeDisabled();
 });
@@ -320,11 +321,13 @@ test("a pinch that starts away from the dot zooms without placing the node", asy
   await touchStroke(cdp, a, b);
   await expectDotAt(page, { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 });
 
-  // Both fingers sit in the empty upper-left quarter, so the zoom keeps
-  // the dot on screen.
-  const first = { x: frame.left + frame.width * 0.3, y: frame.top + frame.height * 0.3 };
-  const second = { x: first.x + 40, y: first.y + 40 };
-  const secondTo = { x: first.x + 80, y: first.y + 80 };
+  // The fingers straddle the dot 30 px out, past its grab radius, so the
+  // zoom is about the dot and it stays put; node 0 is the nearer end of
+  // the chord and stays on the canvas at one and a half times.
+  const mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+  const first = { x: mid.x - 30, y: mid.y };
+  const second = { x: mid.x + 30, y: mid.y };
+  const secondTo = { x: mid.x + 60, y: mid.y };
   await cdp.send("Input.dispatchTouchEvent", {
     type: "touchStart",
     touchPoints: [{ ...first, id: 1 }],
@@ -347,7 +350,7 @@ test("a pinch that starts away from the dot zooms without placing the node", asy
   const n0 = nodeWorld(0, 4, frame.board);
   const n1 = nodeWorld(1, 4, frame.board);
   const midWorld = { x: (n0.x + n1.x) / 2, y: (n0.y + n1.y) / 2 };
-  await expectNodeDrawnAt(page, nodeAt(frame, t, 1));
+  await expectNodeDrawnAt(page, nodeAt(frame, t, 0));
   await expectDotAt(page, toClient(frame, t, midWorld));
   await page.waitForTimeout(500);
   await expect(page.locator("#status")).toHaveText(PLACING_HINT);

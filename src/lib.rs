@@ -7,7 +7,6 @@ pub mod face;
 mod geometry;
 mod morphology;
 mod node_classifier;
-mod opening_book;
 mod pathfinding;
 mod protocol;
 #[cfg(feature = "bench")]
@@ -16,7 +15,7 @@ mod types;
 mod validation;
 
 use protocol::{
-    AiMove, AutoPlacement, AutoPlacementQuery, Curve, FitQuery, Move, Outcome, Placement,
+    AiMove, AutoPlacement, AutoPlacementQuery, Curve, FitQuery, Layout, Move, Outcome, Placement,
     PlacementQuery, Snapshot,
 };
 use tsify::{Ts, Tsify};
@@ -35,10 +34,12 @@ impl SproutsGame {
         initial_nodes: usize,
         board_size: usize,
         first_player: Ts<Player>,
+        layout: Option<Ts<Layout>>,
     ) -> Result<SproutsGame, JsError> {
-        Ok(Self {
-            state: protocol::start(initial_nodes, board_size, first_player.to_rust()?),
-        })
+        let nodes = layout.map(|l| l.to_rust()).transpose()?.map(|l| l.nodes);
+        let state = protocol::start(initial_nodes, board_size, first_player.to_rust()?, nodes)
+            .map_err(|e| JsError::new(&e))?;
+        Ok(Self { state })
     }
 
     pub fn snapshot(&self) -> Result<Ts<Snapshot>, JsError> {

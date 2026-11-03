@@ -1,4 +1,5 @@
 import type { Cubic, Line, Move, Player, Point } from "../pkg/sprouts";
+import { circleLayout, openingLayout, sameLayout, type Position } from "./layout";
 import type { Fixture, FixtureMove } from "./record";
 
 // A replay fixture plus the fields a resumed session needs, so a saved
@@ -18,9 +19,14 @@ export interface RecordedMove extends Move {
 export const STORAGE_KEY = "sprouts.game";
 const HASH_PREFIX = "#game=";
 const RECORD_VERSION = 1;
-// Link version 1 carries thinned strokes, version 2 the fitted cubics.
-const LINK_VERSION = 2;
+// Link version 1 carries thinned strokes, version 2 the fitted cubics, and
+// version 3 the starting layout when it is not the default; a version 1 or
+// 2 link was drawn on the circle layout.
+const LINK_VERSION = 3;
+const CUBIC_LINK_VERSION = 2;
 const STROKE_LINK_VERSION = 1;
+const FLAG_AI_FIRST = 1;
+const FLAG_LAYOUT = 2;
 // Coordinates travel as tenths of a world unit in a version 1 link.
 const TENTHS = 10;
 // Geometry below is in units of a 1000 board and scales with the board.
@@ -48,6 +54,8 @@ const MAX_BOARD = 6000;
 export class History {
   moves: RecordedMove[] = [];
   cursor = 0;
+  // Starting positions once the engine has laid the board out.
+  nodes: Position[] | null = null;
 
   constructor(
     public initialNodes: number,
@@ -57,6 +65,7 @@ export class History {
 
   static from(record: GameRecord): History {
     const history = new History(record.initialNodes, record.boardSize, record.firstPlayer);
+    history.nodes = record.nodes ?? null;
     history.moves = record.moves.map(fromFixtureMove);
     history.cursor = Math.min(Math.max(record.cursor, 0), history.moves.length);
     return history;
@@ -115,6 +124,7 @@ export class History {
       version: 1,
       initialNodes: this.initialNodes,
       boardSize: this.boardSize,
+      ...(this.nodes ? { nodes: this.nodes } : {}),
       firstPlayer: this.firstPlayer,
       moves: this.moves.map(toFixtureMove),
       cursor: this.cursor,
@@ -196,10 +206,13 @@ function asRecord(value: unknown): GameRecord | null {
     return null;
   }
   if (v.cursor > v.moves.length) return null;
+  if (v.nodes !== undefined && !isLayout(v.nodes, nodes)) return null;
   return {
     version: 1,
     initialNodes: v.initialNodes,
     boardSize: v.boardSize,
+    // A record saved without positions was played on the circle layout.
+    nodes: v.nodes ?? circleLayout(nodes, v.boardSize),
     firstPlayer: v.firstPlayer,
     moves: v.moves,
     cursor: v.cursor,
@@ -223,6 +236,10 @@ function isPair(value: unknown): value is [number, number] {
   );
 }
 
+function isLayout(value: unknown, count: number): value is [number, number][] {
+  return Array.isArray(value) && value.length === count && value.every(isPair);
+}
+
 function isMove(value: unknown): value is FixtureMove {
   if (typeof value !== "object" || value === null) return false;
   const m = value as Record<string, unknown>;
@@ -241,8 +258,10 @@ function scaleOf(boardSize: number): number {
 }
 
 // Share link layout, little endian: version u8, flags u8 (bit 0 is AI
-// first), initial nodes u16, board size u16, move count u16, cursor u16,
-// then per move: from and to as varints, a shape u8, a varint count, the
+// first, bit 1 says the starting positions follow the header), initial
+// nodes u16, board size u16, move count u16, cursor u16, the starting
+// positions as zigzag varint deltas in link quanta when they are not the
+// default layout, then per move: from and to as varints, a shape u8, a varint count, the
 // shape's points and the new node, every point as zigzag varint deltas
 // from the previous point in link quanta, starting at the origin. A stroke
 // counts its points; cubics count segments and carry the first start then
@@ -252,13 +271,23 @@ function scaleOf(boardSize: number): number {
 // and the new node as two u16 tenths.
 export function encodeRecord(history: History): string {
   const out = new ByteWriter();
+  const scale = scaleOf(history.boardSize);
+  const quantum = LINK_QUANTUM * scale;
+  const layout =
+    history.nodes &&
+    !sameLayout(history.nodes, undefined, history.initialNodes, history.boardSize, quantum / 2)
+      ? history.nodes
+      : null;
   out.u8(LINK_VERSION);
-  out.u8(history.firstPlayer === "ai" ? 1 : 0);
+  out.u8((history.firstPlayer === "ai" ? FLAG_AI_FIRST : 0) | (layout ? FLAG_LAYOUT : 0));
   out.u16(history.initialNodes);
   out.u16(history.boardSize);
   out.u16(history.moves.length);
   out.u16(history.cursor);
-  const scale = scaleOf(history.boardSize);
+  if (layout) {
+    const point = deltaWriter(out, quantum);
+    for (const [x, y] of layout) point({ x, y });
+  }
   for (const move of history.moves) {
     out.varint(move.fromNode);
     out.varint(move.toNode);
@@ -307,17 +336,30 @@ export function decodeRecord(payload: string): GameRecord | null {
   const reader = new ByteReader(bytes);
   try {
     const version = reader.u8();
-    if (version !== LINK_VERSION && version !== STROKE_LINK_VERSION) return null;
+    if (![LINK_VERSION, CUBIC_LINK_VERSION, STROKE_LINK_VERSION].includes(version)) return null;
     const flags = reader.u8();
     const initialNodes = reader.u16();
     const boardSize = reader.u16();
     if (!isBoard(boardSize)) return null;
     const count = reader.u16();
     const cursor = reader.u16();
+    if (initialNodes > MAX_NODES) return null;
+    let nodes: Position[];
+    if (version !== LINK_VERSION) {
+      nodes = circleLayout(initialNodes, boardSize);
+    } else if (flags & FLAG_LAYOUT) {
+      const point = deltaReader(reader, LINK_QUANTUM * scaleOf(boardSize));
+      nodes = Array.from({ length: initialNodes }, () => {
+        const p = point();
+        return [p.x, p.y];
+      });
+    } else {
+      nodes = openingLayout(initialNodes, boardSize);
+    }
     const moves: Move[] = [];
     for (let m = 0; m < count; m++) {
       const move =
-        version === LINK_VERSION ? readCurveMove(reader, boardSize) : readStrokeMove(reader);
+        version === STROKE_LINK_VERSION ? readStrokeMove(reader) : readCurveMove(reader, boardSize);
       if (!move) return null;
       moves.push(move);
     }
@@ -326,7 +368,8 @@ export function decodeRecord(payload: string): GameRecord | null {
       version: 1,
       initialNodes,
       boardSize,
-      firstPlayer: flags & 1 ? "ai" : "human",
+      nodes,
+      firstPlayer: flags & FLAG_AI_FIRST ? "ai" : "human",
       moves: moves.map(toFixtureMove),
       cursor,
     });
@@ -485,6 +528,7 @@ export function sameGame(a: GameRecord, b: GameRecord): boolean {
   if (a.initialNodes !== b.initialNodes || a.boardSize !== b.boardSize) return false;
   if (a.firstPlayer !== b.firstPlayer) return false;
   const quantum = LINK_QUANTUM * scaleOf(a.boardSize);
+  if (!sameLayout(a.nodes, b.nodes, a.initialNodes, a.boardSize, quantum)) return false;
   const shared = Math.min(a.moves.length, b.moves.length);
   for (let i = 0; i < shared; i++) {
     if (!sameMove(a.moves[i], b.moves[i], quantum)) return false;

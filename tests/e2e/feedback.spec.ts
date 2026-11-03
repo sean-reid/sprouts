@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises";
 
 import { expect, test, type Page } from "@playwright/test";
+import type { GameRecord } from "../../web/history";
 import {
   armFlashProbe,
   clickAway,
@@ -15,6 +16,7 @@ import {
   pixelAt,
   PLACING_HINT,
   readFlashProbe,
+  recordedNodeOnScreen,
   ringPixel,
   shot,
   type Client,
@@ -61,24 +63,26 @@ test.beforeEach(async ({ page }) => {
   await page.addInitScript(interceptWorkerMessages);
 });
 
-// The recorded first exchange: a straight chord 0 to 1 and the AI's reply
-// 2 to 0 above it, so the stroke below only ever meets the chord.
-async function openFirstExchange(page: Page): Promise<void> {
+// The recorded first exchange on the circle layout it carries: a straight
+// chord 0 to 1 and the AI's reply 2 to 0 above it, so the stroke below only
+// ever meets the chord.
+async function openFirstExchange(page: Page): Promise<GameRecord> {
   const record = await readFile("fixtures/saved/first-exchange.json", "utf8");
   await page.addInitScript((saved) => localStorage.setItem("sprouts.game", saved), record);
   await page.goto("/");
   await expect(page.locator("#status")).toHaveText("Your turn!", { timeout: 20_000 });
+  return JSON.parse(record) as GameRecord;
 }
 
 test("a stroke across an existing line flashes the crossed segment", async ({ page }) => {
-  await openFirstExchange(page);
+  const record = await openFirstExchange(page);
 
   // Node 3 to node 2 by way of the corner past the first chord, so the
   // stroke crosses it a third of the way along from node 0.
-  const n0 = await nodeOnScreen(page, 0, 4);
-  const n1 = await nodeOnScreen(page, 1, 4);
-  const n2 = await nodeOnScreen(page, 2, 4);
-  const n3 = await nodeOnScreen(page, 3, 4);
+  const n0 = await recordedNodeOnScreen(page, record, 0);
+  const n1 = await recordedNodeOnScreen(page, record, 1);
+  const n2 = await recordedNodeOnScreen(page, record, 2);
+  const n3 = await recordedNodeOnScreen(page, record, 3);
   const corner = { x: n0.x, y: n1.y };
   await page.mouse.move(n3.x, n3.y);
   await page.mouse.down();
