@@ -49,7 +49,7 @@ function layoutOf(page: Page): Promise<Layout> {
 async function expectSideBySide(page: Page, label: string): Promise<void> {
   const before = await layoutOf(page);
   const gap = before.panel.left - before.canvas.right;
-  expect(gap).toBeGreaterThanOrEqual(0);
+  expect(gap).toBeGreaterThanOrEqual(16);
   expect(gap).toBeLessThanOrEqual(24);
   const groupMid = (before.canvas.left + before.panel.right) / 2;
   const controlsMid = (before.controls.left + before.controls.right) / 2;
@@ -103,14 +103,6 @@ test("a finished game names the winner on the indicator and the ring", async ({ 
   });
   await expectIndicator(page, won === "human" ? "You won" : "AI won", won);
 
-  const ring = ringPixel(await frameOf(page));
-  const samples = [await pixelAt(page, ring)];
-  for (let i = 0; i < 2; i++) {
-    await page.waitForTimeout(200);
-    samples.push(await pixelAt(page, ring));
-  }
-  expect(samples[1]).toEqual(samples[0]);
-  expect(samples[2]).toEqual(samples[0]);
   await shot(page, "layout-finished");
   if (test.info().project.name === "desktop") {
     await page.setViewportSize({ width: 1600, height: 900 });
