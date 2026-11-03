@@ -1,0 +1,167 @@
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  background: #0a0a0a;
+  color: #ffffff;
+  font-family:
+    -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  height: 100vh;
+  height: 100dvh;
+  padding: 10px;
+  overflow: hidden;
+  touch-action: manipulation;
+}
+
+h1 {
+  font-size: clamp(20px, 5vh, 32px);
+  font-weight: 300;
+  letter-spacing: 6px;
+  margin-bottom: 8px;
+  flex-shrink: 0;
+}
+
+#status {
+  font-size: 13px;
+  color: #a0a0a0;
+  margin-bottom: 8px;
+  min-height: 18px;
+  text-align: center;
+  flex-shrink: 0;
+}
+
+#status.win {
+  color: #10b981;
+}
+
+#status.lose {
+  color: #ef4444;
+}
+
+.controls {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 12px;
+  flex-wrap: wrap;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+button {
+  background: #1a1a1a;
+  border: 1px solid #2a2a2a;
+  color: #a0a0a0;
+  padding: 8px 14px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+
+button:hover:not(:disabled) {
+  background: #252525;
+  color: #ffffff;
+}
+
+button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+button.confirm-btn {
+  background: #10b981;
+  color: white;
+  border-color: #059669;
+  padding: 12px 24px;
+  font-weight: 600;
+}
+
+.canvas-container {
+  position: relative;
+  flex-grow: 1;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  width: 100%;
+  min-height: 0;
+  padding-bottom: 20px;
+}
+
+#canvas {
+  background: #1a1a1a;
+  border: 1px solid #2a2a2a;
+  display: block;
+  touch-action: none;
+  max-width: 100%;
+  max-height: 100%;
+  width: auto;
+  height: auto;
+  aspect-ratio: 1 / 1;
+}
+
+#mobileOverlay {
+  position: fixed;
+  bottom: 40px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: none;
+  gap: 12px;
+  z-index: 100;
+  background: rgba(20, 20, 20, 0.95);
+  padding: 16px;
+  border-radius: 12px;
+  border: 1px solid #333;
+  box-shadow: 0 10px 25px rgba(0, 0, 0, 0.5);
+}
+
+#mobileOverlay.visible {
+  display: flex;
+}
+
+.modal {
+  display: none;
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.9);
+  justify-content: center;
+  align-items: center;
+  z-index: 1000;
+}
+
+.modal.visible {
+  display: flex;
+}
+
+.modal-content {
+  background: #1a1a1a;
+  border: 1px solid #2a2a2a;
+  padding: 40px 20px;
+  border-radius: 4px;
+  text-align: center;
+  width: 90%;
+  max-width: 400px;
+}
+
+.modal-content h2 {
+  letter-spacing: 4px;
+  margin-bottom: 20px;
+}
+
+.modal-content p {
+  margin-bottom: 30px;
+  color: #a0a0a0;
+}
+
+.modal-actions {
+  display: flex;
+  gap: 12px;
+  justify-content: center;
+}

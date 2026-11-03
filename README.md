@@ -7,6 +7,7 @@ Browser-based Sprouts with AI opponent using morphological skeleton pathfinding.
 Sprouts is a pen-and-paper game where players draw lines between nodes. Each line adds a new node. Nodes can have at most 3 connections, lines cannot cross. Last player able to move wins.
 
 **Features:**
+
 - HTML5 Canvas with touch/mouse support
 - AI using Zhang-Suen thinning + A* pathfinding on morphological skeleton
 - Minimax search (2 ply) with alpha-beta pruning
@@ -15,16 +16,17 @@ Sprouts is a pen-and-paper game where players draw lines between nodes. Each lin
 
 ## Build
 
+Needs Rust with the `wasm32-unknown-unknown` target, wasm-pack, and Node 24.
+
 ```bash
-# Install wasm-pack
-curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
-
-# Build
-wasm-pack build --target web --release
-
-# Serve
-python3 -m http.server 8000
+npm install
+npm run dev        # dev server; compiles the crate to wasm on start
+npm run build      # production bundle in dist/
+npm run test:e2e   # Playwright at 375, 768 and 1024 wide
+cargo test
 ```
+
+Merges to main deploy `dist/` to Cloudflare Pages.
 
 ## Architecture
 

@@ -138,7 +138,10 @@ pub fn resample_polyline(points: &[Point], target_spacing: f64) -> Vec<Point> {
     }
 
     // Ensure last point is included
-    if result.last().is_none_or(|p| distance(p, &points[points.len() - 1]) > 1.0) {
+    if result
+        .last()
+        .is_none_or(|p| distance(p, &points[points.len() - 1]) > 1.0)
+    {
         result.push(points[points.len() - 1]);
     }
 
@@ -147,9 +150,11 @@ pub fn resample_polyline(points: &[Point], target_spacing: f64) -> Vec<Point> {
 
 /// Apply Chaikin's corner cutting algorithm for smooth organic curves
 pub fn smooth_path_chaikin(points: &[Point], iterations: usize) -> Vec<Point> {
-    if points.len() < 3 { return points.to_vec(); }
+    if points.len() < 3 {
+        return points.to_vec();
+    }
     let mut current = points.to_vec();
-    
+
     // Store original endpoints to prevent "shrinking" away from nodes
     let start_node = points[0];
     let end_node = points[points.len() - 1];
@@ -160,23 +165,37 @@ pub fn smooth_path_chaikin(points: &[Point], iterations: usize) -> Vec<Point> {
         for i in 0..current.len() - 1 {
             let p0 = &current[i];
             let p1 = &current[i + 1];
-            next.push(Point::new(0.75 * p0.x + 0.25 * p1.x, 0.75 * p0.y + 0.25 * p1.y));
-            next.push(Point::new(0.25 * p0.x + 0.75 * p1.x, 0.25 * p0.y + 0.75 * p1.y));
+            next.push(Point::new(
+                0.75 * p0.x + 0.25 * p1.x,
+                0.75 * p0.y + 0.25 * p1.y,
+            ));
+            next.push(Point::new(
+                0.25 * p0.x + 0.75 * p1.x,
+                0.25 * p0.y + 0.75 * p1.y,
+            ));
         }
         next.push(current[current.len() - 1]); // Keep end
         current = next;
     }
 
     // Force exact endpoint alignment
-    if let Some(first) = current.first_mut() { *first = start_node; }
-    if let Some(last) = current.last_mut() { *last = end_node; }
+    if let Some(first) = current.first_mut() {
+        *first = start_node;
+    }
+    if let Some(last) = current.last_mut() {
+        *last = end_node;
+    }
 
     current
 }
 
 /// Remove doublebacks: only shortcut when the direct line saves significant
 /// path length (>40%), preserving intentional curves.
-pub fn shortcut_path(points: &[Point], distance_transform: &crate::types::Grid<u8>, min_clearance: u8) -> Vec<Point> {
+pub fn shortcut_path(
+    points: &[Point],
+    distance_transform: &crate::types::Grid<u8>,
+    min_clearance: u8,
+) -> Vec<Point> {
     if points.len() <= 2 {
         return points.to_vec();
     }
@@ -209,11 +228,18 @@ pub fn shortcut_path(points: &[Point], distance_transform: &crate::types::Grid<u
 }
 
 /// Check that every pixel along a straight line has sufficient clearance.
-fn line_clears_obstacles(a: &Point, b: &Point, distance_transform: &crate::types::Grid<u8>, min_clearance: u8) -> bool {
+fn line_clears_obstacles(
+    a: &Point,
+    b: &Point,
+    distance_transform: &crate::types::Grid<u8>,
+    min_clearance: u8,
+) -> bool {
     let dx = b.x - a.x;
     let dy = b.y - a.y;
     let len = (dx * dx + dy * dy).sqrt();
-    if len < 1.0 { return true; }
+    if len < 1.0 {
+        return true;
+    }
     let steps = (len * 2.0).ceil() as usize; // sample every ~0.5px
     for s in 0..=steps {
         let t = s as f64 / steps as f64;
@@ -320,17 +346,32 @@ mod tests {
 
     #[test]
     fn crossing_segments() {
-        assert!(segments_intersect(&p(0.0, 0.0), &p(10.0, 10.0), &p(0.0, 10.0), &p(10.0, 0.0)));
+        assert!(segments_intersect(
+            &p(0.0, 0.0),
+            &p(10.0, 10.0),
+            &p(0.0, 10.0),
+            &p(10.0, 0.0)
+        ));
     }
 
     #[test]
     fn parallel_segments() {
-        assert!(!segments_intersect(&p(0.0, 0.0), &p(10.0, 0.0), &p(0.0, 1.0), &p(10.0, 1.0)));
+        assert!(!segments_intersect(
+            &p(0.0, 0.0),
+            &p(10.0, 0.0),
+            &p(0.0, 1.0),
+            &p(10.0, 1.0)
+        ));
     }
 
     #[test]
     fn non_crossing_segments() {
-        assert!(!segments_intersect(&p(0.0, 0.0), &p(1.0, 0.0), &p(2.0, 0.0), &p(3.0, 0.0)));
+        assert!(!segments_intersect(
+            &p(0.0, 0.0),
+            &p(1.0, 0.0),
+            &p(2.0, 0.0),
+            &p(3.0, 0.0)
+        ));
     }
 
     #[test]

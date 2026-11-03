@@ -11,7 +11,7 @@ use std::hash::{Hash, Hasher};
 
 #[derive(Clone)]
 pub struct AbstractState {
-    pub nodes: Vec<(usize, u8)>,        // (node_id, connection_count)
+    pub nodes: Vec<(usize, u8)>, // (node_id, connection_count)
     pub is_ai_turn: bool,
     pub next_node_id: usize,
     /// Set of node pairs (a, b) where a < b that can reach each other.
@@ -53,7 +53,11 @@ impl TranspositionTable {
 }
 
 fn pair_key(a: usize, b: usize) -> (usize, usize) {
-    if a <= b { (a, b) } else { (b, a) }
+    if a <= b {
+        (a, b)
+    } else {
+        (b, a)
+    }
 }
 
 impl AbstractState {
@@ -185,7 +189,8 @@ impl AbstractState {
             .collect();
 
         if !dead.is_empty() {
-            self.adjacency.retain(|&(a, b)| !dead.contains(&a) && !dead.contains(&b));
+            self.adjacency
+                .retain(|&(a, b)| !dead.contains(&a) && !dead.contains(&b));
         }
 
         // Remove self-loop entries for nodes with cc > 1
@@ -289,8 +294,8 @@ impl AbstractState {
             .sum();
         let est_remaining = (total_lives - 1).max(0);
         let current_makes_last = est_remaining % 2 == 1;
-        let parity_favors_ai = (self.is_ai_turn && current_makes_last)
-            || (!self.is_ai_turn && !current_makes_last);
+        let parity_favors_ai =
+            (self.is_ai_turn && current_makes_last) || (!self.is_ai_turn && !current_makes_last);
 
         let parity_weight = if est_remaining <= 4 {
             300.0

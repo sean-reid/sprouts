@@ -89,7 +89,10 @@ mod tests {
     fn returns_some_for_move_1_n4() {
         let gs = state_after_human_first_move(4);
         let result = lookup_opening(&gs);
-        assert!(result.is_some(), "Should suggest AI's first response for n=4");
+        assert!(
+            result.is_some(),
+            "Should suggest AI's first response for n=4"
+        );
     }
 
     #[test]

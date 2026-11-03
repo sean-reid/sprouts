@@ -1,7 +1,10 @@
 use crate::abstract_graph::{abstract_minimax, AbstractMove, AbstractState, TranspositionTable};
 use crate::node_classifier::classify_nodes;
 use crate::opening_book;
-use crate::pathfinding::{find_path_on_skeleton, find_path_relaxed, find_path_tight, find_self_loop_on_skeleton, generate_geometric_self_loop};
+use crate::pathfinding::{
+    find_path_on_skeleton, find_path_relaxed, find_path_tight, find_self_loop_on_skeleton,
+    generate_geometric_self_loop,
+};
 use crate::types::{GameState, Move};
 use crate::validation::{validate_ai_move, validate_ai_move_tight};
 
@@ -52,7 +55,8 @@ fn generate_concrete_moves_from_classification(
                 new_node_pos,
                 player: state.current_player,
             };
-            if validate_ai_move(state, &mov).is_ok() || validate_ai_move_tight(state, &mov).is_ok() {
+            if validate_ai_move(state, &mov).is_ok() || validate_ai_move_tight(state, &mov).is_ok()
+            {
                 moves.push(mov);
             }
         }
@@ -95,7 +99,9 @@ fn generate_concrete_moves_from_classification(
                 find_path_on_skeleton(state, *from_id, *to_id),
             ];
             for path_opt in paths.into_iter().flatten() {
-                if path_opt.len() < 3 { continue; }
+                if path_opt.len() < 3 {
+                    continue;
+                }
                 let new_node_pos = find_optimal_node_placement(&path_opt, state);
                 let mov = Move {
                     from_node: *from_id,
@@ -104,7 +110,9 @@ fn generate_concrete_moves_from_classification(
                     new_node_pos,
                     player: state.current_player,
                 };
-                if validate_ai_move(state, &mov).is_ok() || validate_ai_move_tight(state, &mov).is_ok() {
+                if validate_ai_move(state, &mov).is_ok()
+                    || validate_ai_move_tight(state, &mov).is_ok()
+                {
                     moves.push(mov);
                     break;
                 }
@@ -234,10 +242,8 @@ pub fn find_optimal_node_placement(
             for seg_idx in 1..line.polyline.len() {
                 let p1 = &line.polyline[seg_idx - 1];
                 let p2 = &line.polyline[seg_idx];
-                let dist = point_to_segment_distance(
-                    candidate.x, candidate.y,
-                    p1.x, p1.y, p2.x, p2.y,
-                );
+                let dist =
+                    point_to_segment_distance(candidate.x, candidate.y, p1.x, p1.y, p2.x, p2.y);
                 min_dist = min_dist.min(dist);
             }
         }
