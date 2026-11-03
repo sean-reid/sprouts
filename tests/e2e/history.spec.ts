@@ -5,21 +5,25 @@ import {
   type BrowserContextOptions,
   type Page,
 } from "@playwright/test";
-import { decodeRecord } from "../../web/history";
+import { decodeRecord, hasStroke } from "../../web/history";
 import type { Fixture } from "../../web/record";
 
 // Every step here replays moves through the engine, which on the 1000
 // board takes several seconds per apply.
 const expect = baseExpect.configure({ timeout: 20_000 });
 import {
+  awaitReply,
   clickAway,
   expectNodeDrawnAt,
+  expectSameStrokes,
   frameOf,
+  HASH_PREFIX,
   nodeOnScreen,
   openBoard,
   PLACING_HINT,
   playExchange,
   recordedNodeOnScreen,
+  share,
   shot,
   startGame,
   strokeCells,
@@ -40,41 +44,18 @@ function visitorOptions(): BrowserContextOptions {
 const current = (page: Page) => page.locator("#moveList [aria-current]");
 
 // Link payload lengths in characters, after the hash prefix: one exchange
-// on either board, and the nine move game, measured with headroom. The
-// first chord on the sunflower spans a third of the board, so one exchange
-// runs to about 62.
+// on either board, and the nine move game with the AI's reply to it,
+// measured with headroom. One exchange runs to about 62, since the chord
+// on the sunflower spans a third of the board; the nine move game runs
+// to 484, its raster-era AI lines being nothing the router redraws.
 const EXCHANGE_LINK_BUDGET = 70;
-const NINE_MOVE_LINK_BUDGET = 500;
-const HASH_PREFIX = "#game=";
+const NINE_MOVE_LINK_BUDGET = 520;
 const NINE_MOVES = "fixtures/saved/nine-moves-4n-1000.json";
 // A version 1 link: one exchange on the 500 board.
 const VERSION_1_LINK =
   "#game=AQAEAPQBAgACAAAAAQACABwMxAmvCbAJ8ArwCgIAAAAFAGwHxAn4A88BpgpR3gIe5AGEAvsKMwk";
 // A version 2 link of the saved first exchange, made when links carried no layout.
 const VERSION_2_LINK = "#game=AgAEAOgDAgACAAABAALYCegH7wHwAXh3AgAAA_gF6AeaAyVGJkUl";
-
-// Two renderings of one board agree when under a tenth of the stroke
-// cells differ.
-function expectSameStrokes(before: boolean[], after: boolean[]): void {
-  expect(after.length).toBe(before.length);
-  const differing = before.filter((cell, i) => cell !== after[i]).length;
-  const drawn = before.filter(Boolean).length;
-  test.info().annotations.push({ type: "stroke-cells", description: `${differing} of ${drawn}` });
-  expect(drawn).toBeGreaterThan(0);
-  expect(differing).toBeLessThanOrEqual(Math.ceil(drawn * 0.1));
-}
-
-// Shares the game and returns the link and its payload length.
-async function share(page: Page, label: string): Promise<{ url: string; payload: number }> {
-  await page.locator("#shareBtn").click();
-  await expect(page.locator("#status")).toHaveText(/Link copied|Copy the link/);
-  const url = page.url();
-  const at = url.indexOf(HASH_PREFIX);
-  expect(at).toBeGreaterThan(0);
-  const payload = url.length - at - HASH_PREFIX.length;
-  test.info().annotations.push({ type: label, description: String(payload) });
-  return { url, payload };
-}
 
 // A stroke that leaves the board on its way between two nodes: the engine
 // accepts it, so a saved game with one must load again.
@@ -220,7 +201,9 @@ test("a nine move game shares as a short link that rebuilds the same board", asy
   await page.goto("/");
   await expect(entries(page)).toHaveCount(9, { timeout: 120_000 });
   await expect(current(page)).toHaveText(/^9\./);
-  await expect(page.locator("#status")).not.toHaveText(/Initializing|Replay/);
+  // The record leaves the AI to move, and it has one move left.
+  await awaitReply(page);
+  const total = await entries(page).count();
   const before = await strokeCells(page);
   const { url, payload } = await share(page, "nine-move-payload-chars");
   expect(payload).toBeLessThan(NINE_MOVE_LINK_BUDGET);
@@ -229,17 +212,18 @@ test("a nine move game shares as a short link that rebuilds the same board", asy
   const visitor = await browser.newContext(visitorOptions());
   const other = await visitor.newPage();
   await other.goto(url);
-  await expect(other.locator("#status")).toHaveText(/^Reviewing: move 9 of 9/, {
-    timeout: 120_000,
-  });
+  await expect(other.locator("#status")).toHaveText(
+    new RegExp(`^Reviewing: move ${total} of ${total}`),
+    { timeout: 120_000 },
+  );
   await expect(entries(other)).toHaveText(await entries(page).allTextContents());
   await shot(other, "history-nine-visitor");
   expectSameStrokes(before, await strokeCells(other));
 
   await other.locator("#backBtn").click();
-  await expect(current(other)).toHaveText(/^8\./);
+  await expect(current(other)).toHaveText(new RegExp(`^${total - 1}\\.`));
   await other.locator("#forwardBtn").click();
-  await expect(current(other)).toHaveText(/^9\./);
+  await expect(current(other)).toHaveText(new RegExp(`^${total}\\.`));
   await expect(other.locator("#forwardBtn")).toBeDisabled();
   await visitor.close();
 });
@@ -273,10 +257,10 @@ test("a version 1 link of the saved game reopens the live game", async ({ page }
   if (!linked) throw new Error("the version 1 link does not decode");
   const saved = {
     ...linked,
-    moves: linked.moves.map((m) => ({
-      ...m,
-      newNode: [m.newNode[0] + 0.24, m.newNode[1] - 0.24],
-    })),
+    moves: linked.moves.map((m) => {
+      if (!hasStroke(m)) throw new Error("a version 1 link carries strokes");
+      return { ...m, newNode: [m.newNode[0] + 0.24, m.newNode[1] - 0.24] };
+    }),
   };
   await page.addInitScript((s) => localStorage.setItem("sprouts.game", s), JSON.stringify(saved));
   await page.goto("/" + VERSION_1_LINK);

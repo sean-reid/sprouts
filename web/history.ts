@@ -1,31 +1,75 @@
-import type { Cubic, Line, Move, Player, Point } from "../pkg/sprouts";
+import type {
+  Classification,
+  Classified,
+  Cubic,
+  FaceMove,
+  Line,
+  Move,
+  Outcome,
+  Player,
+  Point,
+  Rehearsal,
+} from "../pkg/sprouts";
 import { circleLayout, openingLayout, sameLayout, type Position } from "./layout";
 import type { Fixture, FixtureMove } from "./record";
 import { enclosedCount, shapeText } from "./shape";
 
+// A move a link carried as its face move and node; the engine draws the
+// curve on load.
+export interface TopologyMove {
+  from: number;
+  to: number;
+  face: FaceMove;
+  node: [number, number];
+}
+
+export type RecordMove = FixtureMove | TopologyMove;
+
 // A replay fixture plus the fields a resumed session needs, so a saved
-// game loads in the bench unchanged.
-export interface GameRecord extends Fixture {
+// game loads in the bench unchanged; a record decoded from a link may hold
+// moves the engine has yet to draw.
+export interface GameRecord extends Omit<Fixture, "moves"> {
   version: 1;
   firstPlayer: Player;
   cursor: number;
+  moves: RecordMove[];
 }
 
-// A move with the spline the engine fitted to it, once a snapshot has
-// reported one; the saved record keeps only the stroke.
+export function hasStroke(move: RecordMove): move is FixtureMove {
+  return "polyline" in move;
+}
+
+// A move with what the engine reported about it: the spline it fitted, and
+// the face move the router draws this very line from, when it does. The
+// saved record keeps only the stroke. A move that arrived as topology has
+// an empty polyline until the engine has drawn it.
 export interface RecordedMove extends Move {
   segments?: Cubic[];
+  topology?: FaceMove;
 }
+
+export function drawn(move: RecordedMove): boolean {
+  return move.polyline.length > 0;
+}
+
+type Applied = Extract<Outcome, { kind: "applied" }>;
 
 export const STORAGE_KEY = "sprouts.game";
 const HASH_PREFIX = "#game=";
 const RECORD_VERSION = 1;
-// Link version 1 carries thinned strokes, version 2 the fitted cubics, and
-// version 3 the starting layout when it is not the default; a version 1 or
-// 2 link was drawn on the circle layout.
-const LINK_VERSION = 3;
+// Link version 1 carries thinned strokes, version 2 the fitted cubics,
+// version 3 the starting layout when it is not the default, and version 4
+// a move as its face move where the router redraws it; a version 1 or 2
+// link was drawn on the circle layout.
+const LINK_VERSION = 4;
+// Matches ROUTER_VERSION in src/protocol.rs; a version 4 link carries it
+// right after the version byte, and the engine refuses a rehearsal for
+// any other.
+export const ROUTER_VERSION = 1;
+const LAYOUT_LINK_VERSION = 3;
 const CUBIC_LINK_VERSION = 2;
 const STROKE_LINK_VERSION = 1;
+const LINK_VERSIONS = [LINK_VERSION, LAYOUT_LINK_VERSION, CUBIC_LINK_VERSION, STROKE_LINK_VERSION];
 const FLAG_AI_FIRST = 1;
 const FLAG_LAYOUT = 2;
 // Coordinates travel as tenths of a world unit in a version 1 link.
@@ -37,9 +81,12 @@ const TENTHS = 10;
 // the chord of its neighbours is left out of the link.
 const CURVE_TOLERANCE = 1.5;
 export const STROKE_TOLERANCE = 1.5;
-// Per move shape in the link; 2 is reserved for the face-model move.
+// Per move shape in the link.
 const SHAPE_STROKE = 0;
 const SHAPE_CUBICS = 1;
+const SHAPE_FACE = 2;
+// Each move adds four half-edges to the face model.
+const HALF_EDGES_PER_MOVE = 4;
 // Points travel in whole units, which moves one by at most 0.71.
 export const LINK_QUANTUM = 1;
 // A link can claim any control point; the subdivision is capped so a
@@ -67,7 +114,7 @@ export class History {
   static from(record: GameRecord): History {
     const history = new History(record.initialNodes, record.boardSize, record.firstPlayer);
     history.nodes = record.nodes ?? null;
-    history.moves = record.moves.map(fromFixtureMove);
+    history.moves = record.moves.map(fromRecordMove);
     history.cursor = Math.min(Math.max(record.cursor, 0), history.moves.length);
     return history;
   }
@@ -90,11 +137,23 @@ export class History {
     return this.moverOf(this.cursor);
   }
 
-  // A move made from the cursor discards whatever was ahead of it.
-  push(move: Move): void {
+  // A move made from the cursor discards whatever was ahead of it; the
+  // AI's move comes with the face move it was drawn from.
+  push(move: Move, topology?: FaceMove): void {
     this.moves.length = this.cursor;
-    this.moves.push(cloneMove(move));
+    const kept = cloneMove(move);
+    if (topology) kept.topology = topology;
+    this.moves.push(kept);
     this.cursor = this.moves.length;
+  }
+
+  // A copy to work on while the game goes on.
+  clone(): History {
+    const copy = new History(this.initialNodes, this.boardSize, this.firstPlayer);
+    copy.nodes = this.nodes ? this.nodes.map(([x, y]) => [x, y]) : null;
+    copy.moves = this.moves.map(cloneMove);
+    copy.cursor = this.cursor;
+    return copy;
   }
 
   truncate(): void {
@@ -113,6 +172,23 @@ export class History {
     });
   }
 
+  // Takes the line the engine drew for move number index + 1 when the move
+  // arrived as topology.
+  settle(index: number, line: Line | undefined): void {
+    const move = this.moves[index];
+    if (!move || !line || drawn(move)) return;
+    if (line.fromNode === move.fromNode && line.toNode === move.toNode) {
+      move.polyline = line.polyline.map((p) => ({ x: p.x, y: p.y }));
+      move.newNodePos = { x: line.newNodePos.x, y: line.newNodePos.y };
+      move.segments = line.segments;
+    }
+  }
+
+  // Takes the outcome of applying move number index + 1.
+  applied(index: number, outcome: Applied): void {
+    this.settle(index, outcome.snapshot.lines[index]);
+  }
+
   // The id of the node move number index + 1 created.
   newNodeOf(index: number): number {
     return this.initialNodes + index;
@@ -125,7 +201,8 @@ export class History {
       const start = this.nodes?.[id];
       return start ? { x: start[0], y: start[1] } : null;
     }
-    return this.moves[id - this.initialNodes]?.newNodePos ?? null;
+    const move = this.moves[id - this.initialNodes];
+    return move?.newNodePos ?? null;
   }
 
   label(index: number): string {
@@ -158,7 +235,7 @@ export class History {
       boardSize: this.boardSize,
       ...(this.nodes ? { nodes: this.nodes } : {}),
       firstPlayer: this.firstPlayer,
-      moves: this.moves.map(toFixtureMove),
+      moves: this.moves.map(toRecordMove),
       cursor: this.cursor,
     };
   }
@@ -167,7 +244,13 @@ export class History {
 function cloneMove(move: RecordedMove): RecordedMove {
   const clone: RecordedMove = toMove(move);
   if (move.segments) clone.segments = move.segments;
+  if (move.topology) clone.topology = move.topology;
   return clone;
+}
+
+// The face move to send for a move the engine has yet to draw.
+export function pendingFace(move: RecordedMove): FaceMove | undefined {
+  return drawn(move) ? undefined : move.topology;
 }
 
 // The move as the engine takes it, without the segments the page keeps.
@@ -180,7 +263,10 @@ export function toMove(move: RecordedMove): Move {
   };
 }
 
-function toFixtureMove(move: Move): FixtureMove {
+// The saved record holds strokes only; a move the engine has not drawn
+// yet has none to give.
+function toRecordMove(move: RecordedMove): FixtureMove {
+  if (!drawn(move)) throw new RangeError("a move the engine has not drawn cannot be saved");
   return {
     from: move.fromNode,
     to: move.toNode,
@@ -189,12 +275,21 @@ function toFixtureMove(move: Move): FixtureMove {
   };
 }
 
-function fromFixtureMove(move: FixtureMove): Move {
+function fromRecordMove(move: RecordMove): RecordedMove {
+  if (hasStroke(move)) {
+    return {
+      fromNode: move.from,
+      toNode: move.to,
+      polyline: move.polyline.map(([x, y]) => ({ x, y })),
+      newNodePos: { x: move.newNode[0], y: move.newNode[1] },
+    };
+  }
   return {
     fromNode: move.from,
     toNode: move.to,
-    polyline: move.polyline.map(([x, y]) => ({ x, y })),
-    newNodePos: { x: move.newNode[0], y: move.newNode[1] },
+    polyline: [],
+    newNodePos: { x: move.node[0], y: move.node[1] },
+    topology: move.face,
   };
 }
 
@@ -234,7 +329,7 @@ function asRecord(value: unknown): GameRecord | null {
   if (v.firstPlayer !== "human" && v.firstPlayer !== "ai") return null;
   if (!Array.isArray(v.moves) || v.moves.length > 3 * v.initialNodes) return null;
   const nodes = v.initialNodes;
-  if (!v.moves.every((m, i) => isMove(m) && m.from < nodes + i && m.to < nodes + i)) {
+  if (!v.moves.every((m, i) => isRecordMove(m, nodes + i, HALF_EDGES_PER_MOVE * i))) {
     return null;
   }
   if (v.cursor > v.moves.length) return null;
@@ -272,12 +367,13 @@ function isLayout(value: unknown, count: number): value is [number, number][] {
   return Array.isArray(value) && value.length === count && value.every(isPair);
 }
 
-function isMove(value: unknown): value is FixtureMove {
+// A move before which `nodes` nodes and `halfEdges` half-edges exist.
+function isRecordMove(value: unknown, nodes: number, halfEdges: number): value is RecordMove {
   if (typeof value !== "object" || value === null) return false;
   const m = value as Record<string, unknown>;
+  if (!isCount(m.from) || !isCount(m.to) || m.from >= nodes || m.to >= nodes) return false;
+  if ("face" in m) return isPair(m.node) && isFace(m.face, m.from, m.to, nodes, halfEdges);
   return (
-    isCount(m.from) &&
-    isCount(m.to) &&
     Array.isArray(m.polyline) &&
     m.polyline.length >= 2 &&
     m.polyline.every(isPair) &&
@@ -285,22 +381,48 @@ function isMove(value: unknown): value is FixtureMove {
   );
 }
 
+function isFace(
+  value: unknown,
+  from: number,
+  to: number,
+  nodes: number,
+  halfEdges: number,
+): value is FaceMove {
+  if (typeof value !== "object" || value === null) return false;
+  const f = value as Record<string, unknown>;
+  const isSpoke = (at: unknown): boolean => at == null || (isCount(at) && at < halfEdges);
+  return (
+    f.a === from &&
+    f.b === to &&
+    isSpoke(f.atA) &&
+    isSpoke(f.atB) &&
+    Array.isArray(f.enclosed) &&
+    f.enclosed.every((id) => isCount(id) && id < nodes) &&
+    new Set(f.enclosed).size === f.enclosed.length
+  );
+}
+
 function scaleOf(boardSize: number): number {
   return boardSize / 1000;
 }
 
-// Share link layout, little endian: version u8, flags u8 (bit 0 is AI
-// first, bit 1 says the starting positions follow the header), initial
+// Share link layout, little endian: version u8, the router version u8
+// from version 4 on, flags u8 (bit 0 says the AI opens, bit 1 says the
+// starting positions follow the header), initial
 // nodes u16, board size u16, move count u16, cursor u16, the starting
 // positions as zigzag varint deltas in link quanta when they are not the
-// default layout, then per move: from and to as varints, a shape u8, a varint count, the
-// shape's points and the new node, every point as zigzag varint deltas
-// from the previous point in link quanta, starting at the origin. A stroke
-// counts its points; cubics count segments and carry the first start then
-// the other three control points of each. A move travels as whichever
-// encodes shorter. A version 1 link has from, to and point count as u16, the first
-// point as two u16 tenths, later points as zigzag varint deltas in tenths,
-// and the new node as two u16 tenths.
+// default layout, then per move: from and to as varints, a shape u8 and
+// the shape. Shapes 0 and 1 carry a varint count, the shape's points and
+// the new node, every point as zigzag varint deltas from the previous
+// point in link quanta, starting at the origin; a stroke counts its
+// points, cubics count segments and carry the first start then the other
+// three control points of each. Shape 2 carries the face move: the spoke
+// at each end as a varint one above the half-edge id with 0 for none, the
+// enclosed node ids as a varint count and varints, then the new node as a
+// point. A move travels as
+// whichever encodes shorter. A version 1 link has from, to and point
+// count as u16, the first point as two u16 tenths, later points as zigzag
+// varint deltas in tenths, and the new node as two u16 tenths.
 export function encodeRecord(history: History): string {
   const out = new ByteWriter();
   const scale = scaleOf(history.boardSize);
@@ -311,6 +433,7 @@ export function encodeRecord(history: History): string {
       ? history.nodes
       : null;
   out.u8(LINK_VERSION);
+  out.u8(ROUTER_VERSION);
   out.u8((history.firstPlayer === "ai" ? FLAG_AI_FIRST : 0) | (layout ? FLAG_LAYOUT : 0));
   out.u16(history.initialNodes);
   out.u16(history.boardSize);
@@ -323,14 +446,31 @@ export function encodeRecord(history: History): string {
   for (const move of history.moves) {
     out.varint(move.fromNode);
     out.varint(move.toNode);
-    const stroke = encodeStroke(move, scale);
-    const cubics = encodeCubics(move, scale);
-    out.append(cubics && cubics.length < stroke.length ? cubics : stroke);
+    const shapes = [encodeFace(move, scale), encodeCubics(move, scale), encodeStroke(move, scale)];
+    const shortest = shapes.reduce((best, shape) =>
+      shape && (!best || shape.length < best.length) ? shape : best,
+    );
+    if (!shortest) throw new RangeError("a move with no stroke and no topology");
+    out.append(shortest);
   }
   return base64url(out.bytes());
 }
 
-function encodeStroke(move: RecordedMove, scale: number): Uint8Array {
+function encodeFace(move: RecordedMove, scale: number): Uint8Array | null {
+  const face = move.topology;
+  if (!face || face.a !== move.fromNode || face.b !== move.toNode) return null;
+  const out = new ByteWriter();
+  out.u8(SHAPE_FACE);
+  out.varint(face.atA === undefined ? 0 : face.atA + 1);
+  out.varint(face.atB === undefined ? 0 : face.atB + 1);
+  out.varint(face.enclosed.length);
+  for (const id of face.enclosed) out.varint(id);
+  deltaWriter(out, LINK_QUANTUM * scale)(move.newNodePos);
+  return out.bytes();
+}
+
+function encodeStroke(move: RecordedMove, scale: number): Uint8Array | null {
+  if (!drawn(move)) return null;
   const out = new ByteWriter();
   const point = deltaWriter(out, LINK_QUANTUM * scale);
   const stroke = simplify(move.polyline, STROKE_TOLERANCE * scale);
@@ -358,6 +498,17 @@ function encodeCubics(move: RecordedMove, scale: number): Uint8Array | null {
   return out.bytes();
 }
 
+// A link whose topology moves were drawn by another router, which this
+// page would draw differently.
+export class StaleLink extends Error {
+  constructor() {
+    super("This link comes from another version of the game and cannot be replayed here");
+    this.name = "StaleLink";
+  }
+}
+
+// Null for a link that does not parse; throws StaleLink for one made for
+// another router.
 export function decodeRecord(payload: string): GameRecord | null {
   let bytes: Uint8Array;
   try {
@@ -368,7 +519,8 @@ export function decodeRecord(payload: string): GameRecord | null {
   const reader = new ByteReader(bytes);
   try {
     const version = reader.u8();
-    if (![LINK_VERSION, CUBIC_LINK_VERSION, STROKE_LINK_VERSION].includes(version)) return null;
+    if (!LINK_VERSIONS.includes(version)) return null;
+    if (version === LINK_VERSION && reader.u8() !== ROUTER_VERSION) throw new StaleLink();
     const flags = reader.u8();
     const initialNodes = reader.u16();
     const boardSize = reader.u16();
@@ -377,7 +529,7 @@ export function decodeRecord(payload: string): GameRecord | null {
     const cursor = reader.u16();
     if (initialNodes > MAX_NODES) return null;
     let nodes: Position[];
-    if (version !== LINK_VERSION) {
+    if (version < LAYOUT_LINK_VERSION) {
       nodes = circleLayout(initialNodes, boardSize);
     } else if (flags & FLAG_LAYOUT) {
       const point = deltaReader(reader, LINK_QUANTUM * scaleOf(boardSize));
@@ -388,10 +540,12 @@ export function decodeRecord(payload: string): GameRecord | null {
     } else {
       nodes = openingLayout(initialNodes, boardSize);
     }
-    const moves: Move[] = [];
+    const moves: RecordMove[] = [];
     for (let m = 0; m < count; m++) {
       const move =
-        version === STROKE_LINK_VERSION ? readStrokeMove(reader) : readCurveMove(reader, boardSize);
+        version === STROKE_LINK_VERSION
+          ? readStrokeMove(reader)
+          : readCurveMove(reader, boardSize, version === LINK_VERSION);
       if (!move) return null;
       moves.push(move);
     }
@@ -402,18 +556,32 @@ export function decodeRecord(payload: string): GameRecord | null {
       boardSize,
       nodes,
       firstPlayer: flags & FLAG_AI_FIRST ? "ai" : "human",
-      moves: moves.map(toFixtureMove),
+      moves,
       cursor,
     });
-  } catch {
+  } catch (error) {
+    if (error instanceof StaleLink) throw error;
     return null;
   }
 }
 
-function readCurveMove(reader: ByteReader, boardSize: number): Move | null {
-  const fromNode = reader.varint();
-  const toNode = reader.varint();
+// A move of a version 2 or later link; the face shape only from version 4.
+function readCurveMove(reader: ByteReader, boardSize: number, faces: boolean): RecordMove | null {
+  const from = reader.varint();
+  const to = reader.varint();
   const shape = reader.u8();
+  if (shape === SHAPE_FACE) {
+    if (!faces) return null;
+    const spoke = (): number | undefined => {
+      const raw = reader.varint();
+      return raw === 0 ? undefined : raw - 1;
+    };
+    const atA = spoke();
+    const atB = spoke();
+    const enclosed = Array.from({ length: reader.varint() }, () => reader.varint());
+    const node = deltaReader(reader, LINK_QUANTUM * scaleOf(boardSize))();
+    return { from, to, face: { a: from, atA, b: to, atB, enclosed }, node: [node.x, node.y] };
+  }
   const count = reader.varint();
   const scale = scaleOf(boardSize);
   const point = deltaReader(reader, LINK_QUANTUM * scale);
@@ -434,10 +602,10 @@ function readCurveMove(reader: ByteReader, boardSize: number): Move | null {
   } else {
     return null;
   }
-  return { fromNode, toNode, polyline, newNodePos: point() };
+  return toRecordMove({ fromNode: from, toNode: to, polyline, newNodePos: point() });
 }
 
-function readStrokeMove(reader: ByteReader): Move | null {
+function readStrokeMove(reader: ByteReader): RecordMove | null {
   const fromNode = reader.u16();
   const toNode = reader.u16();
   const points = reader.u16();
@@ -453,7 +621,7 @@ function readStrokeMove(reader: ByteReader): Move | null {
     last = q;
   }
   const newNodePos = { x: reader.u16() / TENTHS, y: reader.u16() / TENTHS };
-  return { fromNode, toNode, polyline, newNodePos };
+  return toRecordMove({ fromNode, toNode, polyline, newNodePos });
 }
 
 function deltaWriter(out: ByteWriter, quantum: number): (p: Point) => void {
@@ -503,6 +671,90 @@ function pointAt(c: Cubic, t: number): Point {
     x: w0 * c.p0.x + w1 * c.p1.x + w2 * c.p2.x + w3 * c.p3.x,
     y: w0 * c.p0.y + w1 * c.p1.y + w2 * c.p2.y + w3 * c.p3.y,
   };
+}
+
+// The real history, for the engine to say which moves the router redraws;
+// null while a move the engine has not drawn is in the list.
+export function classification(history: History): Classification | null {
+  if (!history.moves.every(drawn)) return null;
+  return {
+    initialNodes: history.initialNodes,
+    boardSize: history.boardSize,
+    firstPlayer: history.firstPlayer,
+    nodes: history.nodes?.map(([x, y]) => ({ x, y })),
+    moves: history.moves.map(toMove),
+    known: history.moves.map((move) => move.topology),
+  };
+}
+
+// The link's own reading of the game, for replaying on a fresh board the
+// way a visitor's engine will.
+export function rehearsal(history: History): Rehearsal | null {
+  const record = decodeRecord(encodeRecord(history));
+  if (!record) return null;
+  return {
+    routerVersion: ROUTER_VERSION,
+    initialNodes: record.initialNodes,
+    boardSize: record.boardSize,
+    firstPlayer: record.firstPlayer,
+    nodes: record.nodes?.map(([x, y]) => ({ x, y })),
+    moves: record.moves.map((move) =>
+      hasStroke(move)
+        ? { kind: "drawn", mov: fromRecordMove(move) }
+        : { kind: "routed", face: move.face, at: { x: move.node[0], y: move.node[1] } },
+    ),
+  };
+}
+
+// Sends a move the visitor's engine refused as geometry from now on.
+export function demote(history: History, index: number): boolean {
+  const move = history.moves[index];
+  if (!move?.topology || !drawn(move)) return false;
+  delete move.topology;
+  return true;
+}
+
+// The engine requests a share needs.
+export interface LinkEngine {
+  classify(plan: Classification): Promise<Classified>;
+  rehearse(plan: Rehearsal): Promise<number | undefined>;
+}
+
+// The game as the link will carry it, worked out on a copy: the engine
+// says which drawn moves the router redraws, then the link is replayed as
+// decoded and any topology move the replay refuses goes as geometry until
+// the whole link applies. A refused drawn move is blamed on the latest
+// topology move before it, whose redraw shifted the board under it; when
+// none precedes it the index comes back so the sharer can be told. A
+// history the engine refuses to classify, as one left with moves past a
+// stopped restore, keeps the face moves the AI reported.
+export async function prepareLink(
+  source: History,
+  engine: LinkEngine,
+): Promise<{ history: History; refusedAt?: number }> {
+  const history = source.clone();
+  const plan = classification(history);
+  if (plan) {
+    try {
+      const { topology } = await engine.classify(plan);
+      topology.forEach((face, i) => {
+        const move = history.moves[i];
+        if (move && face && !move.topology) move.topology = face;
+      });
+    } catch {
+      // The AI's own face moves stand; the rehearsal checks them anyway.
+    }
+  }
+  for (;;) {
+    const link = rehearsal(history);
+    if (!link) return { history };
+    const refused = await engine.rehearse(link);
+    if (refused === undefined) return { history };
+    if (demote(history, refused)) continue;
+    let blamed = refused - 1;
+    while (blamed >= 0 && !demote(history, blamed)) blamed--;
+    if (blamed < 0) return { history, refusedAt: refused };
+  }
 }
 
 export function shareUrl(history: History): string {
@@ -568,14 +820,16 @@ export function sameGame(a: GameRecord, b: GameRecord): boolean {
   return true;
 }
 
-function sameMove(
-  a: FixtureMove | undefined,
-  b: FixtureMove | undefined,
-  quantum: number,
-): boolean {
+function sameMove(a: RecordMove | undefined, b: RecordMove | undefined, quantum: number): boolean {
   if (!a || !b) return false;
   if (a.from !== b.from || a.to !== b.to) return false;
-  return Math.hypot(a.newNode[0] - b.newNode[0], a.newNode[1] - b.newNode[1]) <= quantum;
+  const [ax, ay] = nodeOf(a);
+  const [bx, by] = nodeOf(b);
+  return Math.hypot(ax - bx, ay - by) <= quantum;
+}
+
+function nodeOf(move: RecordMove): [number, number] {
+  return hasStroke(move) ? move.newNode : move.node;
 }
 
 function zigzag(n: number): number {

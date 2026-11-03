@@ -1,5 +1,13 @@
 import "./style.css";
-import type { AutoPlacement, Move, Outcome, Player, Rejection, Snapshot } from "../pkg/sprouts";
+import type {
+  AutoPlacement,
+  FaceMove,
+  Move,
+  Outcome,
+  Player,
+  Rejection,
+  Snapshot,
+} from "../pkg/sprouts";
 import { Dialog } from "./dialog";
 import { Engine, StaleRequest } from "./engine";
 import {
@@ -7,10 +15,13 @@ import {
   dropHash,
   History,
   loadSaved,
+  pendingFace,
+  prepareLink,
   recordFromHash,
   sameGame,
   save,
   shareUrl,
+  StaleLink,
   toMove,
   type GameRecord,
 } from "./history";
@@ -552,8 +563,8 @@ async function executeMove(): Promise<void> {
   else startAITurn();
 }
 
-function recordMove(move: Move, snapshot: Snapshot): void {
-  timeline.push(move);
+function recordMove(move: Move, snapshot: Snapshot, topology?: FaceMove): void {
+  timeline.push(move, topology);
   applySnapshot(snapshot);
   persist();
 }
@@ -609,7 +620,7 @@ async function performAIMove(): Promise<void> {
     state.animatingLine = { segments: reply.segments, newPos: reply.mov.newNodePos };
     if (state.reducedMotion) {
       state.animationProgress = 1;
-      void finishAIMove(reply.mov, epoch);
+      void finishAIMove(reply.mov, reply.topology, epoch);
       return;
     }
     state.animationProgress = 0;
@@ -618,7 +629,7 @@ async function performAIMove(): Promise<void> {
       if (epoch !== gameEpoch) return;
       state.animationProgress = Math.min((now - startTime) / AI_ANIMATION_MS, 1);
       if (state.animationProgress < 1) requestAnimationFrame(animate);
-      else void finishAIMove(reply.mov, epoch);
+      else void finishAIMove(reply.mov, reply.topology, epoch);
     };
     requestAnimationFrame(animate);
   } catch (error) {
@@ -630,7 +641,9 @@ async function performAIMove(): Promise<void> {
   }
 }
 
-async function finishAIMove(move: Move, epoch: number): Promise<void> {
+// The AI's line is router output, so its face move is kept with it for the
+// share link.
+async function finishAIMove(move: Move, topology: FaceMove, epoch: number): Promise<void> {
   const outcome = await engine.call("applyMove", move).catch(describe);
   if (epoch !== gameEpoch) return;
   state.mode = "idle";
@@ -640,7 +653,7 @@ async function finishAIMove(move: Move, epoch: number): Promise<void> {
   } else if (outcome.kind === "rejected") {
     setStatus("AI error: " + outcome.rejection.message, "lose");
   } else {
-    recordMove(move, outcome.snapshot);
+    recordMove(move, outcome.snapshot, topology);
     if (state.gameOver) showGameOver();
     else setStatus("Your turn!");
   }
@@ -648,8 +661,9 @@ async function finishAIMove(move: Move, epoch: number): Promise<void> {
 }
 
 // Moves the engine to the board after move number target by undoing or
-// re-applying stored moves. A stored move the engine now rejects ends the
-// list; the result says whether the target was reached in this game.
+// re-applying stored moves; a move that arrived as topology is drawn by
+// the engine. A stored move the engine now rejects ends the list; the
+// result says whether the target was reached in this game.
 async function seek(target: number): Promise<boolean> {
   const epoch = gameEpoch;
   const from = timeline.cursor;
@@ -670,7 +684,10 @@ async function seek(target: number): Promise<boolean> {
       if (!move) break;
       let outcome: Outcome;
       try {
-        outcome = await engine.call("applyMove", toMove(move));
+        const face = pendingFace(move);
+        outcome = face
+          ? await engine.call("applyFaceMove", face, move.newNodePos)
+          : await engine.call("applyMove", toMove(move));
       } catch (error) {
         if (epoch === gameEpoch) setStatus("Replay failed: " + describe(error), "lose");
         return false;
@@ -682,6 +699,7 @@ async function seek(target: number): Promise<boolean> {
         setStatus(`Replay stopped at move ${timeline.cursor + 1}: ${message}`, "lose");
         return false;
       }
+      timeline.applied(timeline.cursor, outcome);
       timeline.cursor++;
     }
     return true;
@@ -794,18 +812,61 @@ async function undoMove(): Promise<void> {
   }
 }
 
-async function share(): Promise<void> {
-  const url = shareUrl(timeline);
-  window.history.replaceState(null, "", url);
+// Copies text that is still being worked out. The clipboard write starts
+// inside the click, which is when Safari allows it, and takes the text
+// once it is ready; without ClipboardItem the write waits for the text
+// and may have lost the activation by then. False whenever the browser
+// would not take it, including on an origin with no clipboard at all.
+async function copyLater(text: Promise<string>): Promise<boolean> {
   try {
-    await navigator.clipboard.writeText(url);
-    setStatus("Link copied", "win");
+    if (typeof ClipboardItem === "undefined") {
+      await navigator.clipboard.writeText(await text);
+    } else {
+      await navigator.clipboard.write([
+        new ClipboardItem({
+          "text/plain": text.then((t) => new Blob([t], { type: "text/plain" })),
+        }),
+      ]);
+    }
+    return true;
   } catch {
-    shareUrlEl.hidden = false;
-    shareUrlEl.value = url;
-    shareUrlEl.focus();
-    shareUrlEl.select();
-    setStatus("Copy the link below to share this game");
+    return false;
+  }
+}
+
+// A copy of the game is checked and encoded while play goes on; the link
+// goes out with a note when a visitor's replay would stop short.
+let sharing = false;
+async function share(): Promise<void> {
+  if (sharing) return;
+  sharing = true;
+  shareBtn.disabled = true;
+  setStatus("Checking the link");
+  try {
+    const prepared = prepareLink(timeline, {
+      classify: (plan) => engine.call("classify", plan),
+      rehearse: (plan) => engine.call("rehearse", plan),
+    });
+    const copied = copyLater(prepared.then(({ history }) => shareUrl(history)));
+    const { history, refusedAt } = await prepared;
+    const url = shareUrl(history);
+    window.history.replaceState(null, "", url);
+    const warning =
+      refusedAt === undefined ? "" : ` A visitor's replay may stop at move ${refusedAt + 1}.`;
+    if (await copied) {
+      setStatus("Link copied." + warning, refusedAt === undefined ? "win" : "");
+    } else {
+      shareUrlEl.hidden = false;
+      shareUrlEl.value = url;
+      shareUrlEl.focus();
+      shareUrlEl.select();
+      setStatus("Copy the link below to share this game." + warning);
+    }
+  } catch (error) {
+    setStatus("Could not make the link: " + describe(error), "lose");
+  } finally {
+    sharing = false;
+    shareBtn.disabled = false;
   }
 }
 
@@ -933,8 +994,18 @@ function chooseFirstPlayer(player: Player): void {
   }
 }
 
+// A link made for another router opens whatever game is saved, with a
+// word about why.
 async function boot(): Promise<void> {
-  const linked = recordFromHash(location.hash);
+  let linked: GameRecord | null = null;
+  let stale: StaleLink | null = null;
+  try {
+    linked = recordFromHash(location.hash);
+  } catch (error) {
+    if (!(error instanceof StaleLink)) throw error;
+    stale = error;
+    dropHash();
+  }
   const saved = loadSaved();
   const epoch = gameEpoch;
   try {
@@ -950,6 +1021,8 @@ async function boot(): Promise<void> {
     } else {
       await newGame(DEFAULT_NODES);
     }
+    // Starting or restoring the table bumped the epoch once.
+    if (stale && epoch + 1 === gameEpoch) setStatus(stale.message, "lose");
   } catch (error) {
     // A New Game clicked during the load has already replaced the table.
     if (epoch + 1 !== gameEpoch) return;

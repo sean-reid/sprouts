@@ -1,9 +1,21 @@
 import { readFileSync } from "node:fs";
 import { basename } from "node:path";
-import { expect, test } from "@playwright/test";
+import { expect, test, type BrowserContextOptions, type Page } from "@playwright/test";
+import { decodeRecord, hasStroke, sameGame } from "../../web/history";
 import type { Fixture } from "../../web/record";
 import { HIGHLIGHT_COLOR } from "../../web/render";
-import { recordNodesOnScreen, ringSamplesAround } from "./helpers";
+import {
+  awaitReply,
+  expectSameStrokes,
+  HASH_PREFIX,
+  recordNodesOnScreen,
+  colourPixelsNear,
+  rowIds,
+  savedRecord,
+  share,
+  shot,
+  strokeCells,
+} from "./helpers";
 
 // A recorded game must survive a share: the engine refits each move from
 // the link's thinned geometry, and a move it then rejects stops the
@@ -16,28 +28,53 @@ const fixtures = [
   "fixtures/games/selfplay-4n-500.json",
 ];
 
-const entries = (page: import("@playwright/test").Page) => page.locator("#moveList li");
+// Games played on the page against the current AI, the human strokes
+// wobbly, so AI moves travel as face moves and human moves as geometry.
+// Per game: the payload budget in characters (231 and 440 measured, with
+// headroom) and how many of the AI's moves go as topology; the nine-node
+// game has one the visitor's engine cannot route, which the share's
+// rehearsal sends as geometry instead.
+const routed: [string, number, number][] = [
+  ["fixtures/saved/eight-moves-4n-1000.json", 250, 4],
+  ["fixtures/saved/ten-moves-9n-1000.json", 480, 4],
+];
+
+const entries = (page: Page) => page.locator("#moveList li");
+
+// A second visitor with the same screen but no saved game of their own.
+function visitorOptions(): BrowserContextOptions {
+  const { viewport, hasTouch, isMobile, deviceScaleFactor } = test.info().project.use;
+  const options: BrowserContextOptions = {};
+  if (viewport) options.viewport = viewport;
+  if (hasTouch !== undefined) options.hasTouch = hasTouch;
+  if (isMobile !== undefined) options.isMobile = isMobile;
+  if (deviceScaleFactor !== undefined) options.deviceScaleFactor = deviceScaleFactor;
+  return options;
+}
+
+// Opens the page on a recorded game and returns its move count.
+async function openSaved(page: Page, file: string): Promise<number> {
+  const fixture = JSON.parse(readFileSync(file, "utf8")) as Fixture;
+  const record = { firstPlayer: "human", cursor: fixture.moves.length, ...fixture };
+  await page.addInitScript((s) => localStorage.setItem("sprouts.game", s), JSON.stringify(record));
+  await page.goto("/");
+  await expect(entries(page)).toHaveCount(fixture.moves.length, { timeout: 240_000 });
+  await expect(page.locator("#status")).not.toHaveText(/Initializing|Replay/, {
+    timeout: 240_000,
+  });
+  return fixture.moves.length;
+}
 
 for (const file of fixtures) {
   test(`${basename(file, ".json")} replays every move from its link`, async ({ page, browser }) => {
     test.skip(test.info().project.name !== "desktop", "a replay does not depend on the viewport");
     test.setTimeout(600_000);
-    const fixture = JSON.parse(readFileSync(file, "utf8")) as Fixture;
-    const total = fixture.moves.length;
-    const record = { firstPlayer: "human", cursor: total, ...fixture };
-    await page.addInitScript(
-      (s) => localStorage.setItem("sprouts.game", s),
-      JSON.stringify(record),
-    );
-    await page.goto("/");
-    await expect(entries(page)).toHaveCount(total, { timeout: 240_000 });
-    await expect(page.locator("#status")).not.toHaveText(/Initializing|Replay/, {
-      timeout: 240_000,
-    });
+    await openSaved(page, file);
+    await awaitReply(page);
+    const record = await savedRecord(page);
+    const total = record.moves.length;
 
-    await page.locator("#shareBtn").click();
-    await expect(page.locator("#status")).toHaveText(/Link copied|Copy the link/);
-    const url = page.url();
+    const { url } = await share(page, `${basename(file, ".json")}-payload-chars`);
     const visitor = await browser.newContext();
     const other = await visitor.newPage();
     await other.goto(url);
@@ -45,16 +82,90 @@ for (const file of fixtures) {
       new RegExp(`^Reviewing: move ${total} of ${total}\\.`),
       { timeout: 240_000 },
     );
-    // The visitor lands on the last move, which the board points out for
-    // two seconds from the end of the seek.
-    const last = fixture.moves[total - 1]!;
-    const nodes = await recordNodesOnScreen(other, fixture);
-    for (const id of [last.from, last.to]) {
-      await expect
-        .poll(() => ringSamplesAround(other, nodes[id]!, 14, HIGHLIGHT_COLOR))
-        .toBeGreaterThanOrEqual(8);
-    }
+    // The visitor lands on the last move. Pointing at its row keeps the
+    // board pointing the move out, so the highlight is read off the move
+    // the page marks current, at the node ids its row names. The lines
+    // through an end node cross its ring, so the check counts highlight
+    // pixels in a 40 px box around the node: ring and line outline come to
+    // about 350, the node's own label to about 20.
     await expect(entries(other)).toHaveCount(total);
+    const current = other.locator("#moveList [aria-current]");
+    const index = Number(await current.getAttribute("data-move"));
+    expect(index).toBe(total - 1);
+    await entries(other).nth(index).locator("button").hover();
+    const [from, to] = await rowIds(other, index);
+    const nodes = await recordNodesOnScreen(other, record);
+    for (const id of [from, to]) {
+      await expect
+        .poll(() => colourPixelsNear(other, nodes[id]!, 20, HIGHLIGHT_COLOR))
+        .toBeGreaterThanOrEqual(60);
+      test.info().annotations.push({
+        type: `highlight-pixels-node-${id}`,
+        description: String(await colourPixelsNear(other, nodes[id]!, 20, HIGHLIGHT_COLOR)),
+      });
+    }
     await visitor.close();
   });
 }
+
+for (const [file, budget, topologyMoves] of routed) {
+  const name = basename(file, ".json");
+  test(`${name} shares its AI moves as topology and rebuilds the same board`, async ({
+    page,
+    browser,
+  }) => {
+    test.setTimeout(600_000);
+    const total = await openSaved(page, file);
+    await expect(page.locator("#status")).toHaveText("Your turn!");
+    const before = await strokeCells(page);
+    const { url, payload } = await share(page, `${name}-payload-chars`);
+    expect(payload).toBeLessThan(budget);
+    await expect(page.locator("#status")).not.toHaveText(/replay may stop/);
+    await shot(page, `${name}-source`);
+
+    const linked = decodeRecord(url.slice(url.indexOf(HASH_PREFIX) + HASH_PREFIX.length));
+    if (!linked) throw new Error("the link does not decode");
+    expect(linked.moves).toHaveLength(total);
+    // The human moves first, and strokes stay geometry.
+    const humanMoves = linked.moves.filter((_, i) => i % 2 === 0);
+    expect(humanMoves.every(hasStroke)).toBe(true);
+    const aiMoves = linked.moves.filter((_, i) => i % 2 === 1);
+    expect(aiMoves.filter((move) => !hasStroke(move))).toHaveLength(topologyMoves);
+
+    const visitor = await browser.newContext(visitorOptions());
+    const other = await visitor.newPage();
+    await other.goto(url);
+    await expect(other.locator("#status")).toHaveText(
+      new RegExp(`^Reviewing: move ${total} of ${total}\\.`),
+      { timeout: 240_000 },
+    );
+    await expect(entries(other)).toHaveText(await entries(page).allTextContents());
+    await shot(other, `${name}-visitor`);
+    expectSameStrokes(before, await strokeCells(other));
+
+    // The visitor's engine drew the topology moves, so sharing again gives
+    // a link to the same game with the same moves as topology.
+    const again = await share(other, `${name}-visitor-payload-chars`);
+    const relinked = decodeRecord(
+      again.url.slice(again.url.indexOf(HASH_PREFIX) + HASH_PREFIX.length),
+    );
+    if (!relinked) throw new Error("the visitor's link does not decode");
+    expect(sameGame(linked, relinked)).toBe(true);
+    expect(relinked.moves.map(hasStroke)).toEqual(linked.moves.map(hasStroke));
+    await visitor.close();
+  });
+}
+
+// A version 4 link of two moves, the second a face move, with its router
+// byte set to a version this page does not have.
+const OTHER_ROUTER_LINK = "#game=BAIABADoAwIAAgAAAQAC2AToB6AGAI8DAAICAgQEAgAE2AnoBw";
+
+test("a link from another router opens a fresh game and says so", async ({ page }) => {
+  await page.goto("/" + OTHER_ROUTER_LINK);
+  await expect(page.locator("#status")).toHaveText(/another version of the game/, {
+    timeout: 20_000,
+  });
+  expect(page.url()).not.toContain("#");
+  await expect(entries(page)).toHaveCount(0);
+  await expect(page.locator("#canvas")).toBeVisible();
+});
