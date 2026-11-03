@@ -53,6 +53,10 @@ h1 {
   color: #ef4444;
 }
 
+.toolbar {
+  display: contents;
+}
+
 .controls {
   display: flex;
   gap: 8px;
@@ -224,8 +228,31 @@ button:disabled {
 }
 
 @media (min-width: 1024px) {
+  .toolbar {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 8px 16px;
+    margin-bottom: 12px;
+    flex-shrink: 0;
+  }
+
+  .toolbar .controls {
+    align-items: stretch;
+    margin-bottom: 0;
+  }
+
   .play-area {
     flex-direction: row;
+    justify-content: center;
+    gap: 20px;
+  }
+
+  .canvas-container {
+    flex: 0 1 auto;
+    width: auto;
+    min-width: 0;
+    aspect-ratio: 1 / 1;
   }
 
   #history {

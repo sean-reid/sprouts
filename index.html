@@ -12,21 +12,23 @@
   <body>
     <h1>SPROUTS</h1>
 
-    <div class="controls">
-      <button data-nodes="4">4 Nodes</button>
-      <button data-nodes="5">5 Nodes</button>
-      <button data-nodes="6">6 Nodes</button>
-      <button id="undoBtn" disabled>Undo</button>
-    </div>
-
-    <div class="controls setup">
-      <div class="toggle" role="group" aria-label="Who moves first">
-        <button data-first="human" aria-pressed="true">You start</button>
-        <button data-first="ai" aria-pressed="false">AI starts</button>
+    <div class="toolbar">
+      <div class="controls">
+        <button data-nodes="4">4 Nodes</button>
+        <button data-nodes="5">5 Nodes</button>
+        <button data-nodes="6">6 Nodes</button>
+        <button id="undoBtn" disabled>Undo</button>
       </div>
-      <div id="turn" data-player="human">
-        <span class="swatch" aria-hidden="true"></span>
-        <span id="turnText">Your turn</span>
+
+      <div class="controls setup">
+        <div class="toggle" role="group" aria-label="Who moves first">
+          <button data-first="human" aria-pressed="true">You start</button>
+          <button data-first="ai" aria-pressed="false">AI starts</button>
+        </div>
+        <div id="turn" data-player="human">
+          <span class="swatch" aria-hidden="true"></span>
+          <span id="turnText">Your turn</span>
+        </div>
       </div>
     </div>
 
