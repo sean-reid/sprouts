@@ -27,13 +27,22 @@ h1 {
   flex-shrink: 0;
 }
 
+/* The row keeps the Cancel button's height from page load so the board
+   never resizes when a stroke locks. */
+.status-row {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  min-height: 44px;
+  margin-bottom: 8px;
+  flex-shrink: 0;
+}
+
 #status {
   font-size: 13px;
   color: #a0a0a0;
-  margin-bottom: 8px;
-  min-height: 18px;
   text-align: center;
-  flex-shrink: 0;
 }
 
 #status.win {
@@ -245,18 +254,9 @@ button:disabled {
 }
 
 #cancelBtn {
-  position: fixed;
-  bottom: 40px;
-  left: 50%;
-  transform: translateX(-50%);
-  z-index: 100;
   min-height: 44px;
-  min-width: 120px;
-  padding: 12px 24px;
-  background: rgba(20, 20, 20, 0.95);
-  border: 1px solid #333;
-  border-radius: 12px;
-  box-shadow: 0 10px 25px rgba(0, 0, 0, 0.5);
+  min-width: 44px;
+  flex-shrink: 0;
 }
 
 .modal {

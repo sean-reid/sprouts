@@ -7,8 +7,12 @@ import {
   drawBetween,
   expectDotAt,
   expectNodeDrawnAt,
+  failNext,
+  findDot,
   fit,
   frameOf,
+  holdNext,
+  interceptWorkerMessages,
   nodeAt,
   nodeOnScreen,
   nodeWorld,
@@ -60,12 +64,15 @@ function redPixelsNear(page: Page, at: Client, half: number): Promise<number> {
 }
 
 test.beforeEach(async ({ page }) => {
+  await page.addInitScript(interceptWorkerMessages);
   await openBoard(page);
 });
 
 test("a stroke locks and the dot appears with no further click", async ({ page }) => {
+  const before = await frameOf(page);
   const mid = await drawBetween(page, 0, 1);
   await expectDotAt(page, mid);
+  expect(await frameOf(page)).toEqual(before);
   const cancel = page.locator("#cancelBtn");
   await expect(cancel).toBeVisible();
   const box = await cancel.boundingBox();
@@ -230,4 +237,111 @@ test("a pinch during the drag cancels it and leaves the dot where it was", async
   await tapAway(page);
   await expect(page.locator("#status")).toHaveText("Your turn!", { timeout: 60_000 });
   await expectNodeDrawnAt(page, moved);
+});
+
+test("Escape while the fit is pending returns to idle", async ({ page }) => {
+  await holdNext(page, "fit", 600);
+  await drawBetween(page, 0, 1);
+  await page.keyboard.press("Escape");
+  await expect(page.locator("#status")).toHaveText("Move cancelled");
+  await expect(page.locator("#cancelBtn")).toBeHidden();
+  await page.waitForTimeout(900);
+  await expect(page.locator("#status")).toHaveText("Move cancelled");
+  expect(await findDot(page)).toBeNull();
+});
+
+test("Enter while the fit is pending still places the node", async ({ page }) => {
+  await holdNext(page, "fit", 600);
+  await drawBetween(page, 0, 1);
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#status")).toHaveText(/AI is thinking|Your turn/, { timeout: 60_000 });
+  await expect(page.locator("#undoBtn")).toBeEnabled({ timeout: 60_000 });
+});
+
+test("a stroke the engine cannot fit returns to idle with Cancel hidden", async ({ page }) => {
+  await failNext(page, "fit", "fit failed");
+  await drawBetween(page, 0, 1);
+  await expect(page.locator("#status")).toHaveText("Could not fit the stroke: fit failed");
+  await expect(page.locator("#cancelBtn")).toBeHidden();
+  expect(await findDot(page)).toBeNull();
+  const mid = await drawBetween(page, 0, 1);
+  await expectDotAt(page, mid);
+});
+
+test("a stroke that leaves the board gets its dot on the board", async ({ page }) => {
+  const frame = await frameOf(page);
+  const a = await nodeOnScreen(page, 0, 4);
+  const b = await nodeOnScreen(page, 1, 4);
+  const via = { x: frame.left - 6, y: b.y + (b.y - a.y) / 2 };
+  await page.mouse.move(a.x, a.y);
+  await page.mouse.down();
+  await page.mouse.move(via.x, via.y, { steps: 15 });
+  await page.mouse.move(b.x, b.y, { steps: 15 });
+  await page.mouse.up();
+  await expect(page.locator("#status")).toHaveText(PLACING_HINT);
+  await expect.poll(() => findDot(page)).not.toBeNull();
+  const dot = (await findDot(page))!;
+  expect(dot.x).toBeGreaterThanOrEqual(frame.left);
+  expect(dot.x).toBeLessThanOrEqual(frame.left + frame.width);
+  await shot(page, "placement-detour");
+  await clickAway(page);
+  await expect(page.locator("#status")).toHaveText("Your turn!", { timeout: 60_000 });
+});
+
+test("Cancel and Escape do nothing while the move is being applied", async ({ page }) => {
+  await holdNext(page, "applyMove", 1000);
+  const mid = await drawBetween(page, 0, 1);
+  await expectDotAt(page, mid);
+  await clickAway(page);
+  await expect(page.locator("#cancelBtn")).toBeHidden();
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(300);
+  await expect(page.locator("#status")).not.toHaveText("Move cancelled");
+  await expect(page.locator("#status")).toHaveText("AI is thinking", { timeout: 10_000 });
+  await expect(page.locator("#status")).toHaveText("Your turn!", { timeout: 60_000 });
+});
+
+test("a pinch that starts away from the dot zooms without placing the node", async ({ page }) => {
+  test.skip(!test.info().project.use.hasTouch, "touch only");
+  const frame = await frameOf(page);
+  const fitted = fit(frame);
+  const a = nodeAt(frame, fitted, 0);
+  const b = nodeAt(frame, fitted, 1);
+  const cdp = await page.context().newCDPSession(page);
+  await touchStroke(cdp, a, b);
+  await expectDotAt(page, { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 });
+
+  // Both fingers sit in the empty upper-left quarter, so the zoom keeps
+  // the dot on screen.
+  const first = { x: frame.left + frame.width * 0.3, y: frame.top + frame.height * 0.3 };
+  const second = { x: first.x + 40, y: first.y + 40 };
+  const secondTo = { x: first.x + 80, y: first.y + 80 };
+  await cdp.send("Input.dispatchTouchEvent", {
+    type: "touchStart",
+    touchPoints: [{ ...first, id: 1 }],
+  });
+  await cdp.send("Input.dispatchTouchEvent", {
+    type: "touchStart",
+    touchPoints: [
+      { ...first, id: 1 },
+      { ...second, id: 2 },
+    ],
+  });
+  await pinchDrag(cdp, [first, second], [first, secondTo]);
+  await cdp.send("Input.dispatchTouchEvent", {
+    type: "touchEnd",
+    touchPoints: [{ ...first, id: 1 }],
+  });
+  await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+
+  const t = clampToViewport(frame, pinch(frame, fitted, [first, second], [first, secondTo]));
+  const n0 = nodeWorld(0, 4, frame.board);
+  const n1 = nodeWorld(1, 4, frame.board);
+  const midWorld = { x: (n0.x + n1.x) / 2, y: (n0.y + n1.y) / 2 };
+  await expectNodeDrawnAt(page, nodeAt(frame, t, 1));
+  await expectDotAt(page, toClient(frame, t, midWorld));
+  await page.waitForTimeout(500);
+  await expect(page.locator("#status")).toHaveText(PLACING_HINT);
+  await expect(page.locator("#cancelBtn")).toBeVisible();
+  await shot(page, "placement-pinch-away");
 });

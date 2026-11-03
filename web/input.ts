@@ -4,7 +4,9 @@ import { DOUBLE_TAP_ZOOM, type View, wheelZoomFactor } from "./view";
 export type PointerKind = "mouse" | "pen" | "touch";
 
 export interface StrokeHandlers {
-  start(world: Point, kind: PointerKind): void;
+  // True when the press began a stroke. One that did not still taps or ends
+  // on release, unless a second finger lands first.
+  start(world: Point, kind: PointerKind): boolean;
   move(world: Point, kind: PointerKind): void;
   // Runs once per pointermove that drove the stroke, after its coalesced samples.
   afterMove(world: Point, kind: PointerKind): void;
@@ -31,6 +33,7 @@ interface Tracked {
 
 interface Stroke {
   id: number;
+  drawing: boolean;
   length: number;
   last: Point;
 }
@@ -94,6 +97,7 @@ export function attachInput(
 
   const beginPinch = (): void => {
     letGo();
+    if (stroke && !stroke.drawing) stroke = null;
     const [a, b] = [...pointers.entries()];
     if (!a || !b) return;
     const mid = midpoint(a[1].screen, b[1].screen);
@@ -138,8 +142,8 @@ export function attachInput(
       held = e.pointerId;
       return;
     }
-    stroke = { id: e.pointerId, length: 0, last: world };
-    handlers.start(world, kind);
+    stroke = { id: e.pointerId, drawing: false, length: 0, last: world };
+    stroke.drawing = handlers.start(world, kind);
   });
 
   canvas.addEventListener("pointermove", (e) => {

@@ -30,7 +30,10 @@
       </div>
     </div>
 
-    <div id="status" role="status" aria-live="polite">Initializing...</div>
+    <div class="status-row">
+      <div id="status" role="status" aria-live="polite">Initializing...</div>
+      <button id="cancelBtn" hidden>Cancel</button>
+    </div>
 
     <div class="play-area">
       <div class="canvas-container">
@@ -47,8 +50,6 @@
         <input id="shareUrl" type="text" readonly aria-label="Share link" hidden />
       </aside>
     </div>
-
-    <button id="cancelBtn" hidden>Cancel</button>
 
     <div id="gameOverModal" class="modal">
       <div class="modal-content">

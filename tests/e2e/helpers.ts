@@ -260,16 +260,29 @@ export async function plainWheel(page: Page, deltaY: number): Promise<number> {
 }
 
 // Installed before the page loads so a test can hold one request to the
-// worker back; the worker then answers a newer request first.
-export function holdOneWorkerMessage(): void {
+// worker back, so the worker answers a newer request first, or fail one
+// with an error reply the worker never saw.
+export function interceptWorkerMessages(): void {
   const post = Worker.prototype.postMessage;
   let hold: { method: string; ms: number } | null = null;
-  (window as unknown as { holdNext: typeof holdNext }).holdNext = holdNext;
+  let fail: { method: string; error: string } | null = null;
+  const hooks = window as unknown as { holdNext: typeof holdNext; failNext: typeof failNext };
+  hooks.holdNext = holdNext;
+  hooks.failNext = failNext;
   function holdNext(method: string, ms: number): void {
     hold = { method, ms };
   }
+  function failNext(method: string, error: string): void {
+    fail = { method, error };
+  }
   Worker.prototype.postMessage = function (this: Worker, ...args: unknown[]) {
-    const envelope = args[0] as { method?: string } | undefined;
+    const envelope = args[0] as { id?: number; method?: string } | undefined;
+    if (fail && envelope?.method === fail.method) {
+      const data = { id: envelope.id, ok: false, error: fail.error };
+      fail = null;
+      setTimeout(() => this.dispatchEvent(new MessageEvent("message", { data })));
+      return;
+    }
     if (hold && envelope?.method === hold.method) {
       const { ms } = hold;
       hold = null;
@@ -287,6 +300,40 @@ export function holdNext(page: Page, method: string, ms: number): Promise<void> 
     },
     [method, ms] as const,
   );
+}
+
+export function failNext(page: Page, method: string, error: string): Promise<void> {
+  return page.evaluate(
+    ([m, e]) => {
+      (window as unknown as { failNext: (m: string, e: string) => void }).failNext(m, e);
+    },
+    [method, error] as const,
+  );
+}
+
+// Client position of the placement dot, from the centroid of its green
+// pixels, or null when none is drawn.
+export function findDot(page: Page): Promise<Client | null> {
+  return page.evaluate(() => {
+    const canvas = document.getElementById("canvas") as HTMLCanvasElement;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return null;
+    const rect = canvas.getBoundingClientRect();
+    const dpr = canvas.width / rect.width;
+    const { data, width } = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    let count = 0;
+    let sx = 0;
+    let sy = 0;
+    for (let i = 0; i < data.length; i += 4) {
+      const [r, g, b] = [data[i] ?? 0, data[i + 1] ?? 0, data[i + 2] ?? 0];
+      if (Math.hypot(r - 0x10, g - 0xb9, b - 0x81) >= 40) continue;
+      count++;
+      sx += (i / 4) % width;
+      sy += Math.floor(i / 4 / width);
+    }
+    if (count === 0) return null;
+    return { x: rect.left + sx / count / dpr, y: rect.top + sy / count / dpr };
+  });
 }
 
 export type Rgb = [number, number, number];

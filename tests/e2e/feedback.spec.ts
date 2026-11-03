@@ -6,7 +6,7 @@ import {
   expectDotAt,
   frameOf,
   holdNext,
-  holdOneWorkerMessage,
+  interceptWorkerMessages,
   near,
   nodeOnScreen,
   openBoard,
@@ -57,7 +57,7 @@ async function ringWhileThinking(page: Page): Promise<Rgb[]> {
 }
 
 test.beforeEach(async ({ page }) => {
-  await page.addInitScript(holdOneWorkerMessage);
+  await page.addInitScript(interceptWorkerMessages);
 });
 
 test("a stroke across an existing line flashes the crossed segment", async ({ page }) => {

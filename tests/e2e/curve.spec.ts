@@ -1,10 +1,11 @@
 import { expect, test, type Page } from "@playwright/test";
 import {
   clickAway,
+  findDot,
   fit,
   frameOf,
   holdNext,
-  holdOneWorkerMessage,
+  interceptWorkerMessages,
   nodeWorld,
   openBoard,
   PLACING_HINT,
@@ -109,7 +110,7 @@ function compareBlue(
 }
 
 test.beforeEach(async ({ page }) => {
-  await page.addInitScript(holdOneWorkerMessage);
+  await page.addInitScript(interceptWorkerMessages);
   await openBoard(page);
 });
 
@@ -160,11 +161,13 @@ test("the locked curve is the line the move commits, at fit zoom and at 4x", asy
   const mid = along(0.5);
   const zoomed = await wheelZoomTo(page, frame, fitted, toClient(frame, fitted, mid), 4);
   expect(zoomed.scale / fitted.scale).toBeGreaterThanOrEqual(4);
-  const midZoomed = toClient(frame, zoomed, mid);
   await page.waitForTimeout(200);
   await shot(page, "curve-locked-4x");
 
-  const exclude = [{ ...midZoomed, r: 16 }];
+  // The dot, and the node it becomes, are the one thing that differs.
+  const dot = await findDot(page);
+  expect(dot).not.toBeNull();
+  const exclude = [{ ...dot!, r: 16 }];
   const locked = await captureBlue(page, "locked", exclude);
   expect(locked).toBeGreaterThan(500);
 

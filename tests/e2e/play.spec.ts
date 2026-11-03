@@ -4,7 +4,7 @@ import {
   drawBetween,
   expectDotAt,
   holdNext,
-  holdOneWorkerMessage,
+  interceptWorkerMessages,
   nodeOnScreen,
   openBoard,
   PLACING_HINT,
@@ -22,7 +22,7 @@ async function alongFirstChord(page: Page, t: number): Promise<Client> {
 }
 
 test.beforeEach(async ({ page }) => {
-  await page.addInitScript(holdOneWorkerMessage);
+  await page.addInitScript(interceptWorkerMessages);
   await openBoard(page);
 });
 

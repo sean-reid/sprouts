@@ -239,18 +239,18 @@ function overDot(world: Point): boolean {
   return Math.hypot(a.x - b.x, a.y - b.y) <= DOT_GRAB_PX;
 }
 
-function handleStart(world: Point, kind: PointerKind): void {
+function handleStart(world: Point, kind: PointerKind): boolean {
   if (state.reviewing) {
     if (state.gameOver && timeline.atEnd) modal.classList.add("visible");
-    return;
+    return false;
   }
-  if (state.mode !== "idle" || state.thinking || state.gameOver || seeking) return;
+  if (state.mode !== "idle" || state.thinking || state.gameOver || seeking) return false;
   const node = findNodeAt(world, kind === "touch" ? 30 : 15);
-  if (node && state.activeNodes.has(node.id)) {
-    state.mode = "dragging";
-    state.dragStartNode = node.id;
-    state.dragPath = [{ x: node.position.x, y: node.position.y }];
-  }
+  if (!node || !state.activeNodes.has(node.id)) return false;
+  state.mode = "dragging";
+  state.dragStartNode = node.id;
+  state.dragPath = [{ x: node.position.x, y: node.position.y }];
+  return true;
 }
 
 function handleMove(point: Point, kind: PointerKind): void {
@@ -274,7 +274,7 @@ function handleAfterMove(world: Point, kind: PointerKind): void {
 }
 
 function handleGrab(world: Point): boolean {
-  if (!overDot(world)) return false;
+  if (submitting || !overDot(world)) return false;
   canvas.classList.remove("grab");
   canvas.classList.add("grabbing");
   return true;
@@ -400,6 +400,7 @@ async function commitPlacement(): Promise<void> {
 }
 
 function cancelPlacement(): void {
+  if (submitting) return;
   clearStroke();
   setStatus("Move cancelled");
   updateControls();
@@ -417,6 +418,7 @@ async function executeMove(): Promise<void> {
     polyline: state.lockedPath,
     newNodePos: state.placementDot.position,
   };
+  cancelBtn.hidden = true;
 
   const epoch = gameEpoch;
   submitting = true;
