@@ -38,8 +38,9 @@ impl TranspositionTable {
     }
 }
 
-/// Work the search may do, counted in visited positions so a run is
-/// repeatable. Once spent, the search returns junk and inserts nothing.
+/// Work the search may do, counted in positions whose moves it lists, so
+/// a run is repeatable. Once spent, the search returns junk and inserts
+/// nothing.
 pub struct NodeBudget {
     spent: usize,
     limit: usize,
@@ -50,9 +51,92 @@ impl NodeBudget {
         Self { spent: 0, limit }
     }
 
+    pub fn unlimited() -> Self {
+        Self::new(usize::MAX)
+    }
+
     pub fn exhausted(&self) -> bool {
         self.spent > self.limit
     }
+
+    #[cfg(test)]
+    pub fn spent(&self) -> usize {
+        self.spent
+    }
+}
+
+/// What a budgeted search settled on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Pick {
+    pub index: usize,
+    /// Depth of the last iteration that finished within the budget.
+    pub depth: usize,
+    pub cut_off: bool,
+    /// Positions charged to the budget past depth 1.
+    pub spent: usize,
+}
+
+/// Index into `candidates` of the move the search prefers from `root`:
+/// iterative deepening to `choose_depth`, keeping the pick of the last
+/// depth that finished. Depth 1 always finishes; the deeper iterations
+/// share one budget of `cap` positions.
+pub fn best_candidate(root: AbstractState, candidates: &[Move], cap: usize) -> Pick {
+    let max_depth = root.choose_depth().max(1);
+    best_candidate_to(root, candidates, cap, max_depth)
+}
+
+pub fn best_candidate_to(
+    mut root: AbstractState,
+    candidates: &[Move],
+    cap: usize,
+    max_depth: usize,
+) -> Pick {
+    let mut tt = TranspositionTable::new();
+    let mut opening = NodeBudget::unlimited();
+    let mut deeper = NodeBudget::new(cap);
+    let mut pick = Pick {
+        index: 0,
+        depth: 0,
+        cut_off: false,
+        spent: 0,
+    };
+    for depth in 1..=max_depth {
+        let budget = if depth == 1 {
+            &mut opening
+        } else {
+            &mut deeper
+        };
+        let mut best_score = f64::NEG_INFINITY;
+        let mut best_at_depth = 0;
+        for (idx, mov) in candidates.iter().enumerate() {
+            root.apply_move(mov);
+            let score = abstract_minimax(
+                &mut root,
+                depth - 1,
+                f64::NEG_INFINITY,
+                f64::INFINITY,
+                false,
+                &mut tt,
+                budget,
+            );
+            root.undo_move();
+            if budget.exhausted() {
+                break;
+            }
+            if score > best_score {
+                best_score = score;
+                best_at_depth = idx;
+            }
+        }
+        if budget.exhausted() {
+            pick.cut_off = true;
+            break;
+        }
+        pick.index = best_at_depth;
+        pick.depth = depth;
+    }
+    pick.spent = deeper.spent;
+    pick
 }
 
 impl AbstractState {
@@ -125,7 +209,9 @@ impl AbstractState {
         }
     }
 
-    pub fn evaluate(&self) -> f64 {
+    /// Lists this position's moves and, when there are ten or fewer, each
+    /// reply's, charging `budget` for every list after the first.
+    pub fn evaluate(&self, budget: &mut NodeBudget) -> f64 {
         let moves = self.generate_moves();
         let move_count = moves.len();
 
@@ -184,6 +270,7 @@ impl AbstractState {
             let mut total_opp_moves = 0usize;
             for mov in &moves {
                 sim.apply_move(mov);
+                budget.spent += 1;
                 total_opp_moves += sim.generate_moves().len();
                 sim.undo_move();
             }
@@ -220,15 +307,17 @@ pub fn abstract_minimax(
     }
 
     if depth == 0 {
-        let score = state.evaluate();
-        tt.insert(hash, score, depth);
+        let score = state.evaluate(budget);
+        if !budget.exhausted() {
+            tt.insert(hash, score, depth);
+        }
         return score;
     }
 
     let mut moves = state.generate_moves();
 
     if moves.is_empty() {
-        let score = state.evaluate();
+        let score = state.evaluate(budget);
         tt.insert(hash, score, depth);
         return score;
     }
@@ -344,10 +433,11 @@ mod tests {
     fn evaluate_terminal_depends_on_whose_turn_it_is() {
         let mut s = finished();
         assert!(s.generate_moves().is_empty());
+        let mut budget = NodeBudget::unlimited();
         s.is_ai_turn = true;
-        assert!(s.evaluate() < 0.0);
+        assert!(s.evaluate(&mut budget) < 0.0);
         s.is_ai_turn = false;
-        assert!(s.evaluate() > 0.0);
+        assert!(s.evaluate(&mut budget) > 0.0);
     }
 
     #[test]
@@ -384,10 +474,72 @@ mod tests {
             f64::INFINITY,
             true,
             &mut tt,
-            &mut NodeBudget::new(usize::MAX),
+            &mut NodeBudget::unlimited(),
         );
         assert!(score.is_finite());
         assert_eq!(s.face, before);
+    }
+
+    #[test]
+    fn evaluate_charges_the_budget_for_each_reply_it_lists() {
+        let s = fresh(2);
+        let mut budget = NodeBudget::new(1);
+        s.evaluate(&mut budget);
+        assert_eq!(budget.spent(), 3);
+        assert!(budget.exhausted());
+    }
+
+    #[test]
+    fn a_cut_off_search_keeps_the_last_finished_depth_and_repeats_itself() {
+        let root = fresh(6);
+        let candidates: Vec<Move> = root.generate_moves().into_iter().take(12).collect();
+        let first = best_candidate(root.clone(), &candidates, 200);
+        let second = best_candidate(root.clone(), &candidates, 200);
+        assert_eq!(first, second);
+        assert!(first.cut_off);
+        assert_eq!(first.depth, 1);
+
+        let mut by_eval = (f64::NEG_INFINITY, 0);
+        let mut probe = root.clone();
+        for (idx, mov) in candidates.iter().enumerate() {
+            probe.apply_move(mov);
+            let score = probe.evaluate(&mut NodeBudget::unlimited());
+            probe.undo_move();
+            if score > by_eval.0 {
+                by_eval = (score, idx);
+            }
+        }
+        assert_eq!(first.index, by_eval.1);
+
+        let small = fresh(2);
+        let all = small.generate_moves();
+        let roomy = best_candidate(small, &all, usize::MAX);
+        assert!(!roomy.cut_off);
+        assert!(roomy.depth > 1);
+    }
+
+    #[test]
+    fn a_cut_off_at_depth_three_keeps_the_depth_two_pick() {
+        let root = fresh(3);
+        let candidates = root.generate_moves();
+        let two = best_candidate_to(root.clone(), &candidates, usize::MAX, 2);
+        assert_eq!(two.depth, 2);
+        let cut = best_candidate_to(root.clone(), &candidates, two.spent, 8);
+        assert!(cut.cut_off);
+        assert_eq!(cut.depth, 2);
+        assert_eq!(cut.index, two.index);
+        let three = best_candidate_to(root, &candidates, usize::MAX, 3);
+        assert_eq!(three.depth, 3);
+        assert!(three.spent > two.spent);
+    }
+
+    #[test]
+    fn depth_one_finishes_under_any_cap() {
+        let root = fresh(4);
+        let candidates = root.generate_moves();
+        let pick = best_candidate(root, &candidates, 0);
+        assert_eq!(pick.depth, 1);
+        assert!(pick.cut_off);
     }
 
     #[test]
@@ -405,7 +557,7 @@ mod tests {
             &mut budget,
         );
         assert!(budget.exhausted());
-        assert_eq!(budget.spent, 6);
+        assert_eq!(budget.spent(), 6);
         assert!(tt.table.is_empty());
     }
 
@@ -421,7 +573,7 @@ mod tests {
             f64::INFINITY,
             true,
             &mut tt,
-            &mut NodeBudget::new(usize::MAX),
+            &mut NodeBudget::unlimited(),
         );
         assert!(score < 0.0);
     }

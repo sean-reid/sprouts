@@ -1,4 +1,4 @@
-use crate::abstract_graph::{abstract_minimax, AbstractState, NodeBudget, TranspositionTable};
+use crate::abstract_graph::{best_candidate, AbstractState};
 use crate::embedding;
 use crate::face::Move as FaceMove;
 use crate::node_classifier::{classify_nodes, NodeClassification};
@@ -180,49 +180,14 @@ pub fn find_best_move(state: &mut GameState) -> Option<Move> {
     candidates.into_iter().nth(best_idx).map(|(mov, _)| mov)
 }
 
-/// Positions one search may visit across all its depths.
+/// Positions one search may list moves for past depth 1, over all its
+/// deeper iterations together.
 const SEARCH_NODES: usize = 50_000;
 
-/// Index into `candidates` of the move the search prefers: the pick of the
-/// deepest iteration that finished within the node budget.
+/// Index into `candidates` of the move the search prefers.
 pub(crate) fn search_best_index(state: &GameState, candidates: &[FaceMove]) -> usize {
-    let mut root = AbstractState::new(state.face.clone(), state.current_player == Player::AI);
-    let max_depth = root.choose_depth();
-    let mut tt = TranspositionTable::new();
-    let mut budget = NodeBudget::new(SEARCH_NODES);
-
-    let mut best_idx = 0;
-
-    for depth in 1..=max_depth {
-        let mut best_score = f64::NEG_INFINITY;
-        let mut best_at_depth = 0;
-        for (idx, mov) in candidates.iter().enumerate() {
-            root.apply_move(mov);
-            let score = abstract_minimax(
-                &mut root,
-                depth.saturating_sub(1),
-                f64::NEG_INFINITY,
-                f64::INFINITY,
-                false, // After AI's move, human minimizes
-                &mut tt,
-                &mut budget,
-            );
-            root.undo_move();
-            if budget.exhausted() {
-                break;
-            }
-
-            if score > best_score {
-                best_score = score;
-                best_at_depth = idx;
-            }
-        }
-        if budget.exhausted() {
-            break;
-        }
-        best_idx = best_at_depth;
-    }
-    best_idx
+    let root = AbstractState::new(state.face.clone(), state.current_player == Player::AI);
+    best_candidate(root, candidates, SEARCH_NODES).index
 }
 
 pub fn find_optimal_node_placement(
