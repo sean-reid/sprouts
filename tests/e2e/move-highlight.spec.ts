@@ -132,7 +132,8 @@ test("rows describe the shape of each move, name the nodes in the title and wear
   await expect(rows(page).nth(1)).toHaveAttribute("title", "0 to 1, new node 5");
   await expect(rows(page).nth(8)).toHaveText("9. You, joins two nodes");
   await expect(rows(page).nth(8)).toHaveAttribute("title", "4 to 10, new node 12");
-  await expect(rows(page).nth(0)).toHaveCSS("border-left-color", "rgb(96, 165, 250)");
-  await expect(rows(page).nth(1)).toHaveCSS("border-left-color", "rgb(239, 68, 68)");
-  await expect(rows(page).nth(8)).toHaveCSS("border-left-color", "rgb(96, 165, 250)");
+  const swatch = (row: number) => rows(page).nth(row).locator(".swatch");
+  await expect(swatch(0)).toHaveCSS("background-color", "rgb(96, 165, 250)");
+  await expect(swatch(1)).toHaveCSS("background-color", "rgb(239, 68, 68)");
+  await expect(swatch(8)).toHaveCSS("background-color", "rgb(96, 165, 250)");
 });

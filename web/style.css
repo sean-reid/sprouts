@@ -157,14 +157,15 @@ button:disabled {
   color: #a0a0a0;
 }
 
-#turn .swatch {
+.swatch {
+  flex: none;
   width: 12px;
   height: 12px;
   border-radius: 50%;
   background: #60a5fa;
 }
 
-#turn[data-player="ai"] .swatch {
+[data-player="ai"] .swatch {
   background: #ef4444;
 }
 
@@ -225,6 +226,9 @@ button:disabled {
 }
 
 #moveList button {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   width: 100%;
   min-height: 44px;
   text-align: left;
@@ -238,14 +242,6 @@ button:disabled {
   background: #252525;
   color: #ffffff;
   border-color: #3b82f6;
-}
-
-#moveList button[data-player="human"] {
-  border-left: 3px solid #60a5fa;
-}
-
-#moveList button[data-player="ai"] {
-  border-left: 3px solid #ef4444;
 }
 
 #shareUrl {
