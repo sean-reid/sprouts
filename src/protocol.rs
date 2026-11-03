@@ -112,20 +112,17 @@ pub fn start(initial_nodes: usize, board_size: usize, first_player: Player) -> G
     state
 }
 
-/// Lists the legal moves once; a node is active when one of them uses it.
+/// A node is active when the face model gives it a legal move.
 pub fn snapshot(state: &GameState) -> Snapshot {
-    let moves = state.face.moves();
-    let mut active_nodes: Vec<usize> = moves.iter().flat_map(|m| [m.a, m.b]).collect();
-    active_nodes.sort_unstable();
-    active_nodes.dedup();
+    let active_nodes = state.face.active_nodes();
     Snapshot {
         board_size: state.board_size,
         initial_nodes: state.initial_node_count,
         nodes: state.nodes.clone(),
         lines: state.lines.clone(),
         current_player: state.current_player,
+        game_over: active_nodes.is_empty(),
         active_nodes,
-        game_over: moves.is_empty(),
     }
 }
 

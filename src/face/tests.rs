@@ -216,6 +216,45 @@ proptest! {
     }
 
     #[test]
+    fn can_move_agrees_with_the_move_list(n in 1usize..=6, picks in prop::collection::vec(any::<u32>(), 18)) {
+        let (_, snapshots, _) = play(n, &picks, false);
+        for m in &snapshots {
+            let moves = m.moves();
+            let mut listed: Vec<NodeId> = moves.iter().flat_map(|mv| [mv.a, mv.b]).collect();
+            listed.sort_unstable();
+            listed.dedup();
+            prop_assert_eq!(m.active_nodes(), listed);
+            prop_assert_eq!(m.is_game_over(), moves.is_empty());
+        }
+    }
+
+    #[test]
+    fn search_moves_are_listed_moves_and_cover_the_lone_isolated_case(
+        n in 1usize..=6,
+        picks in prop::collection::vec(any::<u32>(), 18),
+    ) {
+        let (_, snapshots, _) = play(n, &picks, false);
+        for m in &snapshots {
+            let moves = sorted_enclosures(m.moves());
+            let reduced = sorted_enclosures(m.search_moves());
+            for mv in &reduced {
+                prop_assert_eq!(m.check(mv), Ok(()));
+            }
+            prop_assert_eq!(reduced.is_empty(), moves.is_empty());
+            let mut homes: Vec<usize> = (0..m.node_count())
+                .filter(|&v| m.degree(v) == 0)
+                .map(|v| m.corner_face(v, None).unwrap())
+                .collect();
+            let before = homes.len();
+            homes.sort_unstable();
+            homes.dedup();
+            if homes.len() == before {
+                prop_assert_eq!(reduced, moves);
+            }
+        }
+    }
+
+    #[test]
     fn check_agrees_with_apply(
         n in 1usize..=5,
         picks in prop::collection::vec(any::<u32>(), 8),
@@ -241,6 +280,35 @@ proptest! {
     }
 }
 
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(48))]
+
+    /// Solving from the reduced list gives the game's value, so the classes
+    /// it drops are the isomorphic ones.
+    #[test]
+    fn search_moves_keep_the_value_of_random_positions(
+        n in 1usize..=4,
+        picks in prop::collection::vec(any::<u32>(), 12),
+    ) {
+        let (_, snapshots, _) = play(n, &picks, false);
+        let skip = if n == 4 { 4 } else { 0 };
+        for m in snapshots.iter().skip(skip) {
+            prop_assert_eq!(
+                first_player_wins_searching(&mut m.clone()),
+                first_player_wins(&mut m.clone())
+            );
+        }
+    }
+}
+
+fn sorted_enclosures(mut moves: Vec<Move>) -> Vec<Move> {
+    for mv in &mut moves {
+        mv.enclosed.sort_unstable();
+    }
+    moves.sort_by_key(|mv| (mv.a, mv.at_a, mv.b, mv.at_b, mv.enclosed.clone()));
+    moves
+}
+
 fn first_player_wins(m: &mut FaceModel) -> bool {
     for mv in m.moves() {
         m.apply(&mv).unwrap();
@@ -251,6 +319,41 @@ fn first_player_wins(m: &mut FaceModel) -> bool {
         }
     }
     false
+}
+
+fn first_player_wins_searching(m: &mut FaceModel) -> bool {
+    for mv in m.search_moves() {
+        m.apply(&mv).unwrap();
+        let opponent_wins = first_player_wins_searching(m);
+        m.undo();
+        if !opponent_wins {
+            return true;
+        }
+    }
+    false
+}
+
+#[test]
+fn search_moves_keep_the_known_outcomes() {
+    assert!(!first_player_wins_searching(&mut FaceModel::new(1)));
+    assert!(!first_player_wins_searching(&mut FaceModel::new(2)));
+    assert!(first_player_wins_searching(&mut FaceModel::new(3)));
+    assert!(first_player_wins_searching(&mut FaceModel::new(4)));
+}
+
+/// From n isolated nodes: one loop per enclosed count up to half the
+/// others, and one chord.
+#[test]
+fn search_moves_from_fresh_nodes_grow_linearly() {
+    for n in 1..=24 {
+        let m = FaceModel::new(n);
+        let reduced = m.search_moves();
+        let loops = reduced.iter().filter(|mv| mv.a == mv.b).count();
+        assert_eq!(loops, (n - 1) / 2 + 1, "{n} nodes");
+        assert_eq!(reduced.len() - loops, usize::from(n >= 2), "{n} nodes");
+        assert!(reduced.iter().all(|mv| mv.a == 0 || mv.b == 1));
+    }
+    assert_eq!(FaceModel::new(4).moves().len(), 22);
 }
 
 #[test]
