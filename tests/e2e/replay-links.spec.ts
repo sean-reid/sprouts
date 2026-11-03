@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { basename } from "node:path";
 import { expect, test } from "@playwright/test";
 import type { Fixture } from "../../web/record";
-import { PLAYER_COLORS } from "../../web/render";
+import { HIGHLIGHT_COLOR } from "../../web/render";
 import { recordNodesOnScreen, ringSamplesAround } from "./helpers";
 
 // A recorded game must survive a share: the engine refits each move from
@@ -49,10 +49,9 @@ for (const file of fixtures) {
     // two seconds from the end of the seek.
     const last = fixture.moves[total - 1]!;
     const nodes = await recordNodesOnScreen(other, fixture);
-    const colour = PLAYER_COLORS[(total - 1) % 2 === 0 ? "human" : "ai"];
     for (const id of [last.from, last.to]) {
       await expect
-        .poll(() => ringSamplesAround(other, nodes[id]!, 14, colour))
+        .poll(() => ringSamplesAround(other, nodes[id]!, 14, HIGHLIGHT_COLOR))
         .toBeGreaterThanOrEqual(8);
     }
     await expect(entries(other)).toHaveCount(total);

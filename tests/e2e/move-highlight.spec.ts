@@ -1,6 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { expect, test, type Page } from "@playwright/test";
-import { PLAYER_COLORS } from "../../web/render";
+import { HIGHLIGHT_COLOR, PLAYER_COLORS } from "../../web/render";
 import {
   awayFrom,
   colourPixelsNear,
@@ -25,17 +25,21 @@ function hasTouch(): boolean {
   return test.info().project.use.hasTouch === true;
 }
 
-async function expectRing(page: Page, at: Client, hex: string): Promise<void> {
-  await expect.poll(() => ringSamplesAround(page, at, RING_RADIUS, hex)).toBeGreaterThanOrEqual(8);
+async function expectRing(page: Page, at: Client): Promise<void> {
+  await expect
+    .poll(() => ringSamplesAround(page, at, RING_RADIUS, HIGHLIGHT_COLOR))
+    .toBeGreaterThanOrEqual(8);
 }
 
-async function expectNoRing(page: Page, at: Client, hex: string): Promise<void> {
-  await expect.poll(() => ringSamplesAround(page, at, RING_RADIUS, hex)).toBeLessThanOrEqual(3);
+async function expectNoRing(page: Page, at: Client): Promise<void> {
+  await expect
+    .poll(() => ringSamplesAround(page, at, RING_RADIUS, HIGHLIGHT_COLOR))
+    .toBeLessThanOrEqual(3);
 }
 
 type Client = { x: number; y: number };
 
-test("hovering a row rings its nodes and widens its line until the pointer leaves", async ({
+test("hovering a row rings its nodes and outlines its line until the pointer leaves", async ({
   page,
 }) => {
   test.skip(hasTouch(), "hover needs a mouse");
@@ -45,22 +49,26 @@ test("hovering a row rings its nodes and widens its line until the pointer leave
   const b = await nodeOnScreen(page, 1, 4);
   const quarter = { x: a.x + (b.x - a.x) / 4, y: a.y + (b.y - a.y) / 4 };
   const blue = PLAYER_COLORS.human;
-  await expectNoRing(page, a, blue);
+  await expectNoRing(page, a);
   const plain = await colourPixelsNear(page, quarter, 6, blue);
   expect(plain).toBeGreaterThan(0);
+  expect(await colourPixelsNear(page, quarter, 6, HIGHLIGHT_COLOR)).toBeLessThanOrEqual(2);
 
   await rows(page).nth(0).hover();
-  await expectRing(page, a, blue);
-  await expectRing(page, b, blue);
-  await expect.poll(() => colourPixelsNear(page, quarter, 6, blue)).toBeGreaterThan(plain * 1.3);
+  await expectRing(page, a);
+  await expectRing(page, b);
+  await expect.poll(() => colourPixelsNear(page, quarter, 6, HIGHLIGHT_COLOR)).toBeGreaterThan(8);
+  await expect.poll(() => colourPixelsNear(page, quarter, 6, blue)).toBeGreaterThan(0);
   await expect(rows(page).nth(0)).toHaveAttribute("title", "0 to 1, new node 4");
   await shot(page, "move-highlight");
 
   const away = awayFrom(await frameOf(page));
   await page.mouse.move(away.x, away.y);
-  await expectNoRing(page, a, blue);
-  await expectNoRing(page, b, blue);
-  await expect.poll(() => colourPixelsNear(page, quarter, 6, blue)).toBeLessThan(plain * 1.15);
+  await expectNoRing(page, a);
+  await expectNoRing(page, b);
+  await expect
+    .poll(() => colourPixelsNear(page, quarter, 6, HIGHLIGHT_COLOR))
+    .toBeLessThanOrEqual(2);
 });
 
 test("a row reached with Tab highlights its move and Enter seeks to it", async ({ page }) => {
@@ -68,25 +76,24 @@ test("a row reached with Tab highlights its move and Enter seeks to it", async (
   await openBoard(page);
   await playExchange(page);
   const a = await nodeOnScreen(page, 0, 4);
-  const blue = PLAYER_COLORS.human;
 
   // Safari moves focus between buttons with Option held.
   const tab = test.info().project.name === "webkit" ? "Alt+Tab" : "Tab";
   await page.locator("#shareBtn").focus();
   await page.keyboard.press(tab);
   await expect(rows(page).nth(0)).toBeFocused();
-  await expectRing(page, a, blue);
+  await expectRing(page, a);
 
   await page.keyboard.press(`Shift+${tab}`);
   await expect(page.locator("#shareBtn")).toBeFocused();
-  await expectNoRing(page, a, blue);
+  await expectNoRing(page, a);
 
   await page.keyboard.press(tab);
-  await expectRing(page, a, blue);
+  await expectRing(page, a);
   await page.keyboard.press("Enter");
   await expect(page.locator("#status")).toHaveText("Reviewing: move 1 of 2.");
   await expect(rows(page).nth(0)).toHaveAttribute("aria-current", "step");
-  await expectRing(page, a, blue);
+  await expectRing(page, a);
 });
 
 test("tapping a row points out the move it lands on for two seconds", async ({ page }) => {
@@ -100,17 +107,18 @@ test("tapping a row points out the move it lands on for two seconds", async ({ p
   await expect(rows(page).nth(1)).toHaveAttribute("aria-current", "step");
   const [from, to] = await rowIds(page, 1);
   const nodes = await recordNodesOnScreen(page, await savedRecord(page));
-  const red = PLAYER_COLORS.ai;
-  await expectRing(page, nodes[from]!, red);
-  await expectRing(page, nodes[to]!, red);
+  await expectRing(page, nodes[from]!);
+  await expectRing(page, nodes[to]!);
   await shot(page, "move-highlight");
 
   await page.waitForTimeout(HIGHLIGHT_MS + 500);
-  await expectNoRing(page, nodes[from]!, red);
-  await expectNoRing(page, nodes[to]!, red);
+  await expectNoRing(page, nodes[from]!);
+  await expectNoRing(page, nodes[to]!);
 });
 
-test("rows describe the shape of each move and name the nodes in the title", async ({ page }) => {
+test("rows describe the shape of each move, name the nodes in the title and wear the mover's colour", async ({
+  page,
+}) => {
   test.skip(test.info().project.name !== "desktop", "the text does not depend on the viewport");
   const record = await readFile("fixtures/saved/finished-4n-500.json", "utf8");
   await page.addInitScript((saved) => localStorage.setItem("sprouts.game", saved), record);
@@ -124,4 +132,8 @@ test("rows describe the shape of each move and name the nodes in the title", asy
   await expect(rows(page).nth(1)).toHaveAttribute("title", "0 to 1, new node 5");
   await expect(rows(page).nth(8)).toHaveText("9. You, joins two nodes");
   await expect(rows(page).nth(8)).toHaveAttribute("title", "4 to 10, new node 12");
+  const swatch = (row: number) => rows(page).nth(row).locator(".swatch");
+  await expect(swatch(0)).toHaveCSS("background-color", "rgb(96, 165, 250)");
+  await expect(swatch(1)).toHaveCSS("background-color", "rgb(239, 68, 68)");
+  await expect(swatch(8)).toHaveCSS("background-color", "rgb(96, 165, 250)");
 });

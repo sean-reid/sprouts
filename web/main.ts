@@ -206,9 +206,13 @@ function renderMoveList(): void {
     const item = document.createElement("li");
     const button = document.createElement("button");
     button.type = "button";
-    button.textContent = timeline.label(index);
+    const swatch = document.createElement("span");
+    swatch.className = "swatch";
+    swatch.setAttribute("aria-hidden", "true");
+    button.append(swatch, timeline.label(index));
     button.title = timeline.ids(index);
     button.dataset.move = String(index);
+    button.dataset.player = timeline.moverOf(index);
     if (index === timeline.cursor - 1) button.setAttribute("aria-current", "step");
     button.addEventListener("click", () => void jumpTo(index + 1));
     item.append(button);

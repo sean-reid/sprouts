@@ -157,14 +157,15 @@ button:disabled {
   color: #a0a0a0;
 }
 
-#turn .swatch {
+.swatch {
+  flex: none;
   width: 12px;
   height: 12px;
   border-radius: 50%;
   background: #60a5fa;
 }
 
-#turn[data-player="ai"] .swatch {
+[data-player="ai"] .swatch {
   background: #ef4444;
 }
 
@@ -225,6 +226,9 @@ button:disabled {
 }
 
 #moveList button {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   width: 100%;
   min-height: 44px;
   text-align: left;
