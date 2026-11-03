@@ -762,10 +762,12 @@ async function restore(record: GameRecord, fromLink: boolean): Promise<void> {
   }
 }
 
-// A board with no moves restarts with the choice; a game in progress keeps
-// it for the next one.
+// An idle board with no moves restarts with the choice; otherwise the
+// choice waits for the next game.
 function pickFirstPlayer(player: Player): void {
+  if (player === firstPlayer) return;
   chooseFirstPlayer(player);
+  if (busy()) return;
   if (timeline.moves.length === 0) {
     void newGame(lastNodeCount);
   } else {
