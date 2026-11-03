@@ -260,7 +260,7 @@ export function drawBoard(
   ctx.strokeStyle = HIGHLIGHT_COLOR;
   ctx.lineWidth = LINE_WIDTH;
   for (const id of new Set([state.pickedNode, state.focusedNode])) {
-    const node = id === null ? undefined : state.nodes.find((n) => n.id === id);
+    const node = id === null ? undefined : board.nodes.find((n) => n.id === id);
     if (node) strokeRing(ctx, project(node.position));
   }
 

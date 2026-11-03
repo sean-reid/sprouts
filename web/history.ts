@@ -168,12 +168,13 @@ export class History {
     this.moves.length = this.cursor;
   }
 
-  // Takes the fitted spline of every line the engine holds for a move that
-  // has none yet; the engine's lines are the moves up to the cursor.
+  // Takes the spline the engine holds for each move up to the cursor; the
+  // board settles after every move and undo, so the spline a move showed
+  // last time may not be the one it shows now.
   adopt(lines: Line[]): void {
     lines.forEach((line, i) => {
       const move = this.moves[i];
-      if (!move || move.segments) return;
+      if (!move) return;
       if (line.fromNode === move.fromNode && line.toNode === move.toNode) {
         move.segments = line.segments;
       }

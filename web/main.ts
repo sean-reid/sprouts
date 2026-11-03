@@ -555,6 +555,9 @@ async function executeMove(): Promise<void> {
     polyline: state.lockedPath,
     newNodePos: state.placementDot.position,
   };
+  const drawn: Drawn | undefined = state.lockedSegments
+    ? { segments: state.lockedSegments, newNodePos: move.newNodePos }
+    : undefined;
   cancelBtn.hidden = true;
 
   const epoch = gameEpoch;
@@ -573,15 +576,22 @@ async function executeMove(): Promise<void> {
     return;
   }
 
-  recordMove(move, outcome);
+  recordMove(move, outcome, drawn);
   clearStroke();
   if (state.gameOver) showGameOver();
   else startAITurn();
 }
 
-function recordMove(move: Move, outcome: Applied, topology?: FaceMove): void {
+// The curve and node a move was drawn with, where the settle animation
+// starts from for the line the move added.
+interface Drawn {
+  segments: Cubic[];
+  newNodePos: Point;
+}
+
+function recordMove(move: Move, outcome: Applied, drawn?: Drawn, topology?: FaceMove): void {
   timeline.push(move, topology, outcome.cutOff);
-  applySnapshot(outcome.snapshot);
+  applySnapshot(outcome.snapshot, drawn);
   persist();
 }
 
@@ -594,9 +604,15 @@ function canPlay(): boolean {
 }
 
 // A board that changes under a stroke or a candidate takes it down with it.
-function applySnapshot(snapshot: Snapshot): void {
+function applySnapshot(snapshot: Snapshot, drawn?: Drawn): void {
   timeline.adopt(snapshot.lines);
-  const before: Geometry = { nodes: state.nodes, lines: state.lines };
+  const before: Geometry = { nodes: [...state.nodes], lines: [...state.lines] };
+  const added = snapshot.lines.at(-1);
+  if (drawn && added && !before.lines.some((line) => line.id === added.id)) {
+    before.lines.push({ ...added, segments: drawn.segments, newNodePos: drawn.newNodePos });
+    const node = snapshot.nodes.at(-1);
+    if (node) before.nodes.push({ ...node, position: drawn.newNodePos });
+  }
   state.nodes = snapshot.nodes;
   state.lines = snapshot.lines;
   animateSettle(before);
@@ -744,6 +760,9 @@ async function performAIMove(): Promise<void> {
 async function finishAIMove(move: Move, topology: FaceMove, epoch: number): Promise<void> {
   const outcome = await engine.call("applyMove", move).catch(describe);
   if (epoch !== gameEpoch) return;
+  const drawn: Drawn | undefined = state.animatingLine
+    ? { segments: state.animatingLine.segments, newNodePos: move.newNodePos }
+    : undefined;
   state.mode = "idle";
   state.animatingLine = null;
   if (typeof outcome === "string") {
@@ -751,7 +770,7 @@ async function finishAIMove(move: Move, topology: FaceMove, epoch: number): Prom
   } else if (outcome.kind === "rejected") {
     setStatus("AI error: " + outcome.rejection.message, "lose");
   } else {
-    recordMove(move, outcome, topology);
+    recordMove(move, outcome, drawn, topology);
     if (state.gameOver) showGameOver();
     else setStatus("Your turn!");
   }
@@ -1272,6 +1291,10 @@ trackCanvasSize(canvas, view, () => {
   invalidate();
 });
 wireInput();
-wireRecording(() => timeline.record());
+// The saved game stops at the board shown, not at a redo tail.
+wireRecording(() => {
+  const record = timeline.record();
+  return { ...record, moves: record.moves.slice(0, record.cursor) };
+});
 requestAnimationFrame(frame);
 void boot();
