@@ -1,12 +1,16 @@
 import { expect, test, type Page } from "@playwright/test";
 import {
   drawBetween,
+  expectNodeDrawnAt,
   fit,
   frameOf,
   nodeAt,
   openBoard,
+  pinch,
+  pinchDrag,
   shot,
   touchDrag,
+  zoomAt,
   type Client,
   type Frame,
 } from "./helpers";
@@ -178,14 +182,15 @@ test("a mouse stroke along the same path shows no loupe", async ({ page }) => {
   await page.mouse.move(start.x, start.y);
   await page.mouse.down();
   await page.mouse.move(near.x, near.y, { steps: 20 });
-  await expect.poll(() => strokeDrawnBetween(page, start, near)).toBe(true);
+  const mid = { x: (start.x + near.x) / 2, y: (start.y + near.y) / 2 };
+  await expect.poll(() => strokeDrawnAt(page, mid)).toBe(true);
   expect(await ringPixels(page)).toBe(0);
   await shot(page, "loupe-mouse-none");
   await page.mouse.up();
 });
 
-// Samples the midpoint of the stroke for the in-progress stroke blue.
-function strokeDrawnBetween(page: Page, a: Client, b: Client): Promise<boolean> {
+// Samples a client point for the in-progress stroke blue.
+function strokeDrawnAt(page: Page, at: Client): Promise<boolean> {
   return page.evaluate(
     ([x, y]) => {
       const canvas = document.getElementById("canvas") as HTMLCanvasElement;
@@ -203,6 +208,81 @@ function strokeDrawnBetween(page: Page, a: Client, b: Client): Promise<boolean> 
       }
       return false;
     },
-    [(a.x + b.x) / 2, (a.y + b.y) / 2] as const,
+    [at.x, at.y] as const,
   );
 }
+
+test("a stroke from a node with a line opens no lens until the finger is clear of it", async ({
+  page,
+}) => {
+  test.skip(!test.info().project.use.hasTouch, "touch only");
+  const frame = await frameOf(page);
+  const start = nodeAt(frame, fit(frame), 0);
+  const out = (px: number): Client => ({ x: start.x + px, y: start.y });
+  const near = besideFirstChord(frame);
+  const cdp = await page.context().newCDPSession(page);
+
+  await cdp.send("Input.dispatchTouchEvent", {
+    type: "touchStart",
+    touchPoints: [{ ...start, id: 0 }],
+  });
+  await touchDrag(cdp, start, out(20));
+  await expect.poll(() => strokeDrawnAt(page, out(14))).toBe(true);
+  expect(await ringPixels(page)).toBe(0);
+
+  await touchDrag(cdp, out(20), out(60));
+  await expect.poll(() => strokeDrawnAt(page, out(45))).toBe(true);
+  expect(await ringPixels(page)).toBe(0);
+
+  await touchDrag(cdp, out(60), near);
+  await expect
+    .poll(() => ringSamplesAround(page, lensCentre(frame, near)))
+    .toBeGreaterThanOrEqual(6);
+  await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+});
+
+test("the lens flips below the finger near the top edge", async ({ page }) => {
+  test.skip(!test.info().project.use.hasTouch, "touch only");
+  const frame = await frameOf(page);
+  const centre = { x: frame.left + frame.width / 2, y: frame.top + frame.height / 2 };
+  await page.touchscreen.tap(centre.x, centre.y);
+  await page.touchscreen.tap(centre.x, centre.y);
+  let t = zoomAt(frame, fit(frame), centre, 2.5);
+  await expectNodeDrawnAt(page, nodeAt(frame, t, 3));
+
+  const lift = nodeAt(frame, t, 3).y - (frame.top + 70);
+  const fingers: [Client, Client] = [
+    { x: centre.x - 40, y: centre.y + 100 },
+    { x: centre.x + 40, y: centre.y + 100 },
+  ];
+  const moved: [Client, Client] = [
+    { x: fingers[0].x, y: fingers[0].y - lift },
+    { x: fingers[1].x, y: fingers[1].y - lift },
+  ];
+  const cdp = await page.context().newCDPSession(page);
+  await cdp.send("Input.dispatchTouchEvent", {
+    type: "touchStart",
+    touchPoints: [
+      { ...fingers[0], id: 1 },
+      { ...fingers[1], id: 2 },
+    ],
+  });
+  await pinchDrag(cdp, fingers, moved);
+  await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+  t = pinch(frame, t, fingers, moved);
+  const top = nodeAt(frame, t, 3);
+  await expectNodeDrawnAt(page, top);
+
+  const start = nodeAt(frame, t, 2);
+  const near = { x: top.x, y: top.y - 12 };
+  const lens = lensCentre(frame, near);
+  expect(lens.y).toBeGreaterThan(near.y);
+  await cdp.send("Input.dispatchTouchEvent", {
+    type: "touchStart",
+    touchPoints: [{ ...start, id: 0 }],
+  });
+  await touchDrag(cdp, start, near);
+  await expect.poll(() => ringSamplesAround(page, lens)).toBeGreaterThanOrEqual(6);
+  await shot(page, "loupe-flipped");
+  await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+});

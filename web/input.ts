@@ -6,7 +6,7 @@ export type PointerKind = "mouse" | "pen" | "touch";
 export interface StrokeHandlers {
   start(world: Point, kind: PointerKind): void;
   move(world: Point, kind: PointerKind): void;
-  // Runs once per pointermove event, after every coalesced sample of a stroke.
+  // Runs once per pointermove that drove the stroke, after its coalesced samples.
   afterMove(world: Point, kind: PointerKind): void;
   end(world: Point, kind: PointerKind): void;
   tap(world: Point, kind: PointerKind): void;
@@ -167,8 +167,9 @@ export function attachInput(
       if (stroke && remaining) {
         stroke.id = remaining[0];
         stroke.last = view.toWorld(remaining[1].screen);
-      } else {
+      } else if (stroke) {
         stroke = null;
+        handlers.cancel();
       }
       return;
     }

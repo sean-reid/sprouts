@@ -1,4 +1,4 @@
-import { BOARD_BACKGROUND, drawBoard } from "./render";
+import { BOARD_BACKGROUND, drawBoard, setCssPixelTransform } from "./render";
 import type { GameState, Point } from "./state";
 import type { View } from "./view";
 
@@ -35,18 +35,11 @@ function polylineDistance(p: Point, points: Point[]): number {
   return best;
 }
 
-// Screen pixels from a world point to the nearest line or node, leaving out
-// the node the stroke started from.
-export function nearestFeature(
-  world: Point,
-  state: GameState,
-  view: View,
-  skipNode: number | null,
-): number {
+// Screen pixels from a world point to the nearest line or node.
+export function nearestFeature(world: Point, state: GameState, view: View): number {
   let best = Infinity;
   for (const line of state.lines) best = Math.min(best, polylineDistance(world, line.polyline));
   for (const node of state.nodes) {
-    if (node.id === skipNode) continue;
     best = Math.min(best, Math.hypot(world.x - node.position.x, world.y - node.position.y));
   }
   return best * view.scale;
@@ -62,11 +55,18 @@ export function loupeCentre(finger: Point, width: number, height: number): Point
 
 export class Loupe {
   private world: Point | null = null;
+  private armed = false;
 
-  // Follows the finger while it stays near a feature; returns whether the
-  // frame needs a redraw.
-  update(world: Point, state: GameState, view: View, skipNode: number | null): boolean {
-    const distance = nearestFeature(world, state, view, skipNode);
+  // Arms once the finger has cleared the node the stroke started on, then
+  // follows it while it stays near a feature; returns whether the frame needs
+  // a redraw.
+  update(world: Point, start: Point, state: GameState, view: View): boolean {
+    if (!this.armed) {
+      const fromStart = Math.hypot(world.x - start.x, world.y - start.y) * view.scale;
+      if (fromStart <= LOUPE_HIDE_BEYOND) return false;
+      this.armed = true;
+    }
+    const distance = nearestFeature(world, state, view);
     const show = this.world ? distance <= LOUPE_HIDE_BEYOND : distance <= LOUPE_SHOW_WITHIN;
     if (!show) return this.hide();
     const moved = !this.world || this.world.x !== world.x || this.world.y !== world.y;
@@ -80,8 +80,15 @@ export class Loupe {
     return shown;
   }
 
+  // The stroke is over; the next one has to clear its start node again.
+  release(): boolean {
+    this.armed = false;
+    return this.hide();
+  }
+
   draw(ctx: CanvasRenderingContext2D, state: GameState, view: View): void {
     if (!this.world) return;
+    setCssPixelTransform(ctx, view);
     const finger = view.toScreen(this.world);
     const centre = loupeCentre(finger, view.width, view.height);
     const project = (p: Point): Point => {

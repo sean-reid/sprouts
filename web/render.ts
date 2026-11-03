@@ -90,9 +90,14 @@ export function drawBoard(ctx: CanvasRenderingContext2D, state: GameState, proje
   }
 }
 
-export function draw(ctx: CanvasRenderingContext2D, state: GameState, view: View): void {
+// Draws in CSS pixels on a backing store kept at device pixels.
+export function setCssPixelTransform(ctx: CanvasRenderingContext2D, view: View): void {
   const dpr = view.width > 0 ? ctx.canvas.width / view.width : 1;
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+}
+
+export function draw(ctx: CanvasRenderingContext2D, state: GameState, view: View): void {
+  setCssPixelTransform(ctx, view);
   ctx.fillStyle = BOARD_BACKGROUND;
   ctx.fillRect(0, 0, view.width, view.height);
   drawBoard(ctx, state, (p) => view.toScreen(p));

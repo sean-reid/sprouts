@@ -97,7 +97,7 @@ function showGameOver(): void {
 }
 
 function hideLoupe(): void {
-  if (loupe.hide()) invalidate();
+  if (loupe.release()) invalidate();
 }
 
 function clearStroke(): void {
@@ -182,7 +182,8 @@ function handleAfterMove(world: Point, kind: PointerKind): void {
     hideLoupe();
     return;
   }
-  if (loupe.update(world, state, view, state.dragStartNode)) invalidate();
+  const start = state.dragPath[0];
+  if (start && loupe.update(world, start, state, view)) invalidate();
 }
 
 function handleEnd(world: Point, kind: PointerKind): void {
@@ -459,7 +460,10 @@ function frame(): void {
   requestAnimationFrame(frame);
 }
 
-view.onChange(invalidate);
+view.onChange(() => {
+  loupe.hide();
+  invalidate();
+});
 trackCanvasSize(canvas, view, invalidate);
 wireInput();
 requestAnimationFrame(frame);
