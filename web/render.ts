@@ -49,6 +49,7 @@ function drawFlash(
   flash: Flash,
   project: Project,
 ): void {
+  ctx.save();
   ctx.strokeStyle = FLASH_COLOR;
   ctx.lineCap = "round";
   ctx.lineJoin = "round";
@@ -57,16 +58,18 @@ function drawFlash(
     const path = flash.path.map(project);
     ctx.lineWidth = FLASH_WIDTH;
     strokePolyline(ctx, flashedSpan(path, at.first, at.last));
-    return;
+  } else {
+    const world =
+      at.kind === "node" ? state.nodes.find((node) => node.id === at.id)?.position : at.at;
+    if (world) {
+      const centre = project(world);
+      ctx.lineWidth = LINE_WIDTH;
+      ctx.beginPath();
+      ctx.arc(centre.x, centre.y, FLASH_RING_RADIUS, 0, Math.PI * 2);
+      ctx.stroke();
+    }
   }
-  const world =
-    at.kind === "node" ? state.nodes.find((node) => node.id === at.id)?.position : at.at;
-  if (!world) return;
-  const centre = project(world);
-  ctx.lineWidth = LINE_WIDTH;
-  ctx.beginPath();
-  ctx.arc(centre.x, centre.y, FLASH_RING_RADIUS, 0, Math.PI * 2);
-  ctx.stroke();
+  ctx.restore();
 }
 
 // The ring sits just inside the canvas edge in screen pixels, whatever the zoom.

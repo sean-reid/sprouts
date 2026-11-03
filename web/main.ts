@@ -430,7 +430,7 @@ async function undoMove(): Promise<void> {
 
 async function newGame(nodeCount: number): Promise<void> {
   lastNodeCount = nodeCount;
-  Object.assign(state, freshBoard());
+  Object.assign(state, freshBoard(), { currentPlayer: firstPlayer });
   view.fit();
   clearStroke();
   overlay.classList.remove("visible");
