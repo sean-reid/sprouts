@@ -70,16 +70,18 @@ test("a row reached with Tab highlights its move and Enter seeks to it", async (
   const a = await nodeOnScreen(page, 0, 4);
   const blue = PLAYER_COLORS.human;
 
+  // Safari moves focus between buttons with Option held.
+  const tab = test.info().project.name === "webkit" ? "Alt+Tab" : "Tab";
   await page.locator("#shareBtn").focus();
-  await page.keyboard.press("Tab");
+  await page.keyboard.press(tab);
   await expect(rows(page).nth(0)).toBeFocused();
   await expectRing(page, a, blue);
 
-  await page.keyboard.press("Shift+Tab");
+  await page.keyboard.press(`Shift+${tab}`);
   await expect(page.locator("#shareBtn")).toBeFocused();
   await expectNoRing(page, a, blue);
 
-  await page.keyboard.press("Tab");
+  await page.keyboard.press(tab);
   await expectRing(page, a, blue);
   await page.keyboard.press("Enter");
   await expect(page.locator("#status")).toHaveText("Reviewing: move 1 of 2.");

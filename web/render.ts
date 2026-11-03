@@ -10,7 +10,7 @@ const FLASH_COLOR = "#EF4444";
 const FLASH_WIDTH = 6;
 const FLASH_MIN_LENGTH = 24;
 const FLASH_RING_RADIUS = NODE_RADIUS + 6;
-const ID_OFFSET = NODE_RADIUS + 10;
+const ID_OFFSET = NODE_RADIUS + 13;
 
 export type Project = (world: Point) => Point;
 
