@@ -71,7 +71,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        project: [mobile, tablet, desktop]
+        project: [mobile, tablet, desktop, webkit]
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -86,7 +86,7 @@ jobs:
           node-version: 24
           cache: npm
       - run: npm ci
-      - run: npx playwright install --with-deps chromium
+      - run: npx playwright install --with-deps ${{ matrix.project == 'webkit' && 'webkit' || 'chromium' }}
       - run: npx playwright test --project=${{ matrix.project }}
         env:
           CI: 1
