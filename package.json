@@ -1,0 +1,28 @@
+{
+  "name": "sprouts",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Browser Sprouts against a Rust AI compiled to WebAssembly.",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint web tests vite.config.ts playwright.config.ts eslint.config.js prettier.config.js --max-warnings 0",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "test:e2e": "playwright test"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@playwright/test": "^1.64.1",
+    "@types/node": "^26.6.6",
+    "eslint": "^10.14.0",
+    "prettier": "^3.9.10",
+    "typescript": "^6.0.3",
+    "typescript-eslint": "^8.72.1",
+    "vite": "^8.3.5",
+    "wrangler": "^4.156.2"
+  }
+}

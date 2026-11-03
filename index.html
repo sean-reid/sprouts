@@ -1,188 +1,46 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover"
+    />
     <title>Sprouts Game</title>
-    <link rel="icon" type="image/svg+xml" href="favicon.svg">
-    <style>
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-        }
-
-        body {
-            background: #0A0A0A;
-            color: #FFFFFF;
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI',
-                         Roboto, 'Helvetica Neue', Arial, sans-serif;
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            height: 100vh;
-            height: 100dvh;
-            padding: 10px;
-            overflow: hidden;
-            touch-action: manipulation;
-        }
-
-        h1 {
-            font-size: clamp(20px, 5vh, 32px);
-            font-weight: 300;
-            letter-spacing: 6px;
-            margin-bottom: 8px;
-            flex-shrink: 0;
-        }
-
-        #status {
-            font-size: 13px;
-            color: #A0A0A0;
-            margin-bottom: 8px;
-            min-height: 18px;
-            text-align: center;
-            flex-shrink: 0;
-        }
-
-        #status.win { color: #10B981; }
-        #status.lose { color: #EF4444; }
-
-        .controls {
-            display: flex;
-            gap: 8px;
-            margin-bottom: 12px;
-            flex-wrap: wrap;
-            justify-content: center;
-            flex-shrink: 0;
-        }
-
-        button {
-            background: #1A1A1A;
-            border: 1px solid #2A2A2A;
-            color: #A0A0A0;
-            padding: 8px 14px;
-            border-radius: 4px;
-            font-size: 11px;
-            font-weight: 500;
-            letter-spacing: 1px;
-            text-transform: uppercase;
-            cursor: pointer;
-        }
-
-        button:hover:not(:disabled) {
-            background: #252525;
-            color: #FFFFFF;
-        }
-
-        button:disabled {
-            opacity: 0.4;
-            cursor: default;
-        }
-
-        button.confirm-btn {
-            background: #10B981;
-            color: white;
-            border-color: #059669;
-            padding: 12px 24px;
-            font-weight: 600;
-        }
-
-        .canvas-container {
-            position: relative;
-            flex-grow: 1;
-            display: flex;
-            justify-content: center;
-            align-items: center;
-            width: 100%;
-            min-height: 0;
-            padding-bottom: 20px;
-        }
-
-        #canvas {
-            background: #1A1A1A;
-            border: 1px solid #2A2A2A;
-            display: block;
-            touch-action: none;
-            max-width: 100%;
-            max-height: 100%;
-            width: auto;
-            height: auto;
-            aspect-ratio: 1 / 1;
-        }
-
-        #mobileOverlay {
-            position: fixed;
-            bottom: 40px;
-            left: 50%;
-            transform: translateX(-50%);
-            display: none;
-            gap: 12px;
-            z-index: 100;
-            background: rgba(20, 20, 20, 0.95);
-            padding: 16px;
-            border-radius: 12px;
-            border: 1px solid #333;
-            box-shadow: 0 10px 25px rgba(0,0,0,0.5);
-        }
-
-        #mobileOverlay.visible { display: flex; }
-
-        .modal {
-            display: none;
-            position: fixed;
-            top: 0; left: 0;
-            width: 100%; height: 100%;
-            background: rgba(0, 0, 0, 0.9);
-            justify-content: center;
-            align-items: center;
-            z-index: 1000;
-        }
-
-        .modal.visible { display: flex; }
-
-        .modal-content {
-            background: #1A1A1A;
-            border: 1px solid #2A2A2A;
-            padding: 40px 20px;
-            border-radius: 4px;
-            text-align: center;
-            width: 90%;
-            max-width: 400px;
-        }
-    </style>
-</head>
-<body>
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+  </head>
+  <body>
     <h1>SPROUTS</h1>
 
     <div class="controls">
-        <button onclick="newGame(4)">4 Nodes</button>
-        <button onclick="newGame(5)">5 Nodes</button>
-        <button onclick="newGame(6)">6 Nodes</button>
-        <button id="undoBtn" onclick="undoMove()" disabled>Undo</button>
+      <button data-nodes="4">4 Nodes</button>
+      <button data-nodes="5">5 Nodes</button>
+      <button data-nodes="6">6 Nodes</button>
+      <button id="undoBtn" disabled>Undo</button>
     </div>
 
     <div id="status">Initializing...</div>
 
     <div class="canvas-container">
-        <canvas id="canvas"></canvas>
+      <canvas id="canvas"></canvas>
     </div>
 
     <div id="mobileOverlay">
-        <button onclick="cancelPlacement()">Cancel</button>
-        <button class="confirm-btn" onclick="confirmMove()">Confirm Move</button>
+      <button id="cancelBtn">Cancel</button>
+      <button id="confirmBtn" class="confirm-btn">Confirm Move</button>
     </div>
 
     <div id="gameOverModal" class="modal">
-        <div class="modal-content">
-            <h2 id="winnerText" style="letter-spacing: 4px; margin-bottom: 20px;"></h2>
-            <p style="margin-bottom: 30px; color: #A0A0A0;">Game Over</p>
-            <div style="display: flex; gap: 12px; justify-content: center;">
-                <button onclick="reviewBoard()">Review Board</button>
-                <button onclick="newGameFromModal()">New Game</button>
-            </div>
+      <div class="modal-content">
+        <h2 id="winnerText"></h2>
+        <p>Game Over</p>
+        <div class="modal-actions">
+          <button id="reviewBtn">Review Board</button>
+          <button id="newGameBtn">New Game</button>
         </div>
+      </div>
     </div>
 
-    <script type="module" src="./game.js"></script>
-</body>
+    <script type="module" src="/web/main.ts"></script>
+  </body>
 </html>
