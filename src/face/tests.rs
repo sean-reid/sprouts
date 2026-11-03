@@ -1,6 +1,37 @@
 use super::*;
 use proptest::prelude::*;
 
+fn rotation_next(m: &FaceModel, h: HalfEdgeId) -> HalfEdgeId {
+    let twin = h ^ 1;
+    let rot = m.rotation(m.origin(twin));
+    let at = rot.iter().position(|&s| s == twin).unwrap();
+    rot[(at + rot.len() - 1) % rot.len()]
+}
+
+/// Orbit id of every half-edge under the rotation-derived next map.
+fn orbits(m: &FaceModel) -> Vec<usize> {
+    let total = m.half_edges.len();
+    let mut orbit = vec![usize::MAX; total];
+    let mut count = 0;
+    for start in 0..total {
+        if orbit[start] != usize::MAX {
+            continue;
+        }
+        let mut h = start;
+        for _ in 0..=total {
+            assert_eq!(orbit[h], usize::MAX, "half-edge {h} on two orbits");
+            orbit[h] = count;
+            h = rotation_next(m, h);
+            if h == start {
+                break;
+            }
+        }
+        assert_eq!(h, start, "orbit from {start} does not close");
+        count += 1;
+    }
+    orbit
+}
+
 fn check(m: &FaceModel) {
     let v = m.nodes.len();
     let e = m.half_edges.len() / 2;
@@ -27,9 +58,20 @@ fn check(m: &FaceModel) {
         for &h in node.rotation() {
             assert_eq!(m.origin(h), id);
         }
+        assert_eq!(node.rotation().len(), node.degree as usize);
     }
 
-    let mut seen = vec![false; m.half_edges.len()];
+    let orbit = orbits(m);
+    let orbit_count = orbit.iter().max().map_or(0, |o| o + 1);
+    let mut orbit_face = vec![usize::MAX; orbit_count];
+    for (h, &o) in orbit.iter().enumerate() {
+        if orbit_face[o] == usize::MAX {
+            orbit_face[o] = m.face_of(h);
+        }
+        assert_eq!(m.face_of(h), orbit_face[o], "orbit of {h} spans two faces");
+    }
+
+    let mut listed = vec![false; orbit_count];
     let mut placed = vec![false; v];
     for (fid, face) in m.faces.iter().enumerate() {
         for comp in &face.components {
@@ -41,43 +83,109 @@ fn check(m: &FaceModel) {
                     placed[n] = true;
                 }
                 Component::Cycle(start) => {
-                    let mut h = start;
-                    for _ in 0..=m.half_edges.len() {
-                        assert!(!seen[h], "half-edge {h} on two walks");
-                        seen[h] = true;
-                        assert_eq!(m.face_of(h), fid, "half-edge {h}");
-                        h = m.next(h);
-                        if h == start {
-                            break;
-                        }
-                    }
-                    assert_eq!(h, start, "walk from {start} does not close");
+                    let o = orbit[start];
+                    assert!(!listed[o], "orbit of {start} listed twice");
+                    listed[o] = true;
+                    assert_eq!(orbit_face[o], fid, "orbit of {start}");
                 }
             }
         }
     }
-    assert!(seen.iter().all(|&s| s), "half-edge on no walk");
+    assert!(listed.iter().all(|&l| l), "orbit on no face");
     for (n, &p) in placed.iter().enumerate() {
         assert_eq!(p, m.degree(n) == 0, "node {n}");
     }
 }
 
-fn play(n: usize, picks: &[u32]) -> (FaceModel, Vec<FaceModel>, Vec<Move>) {
+/// The pieces of the move's face other than the ones holding its corners,
+/// each as a half-edge or isolated node and the lowest node on it.
+fn other_pieces(m: &FaceModel, mv: &Move) -> Vec<(Component, NodeId)> {
+    let orbit = orbits(m);
+    let face = m.corner_face(mv.a, mv.at_a).unwrap();
+    let holds_corner = |comp: &Component| match *comp {
+        Component::Node(v) => (mv.at_a.is_none() && v == mv.a) || (mv.at_b.is_none() && v == mv.b),
+        Component::Cycle(start) => [mv.at_a, mv.at_b]
+            .iter()
+            .flatten()
+            .any(|&h| orbit[h] == orbit[start]),
+    };
+    m.components(face)
+        .iter()
+        .filter(|comp| !holds_corner(comp))
+        .map(|comp| match *comp {
+            Component::Node(v) => (*comp, v),
+            Component::Cycle(start) => {
+                let lowest = (0..m.half_edges.len())
+                    .filter(|&h| orbit[h] == orbit[start])
+                    .map(|h| m.origin(h))
+                    .min()
+                    .unwrap();
+                (*comp, lowest)
+            }
+        })
+        .collect()
+}
+
+/// Each other piece of the split face sits on the side the move named.
+fn check_sides(before: &FaceModel, mv: &Move, after: &FaceModel) {
+    let h_am = after.half_edges.len() - 4;
+    let left = after.face_of(h_am);
+    let right = after.face_of(h_am + 3);
+    let split = left != right;
+    assert_eq!(after.face_count(), before.face_count() + usize::from(split));
+    let pieces = other_pieces(before, mv);
+    for (comp, rep) in pieces {
+        let want = if mv.enclosed.contains(&rep) {
+            left
+        } else {
+            right
+        };
+        let got = match comp {
+            Component::Node(v) => after.corner_face(v, None).unwrap(),
+            Component::Cycle(start) => after.face_of(start),
+        };
+        assert_eq!(got, want, "piece {rep} of {mv:?}");
+    }
+}
+
+fn apply_checked(m: &mut FaceModel, mv: &Move) {
+    let before = m.clone();
+    m.apply(mv).unwrap();
+    check(m);
+    check_sides(&before, mv, m);
+}
+
+/// Plays `picks` out from `n` nodes. With `exhaustive`, every listed move at
+/// every position is applied and undone first.
+fn play(n: usize, picks: &[u32], exhaustive: bool) -> (FaceModel, Vec<FaceModel>, Vec<Move>) {
     let mut m = FaceModel::new(n);
     let mut snapshots = Vec::new();
     let mut played = Vec::new();
     for &pick in picks {
         let moves = m.moves();
+        assert_eq!(moves, m.clone().moves());
         if moves.is_empty() {
             break;
         }
-        assert_eq!(moves, m.moves());
+        if exhaustive {
+            let before = m.clone();
+            for mv in &moves {
+                apply_checked(&mut m, mv);
+                assert_eq!(m.undo().as_ref(), Some(mv));
+                assert_eq!(m, before);
+            }
+        }
         let mv = moves[pick as usize % moves.len()].clone();
         snapshots.push(m.clone());
-        m.apply(&mv).unwrap();
-        check(&m);
+        apply_checked(&mut m, &mv);
         played.push(mv);
     }
+    let mut replay = FaceModel::new(n);
+    for mv in &played {
+        replay.apply(mv).unwrap();
+    }
+    assert_eq!(replay, m);
+    assert_eq!(replay.moves(), m.moves());
     (m, snapshots, played)
 }
 
@@ -86,15 +194,16 @@ proptest! {
 
     #[test]
     fn random_games_keep_invariants(n in 1usize..=8, picks in prop::collection::vec(any::<u32>(), 24)) {
-        let (m, _, played) = play(n, &picks);
+        let (m, _, played) = play(n, &picks, false);
         prop_assert!(m.is_game_over());
         prop_assert!(played.len() >= 2 * n, "{} moves from {n}", played.len());
         prop_assert!(played.len() < 3 * n, "{} moves from {n}", played.len());
     }
 
     #[test]
-    fn undo_restores_equal_state(n in 1usize..=6, picks in prop::collection::vec(any::<u32>(), 18)) {
-        let (mut m, snapshots, played) = play(n, &picks);
+    fn undo_restores_equal_state(n in 1usize..=8, picks in prop::collection::vec(any::<u32>(), 24)) {
+        let (mut m, snapshots, played) = play(n, &picks, false);
+        prop_assert!(m.is_game_over());
         for (before, mv) in snapshots.iter().zip(&played).rev() {
             prop_assert_eq!(m.undo(), Some(mv.clone()));
             prop_assert_eq!(&m, before);
@@ -103,14 +212,8 @@ proptest! {
     }
 
     #[test]
-    fn every_listed_move_applies(n in 1usize..=5, picks in prop::collection::vec(any::<u32>(), 14)) {
-        let (mut m, _, _) = play(n, &picks);
-        for mv in m.moves() {
-            let before = m.clone();
-            prop_assert_eq!(m.apply(&mv), Ok(()));
-            m.undo();
-            prop_assert_eq!(&m, &before);
-        }
+    fn every_listed_move_applies(n in 1usize..=6, picks in prop::collection::vec(any::<u32>(), 18)) {
+        play(n, &picks, true);
     }
 }
 
@@ -188,8 +291,7 @@ fn loop_encloses_the_chosen_component() {
         at_b: None,
         enclosed: vec![2],
     };
-    m.apply(&mv).unwrap();
-    check(&m);
+    apply_checked(&mut m, &mv);
     assert_eq!(m.face_count(), 2);
     let inside = m.face_of(0);
     assert_eq!(m.corner_face(2, None), Ok(inside));
@@ -219,8 +321,7 @@ fn loop_on_degree_one_node_offers_both_sides() {
     assert_eq!(loops[1].enclosed, vec![2]);
     for mv in loops {
         let enclosed = !mv.enclosed.is_empty();
-        m.apply(&mv).unwrap();
-        check(&m);
+        apply_checked(&mut m, &mv);
         assert_eq!(m.face_count(), 2);
         let left = m.face_of(mv.at_a.unwrap());
         let inside = m.face_of(m.rotation(0)[1]);
