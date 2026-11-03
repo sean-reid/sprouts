@@ -1,41 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
-
-interface Client {
-  x: number;
-  y: number;
-}
-
-// Mirrors the opening layout in src/types.rs: nodes on a circle around the
-// board centre, radius scaled to the board size.
-function nodeOnScreen(page: Page, index: number, count: number): Promise<Client> {
-  return page.evaluate(
-    ([i, n]) => {
-      const canvas = document.getElementById("canvas") as HTMLCanvasElement;
-      const rect = canvas.getBoundingClientRect();
-      const board = canvas.width;
-      const radius = (n <= 4 ? 120 : 160) * (board / 1000);
-      const angle = (2 * Math.PI * i) / n;
-      const x = board / 2 + radius * Math.cos(angle);
-      const y = board / 2 + radius * Math.sin(angle);
-      return {
-        x: rect.left + (x / board) * rect.width,
-        y: rect.top + (y / board) * rect.height,
-      };
-    },
-    [index, count] as const,
-  );
-}
-
-async function drawBetween(page: Page, from: number, to: number): Promise<Client> {
-  const a = await nodeOnScreen(page, from, 4);
-  const b = await nodeOnScreen(page, to, 4);
-  await page.mouse.move(a.x, a.y);
-  await page.mouse.down();
-  await page.mouse.move(b.x, b.y, { steps: 20 });
-  await page.mouse.up();
-  await expect(page.locator("#status")).toHaveText(/place a new node/);
-  return { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
-}
+import { drawBetween, nodeOnScreen, openBoard, shot, touchStroke, type Client } from "./helpers";
 
 // Installed before the page loads so a test can hold one request to the
 // worker back; the worker then answers a newer request first.
@@ -78,20 +42,9 @@ function dotAt(page: Page, at: Client): Promise<boolean> {
   }, at);
 }
 
-function shot(page: Page, name: string) {
-  return page.screenshot({
-    path: `test-results/shots/${test.info().project.name}-${name}.png`,
-    fullPage: true,
-  });
-}
-
 test.beforeEach(async ({ page }) => {
   await page.addInitScript(holdOneWorkerMessage);
-  await page.goto("/");
-  // Fetching the wasm and building the 1000 grid takes a few seconds on a shared runner.
-  await expect(page.locator("#status")).toHaveText("Draw a line between two nodes", {
-    timeout: 20_000,
-  });
+  await openBoard(page);
 });
 
 test("opens on a four node board with undo disabled", async ({ page }) => {
@@ -125,15 +78,7 @@ test("a touch stroke locks the line and Confirm places the node", async ({ page 
   const a = await nodeOnScreen(page, 0, 4);
   const b = await nodeOnScreen(page, 1, 4);
   const cdp = await page.context().newCDPSession(page);
-  await cdp.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [a] });
-  for (let i = 1; i <= 20; i++) {
-    const t = i / 20;
-    await cdp.send("Input.dispatchTouchEvent", {
-      type: "touchMove",
-      touchPoints: [{ x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t }],
-    });
-  }
-  await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+  await touchStroke(cdp, a, b);
   await expect(page.locator("#status")).toHaveText(/Tap Confirm/);
   await expect(page.locator("#mobileOverlay")).toBeVisible();
   await shot(page, "touch-placing");
