@@ -32,6 +32,8 @@ function lensCentre(frame: Frame, finger: Client): Client {
 }
 
 // Counts ring-amber samples on the lens circumference around a client point.
+// The ring is 2 px wide, so each angle checks the 3 by 3 block around the
+// sample; a centre on a pixel fraction otherwise blends half the samples.
 function ringSamplesAround(page: Page, centre: Client): Promise<number> {
   return page.evaluate(
     ([x, y, radius]) => {
@@ -45,9 +47,14 @@ function ringSamplesAround(page: Page, centre: Client): Promise<number> {
         const angle = (Math.PI * 2 * k) / 8;
         const px = Math.round((x - rect.left + radius * Math.cos(angle)) * dpr);
         const py = Math.round((y - rect.top + radius * Math.sin(angle)) * dpr);
-        const [r, g, b] = ctx.getImageData(px, py, 1, 1).data;
-        if (r === undefined || g === undefined || b === undefined) continue;
-        if (r > 200 && g > 150 && g < 220 && b < 100) hits++;
+        const { data } = ctx.getImageData(px - 1, py - 1, 3, 3);
+        for (let i = 0; i < data.length; i += 4) {
+          const [r, g, b] = [data[i]!, data[i + 1]!, data[i + 2]!];
+          if (r > 200 && g > 150 && g < 220 && b < 100) {
+            hits++;
+            break;
+          }
+        }
       }
       return hits;
     },

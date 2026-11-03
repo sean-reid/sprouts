@@ -198,6 +198,25 @@ test("a finished game reopens in review and steps single moves", async ({ page }
   await expect(page.locator("#forwardBtn")).toBeDisabled();
 });
 
+test("a game the AI started restores with the AI as first player", async ({ page }) => {
+  await openBoard(page);
+  await page.locator("button[data-first='ai']").click();
+  await page.locator("button[data-nodes='4']").click();
+  await expect(page.locator("#status")).toHaveText("Your turn!", { timeout: 60_000 });
+  await expect(entries(page)).toHaveText([/^1\. AI \d+ to \d+$/]);
+
+  await page.reload();
+  await expect(page.locator("#status")).toHaveText("Your turn!");
+  await expect(entries(page)).toHaveText([/^1\. AI \d+ to \d+$/]);
+  await expect(page.locator("button[data-first='ai']")).toHaveAttribute("aria-pressed", "true");
+  await expect(page.locator("#turn")).toHaveAttribute("data-player", "human");
+  await expect(page.locator("#undoBtn")).toBeEnabled();
+
+  await page.locator("#undoBtn").click();
+  await expect(page.locator("#status")).toHaveText("Your turn!", { timeout: 60_000 });
+  await expect(entries(page)).toHaveText([/^1\. AI \d+ to \d+$/]);
+});
+
 test("the move list buttons meet the touch target size", async ({ page }) => {
   await openBoard(page);
   await playExchange(page);
