@@ -438,7 +438,8 @@ export function clampToViewport(frame: Frame, t: Transform): Transform {
   return { ...t, tx: axis(t.tx, frame.width), ty: axis(t.ty, frame.height) };
 }
 
-export function shot(page: Page, name: string) {
+export async function shot(page: Page, name: string): Promise<Buffer> {
+  await nextFrame(page);
   return page.screenshot({
     path: `test-results/shots/${test.info().project.name}-${name}.png`,
     fullPage: true,
