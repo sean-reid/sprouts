@@ -646,6 +646,7 @@ fn journal(state: &GameState) -> Vec<FaceMove> {
 
 /// The least clearance on the board as a share of its target, and the
 /// pair that sets it; infinite when there is nothing to measure.
+#[cfg(any(test, feature = "bench"))]
 pub fn least_clearance(state: &GameState) -> (f64, Tightest) {
     let targets = Targets::for_board(state.board_size);
     Layout::from_state(state, &targets).map_or((f64::INFINITY, Tightest::Nothing), |layout| {
