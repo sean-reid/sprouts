@@ -27,7 +27,14 @@ pub struct Fixture {
     /// Where the starting nodes were; the default layout when absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub nodes: Option<Vec<[f64; 2]>>,
+    /// The settle the game was played under; absent means none ran.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub settle_version: u8,
     pub moves: Vec<FixtureMove>,
+}
+
+fn is_zero(version: &u8) -> bool {
+    *version == 0
 }
 
 impl Fixture {
@@ -41,6 +48,7 @@ impl Fixture {
             self.nodes
                 .as_ref()
                 .map(|nodes| nodes.iter().map(|p| Point::new(p[0], p[1])).collect()),
+            self.settle_version,
         )
         .expect("a parsed fixture's positions match its count")
     }
@@ -300,10 +308,15 @@ pub fn replay(fixture: &Fixture) -> Replay {
                 phases.face_update = t.elapsed();
                 if applied.is_ok() {
                     let (before, _) = settle::least_clearance(&state);
+                    let mut settled = state.clone();
+                    settled.settle_version = protocol::SETTLE_VERSION;
                     let t = Instant::now();
-                    settle::settle(&mut state);
+                    settle::settle(&mut settled);
                     phases.settle = t.elapsed();
-                    clearance = Some((before, settle::least_clearance(&state).0));
+                    clearance = Some((before, settle::least_clearance(&settled).0));
+                    if state.settle_version > 0 {
+                        state = settled;
+                    }
                 }
                 applied.map_err(|e| format!("move {index} rejected: {}", e.message))
             }
@@ -360,9 +373,9 @@ pub fn nodes_per_depth(fixture: &Fixture, max_depth: usize) -> Vec<usize> {
     totals
 }
 
-/// Applies and settles each recorded move without the AI's phases and
-/// returns the settle time per move in milliseconds, for games too large
-/// for the full replay.
+/// Applies each recorded move without the AI's phases and settles a copy
+/// of each position under the current settle; returns the settle time per
+/// move in milliseconds, for games too large for the full replay.
 pub fn settle_times(fixture: &Fixture) -> Vec<f64> {
     let mut state = fixture.start();
     let mut times = Vec::with_capacity(fixture.moves.len());
@@ -371,9 +384,14 @@ pub fn settle_times(fixture: &Fixture) -> Vec<f64> {
         if state.apply_move(mov).is_err() {
             break;
         }
+        let mut settled = state.clone();
+        settled.settle_version = protocol::SETTLE_VERSION;
         let t = Instant::now();
-        settle::settle(&mut state);
+        settle::settle(&mut settled);
         times.push(ms(t.elapsed()));
+        if state.settle_version > 0 {
+            state = settled;
+        }
     }
     times
 }
@@ -396,6 +414,7 @@ pub fn record(initial_nodes: usize, board_size: usize) -> Fixture {
         version: FIXTURE_VERSION,
         initial_nodes,
         board_size,
+        settle_version: protocol::SETTLE_VERSION,
         nodes: Some(
             opening_layout(initial_nodes, board_size)
                 .iter()
@@ -414,6 +433,9 @@ pub fn self_play(
     settled: bool,
 ) -> (Vec<FixtureMove>, Stop) {
     let mut state = GameState::with_board_size(initial_nodes, board_size);
+    if !settled {
+        state.settle_version = 0;
+    }
     let mut moves = Vec::new();
     loop {
         let mov = match next_accepted_move(&mut state) {
@@ -422,9 +444,7 @@ pub fn self_play(
         };
         moves.push(FixtureMove::from_move(&mov));
         state.apply_move(mov).expect("an accepted move applies");
-        if settled {
-            settle::settle(&mut state);
-        }
+        settle::settle(&mut state);
     }
 }
 
@@ -657,6 +677,7 @@ mod tests {
             initial_nodes: 4,
             board_size: 500,
             nodes: None,
+            settle_version: 0,
             moves: vec![FixtureMove {
                 from: 0,
                 to: 1,

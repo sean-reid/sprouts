@@ -16,6 +16,8 @@ export interface Fixture {
   boardSize: number;
   // Where the starting nodes were; the engine's default layout when absent.
   nodes?: [number, number][];
+  // The settle the game was played under; absent means none ran.
+  settleVersion?: number;
   moves: FixtureMove[];
 }
 

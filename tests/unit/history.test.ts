@@ -16,6 +16,7 @@ import {
   recordFromHash,
   rehearsal,
   ROUTER_VERSION,
+  SETTLE_VERSION,
   sameGame,
   StaleLink,
   STROKE_TOLERANCE,
@@ -28,15 +29,17 @@ import {
 import { circleLayout, openingLayout } from "../../web/layout";
 import type { Fixture, FixtureMove } from "../../web/record";
 
-// Header: version, router version, flags, initial nodes, board size, move
-// count and cursor, then each move's from and to as one-byte varints
-// before its shape byte.
-const SHAPE_OFFSET = 13;
-const FLAGS_OFFSET = 2;
+// Header: version, router version, settle version, flags, initial nodes,
+// board size, move count and cursor, then each move's from and to as
+// one-byte varints before its shape byte.
+const SHAPE_OFFSET = 14;
+const SETTLE_OFFSET = 2;
+const FLAGS_OFFSET = 3;
 const SHAPE_STROKE = 0;
 const SHAPE_CUBICS = 1;
 const SHAPE_FACE = 2;
-const LINK_VERSION = 4;
+const LINK_VERSION = 5;
+const FACE_LINK_VERSION = 4;
 const VERSION_1_PAYLOAD =
   "AQAEAPQBAgACAAAAAQACABwMxAmvCbAJ8ArwCgIAAAAFAGwHxAn4A88BpgpR3gIe5AGEAvsKMwk";
 // The first exchange of fixtures/saved/first-exchange.json as a version 2
@@ -49,6 +52,9 @@ const VERSION_3_PAYLOAD =
 // carried as its face move, leaving spoke 3 and enclosing nodes 0 and 4,
 // with its node at (620, 500).
 const VERSION_4_PAYLOAD = "BAIABADoAwIAAgAAAQAC2AToB6AGAI8DAAICAgQEAgAE2AnoBw";
+// The same two moves as a version 5 link, with settle version 0 after the
+// router byte.
+const VERSION_5_PAYLOAD = "BAIAAAQA6AMCAAIAAAEAAtgE6AegBgCPAwACAgIEBAIABNgJ6Ac";
 const LOOP_FACE: FaceMove = { a: 2, atA: 3, b: 2, atB: 3, enclosed: [0, 4] };
 
 function bytesOf(payload: string): Uint8Array {
@@ -268,11 +274,32 @@ describe("the share link codec", () => {
     ]);
     expect(faceOf(record?.moves[1])).toEqual(LOOP_FACE);
     const bytes = bytesOf(VERSION_4_PAYLOAD);
-    expect(bytes[0]).toBe(LINK_VERSION);
+    expect(bytes[0]).toBe(FACE_LINK_VERSION);
     expect(bytes[1]).toBe(ROUTER_VERSION);
+    // A version 4 link was played with no settling.
+    expect(record?.settleVersion).toBe(0);
     // A version 3 link has no router byte and no face shape.
     const older = new Uint8Array([3, ...bytes.slice(2)]);
     expect(decodeRecord(payloadOf(older))).toBeNull();
+  });
+
+  it("carries the settle version after the router byte and reads it back", () => {
+    const history = new History(4, 1000);
+    history.push({
+      fromNode: 0,
+      toNode: 1,
+      polyline: [at(300, 500), at(700, 500)],
+      newNodePos: at(500, 500),
+    });
+    const bytes = bytesOf(encodeRecord(history));
+    expect(bytes[0]).toBe(LINK_VERSION);
+    expect(bytes[1]).toBe(ROUTER_VERSION);
+    expect(bytes[SETTLE_OFFSET]).toBe(SETTLE_VERSION);
+    expect(decodeRecord(payloadOf(bytes))?.settleVersion).toBe(SETTLE_VERSION);
+    const unsettled = History.from(decodeRecord(VERSION_4_PAYLOAD)!);
+    expect(unsettled.settleVersion).toBe(0);
+    expect(bytesOf(encodeRecord(unsettled))[SETTLE_OFFSET]).toBe(0);
+    expect(decodeRecord(VERSION_5_PAYLOAD)).toEqual(decodeRecord(VERSION_4_PAYLOAD));
   });
 
   it("refuses a link made for another router", () => {
@@ -283,10 +310,12 @@ describe("the share link codec", () => {
     expect(recordFromHash("#game=" + VERSION_4_PAYLOAD)?.moves).toHaveLength(2);
   });
 
-  it("matches the engine's router version", () => {
+  it("matches the engine's router and settle versions", () => {
     const source = readFileSync("src/protocol.rs", "utf8");
-    const declared = /pub const ROUTER_VERSION: u8 = (\d+);/.exec(source);
-    expect(Number(declared?.[1])).toBe(ROUTER_VERSION);
+    const router = /pub const ROUTER_VERSION: u8 = (\d+);/.exec(source);
+    expect(Number(router?.[1])).toBe(ROUTER_VERSION);
+    const settle = /pub const SETTLE_VERSION: u8 = (\d+);/.exec(source);
+    expect(Number(settle?.[1])).toBe(SETTLE_VERSION);
   });
 
   it("refuses a face move that names what does not exist yet", () => {
@@ -395,7 +424,7 @@ describe("a move that arrives as topology", () => {
     expect(history.positionOf(5)).toEqual(at(620, 500));
     // The saved record holds strokes only.
     expect(() => history.record()).toThrow(RangeError);
-    expect(encodeRecord(history)).toBe(VERSION_4_PAYLOAD);
+    expect(encodeRecord(history)).toBe(VERSION_5_PAYLOAD);
 
     const line: Line = {
       id: 1,
@@ -412,7 +441,7 @@ describe("a move that arrives as topology", () => {
     const saved = stroke(history.record().moves[1]);
     expect(saved.polyline).toHaveLength(4);
     expect(saved.newNode).toEqual([620, 500]);
-    expect(encodeRecord(history)).toBe(VERSION_4_PAYLOAD);
+    expect(encodeRecord(history)).toBe(VERSION_5_PAYLOAD);
   });
 
   it("reads the link back as a rehearsal and demotes a drawn move to geometry", () => {
@@ -630,6 +659,7 @@ describe("every recorded game through the link", () => {
         firstPlayer: "human",
         cursor: fixture.moves.length,
         ...fixture,
+        settleVersion: fixture.settleVersion ?? 0,
         version: 1,
       });
       const decoded = decodeRecord(encodeRecord(history));

@@ -40,10 +40,17 @@ impl SproutsGame {
         board_size: usize,
         first_player: Ts<Player>,
         layout: Option<Ts<Layout>>,
+        settle_version: u8,
     ) -> Result<SproutsGame, JsError> {
         let nodes = layout.map(|l| l.to_rust()).transpose()?.map(|l| l.nodes);
-        let state = protocol::start(initial_nodes, board_size, first_player.to_rust()?, nodes)
-            .map_err(|e| JsError::new(&e))?;
+        let state = protocol::start(
+            initial_nodes,
+            board_size,
+            first_player.to_rust()?,
+            nodes,
+            settle_version,
+        )
+        .map_err(|e| JsError::new(&e))?;
         Ok(Self { state })
     }
 

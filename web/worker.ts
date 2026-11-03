@@ -19,12 +19,12 @@ function ready(): SproutsGame {
 
 async function handle(envelope: Envelope): Promise<unknown> {
   if (envelope.method === "init") {
-    const [nodeCount, boardSize, firstPlayer, layout] = envelope.args;
+    const [nodeCount, boardSize, firstPlayer, layout, settleVersion] = envelope.args;
     wasmLoaded ??= init({ module_or_path: wasmUrl });
     await wasmLoaded;
     game?.free();
     game = null;
-    game = new SproutsGame(nodeCount, boardSize, firstPlayer, layout);
+    game = new SproutsGame(nodeCount, boardSize, firstPlayer, layout, settleVersion);
     return undefined;
   }
   const current = ready();

@@ -55,8 +55,9 @@ function minStrokeLength(boardSize: number): number {
   return 20 * (boardSize / 1000);
 }
 const AI_ANIMATION_MS = 500;
-// The board eases from the last snapshot to the settled one in this long.
-const SETTLE_MS = 300;
+// The board eases from the last snapshot to the settled one in this long,
+// with canvas input held until it lands.
+const SETTLE_MS = 500;
 const FLASH_MS = 600;
 // How long the board points out the move a seek landed on.
 const HIGHLIGHT_MS = 2000;
@@ -239,7 +240,9 @@ function stopThinking(): void {
 }
 
 function busy(): boolean {
-  return state.mode !== "idle" || state.thinking || submitting || seeking;
+  return (
+    state.mode !== "idle" || state.thinking || submitting || seeking || state.settling !== null
+  );
 }
 
 function updateControls(): void {
@@ -380,7 +383,7 @@ function handleStart(world: Point, kind: PointerKind): boolean {
     if (state.gameOver && timeline.atEnd) openDialog();
     return false;
   }
-  if (state.mode !== "idle" || state.thinking || state.gameOver || seeking) return false;
+  if (busy() || state.gameOver) return false;
   const node = findNodeAt(world, kind === "touch" ? 30 : 15);
   if (!node || !state.activeNodes.has(node.id)) return false;
   keys.reset();
@@ -698,7 +701,10 @@ function animateSettle(before: Geometry): void {
       }),
     };
     if (t < 1) requestAnimationFrame(frame);
-    else state.settling = null;
+    else {
+      state.settling = null;
+      updateControls();
+    }
     targets.place();
   };
   requestAnimationFrame(frame);
@@ -1076,7 +1082,14 @@ async function newGame(nodeCount: number, fresh = true, hint = DRAW_HINT): Promi
   renderMoveList();
   setStatus("Initializing...");
   try {
-    await engine.call("init", nodeCount, timeline.boardSize, firstPlayer);
+    await engine.call(
+      "init",
+      nodeCount,
+      timeline.boardSize,
+      firstPlayer,
+      undefined,
+      timeline.settleVersion,
+    );
     if (epoch !== gameEpoch) return;
     await refreshBoard();
     if (epoch !== gameEpoch) return;
@@ -1106,7 +1119,14 @@ async function restore(record: GameRecord, fromLink: boolean): Promise<void> {
   setBoardSize(timeline.boardSize);
   setStatus("Initializing...");
   const layout = timeline.nodes ? { nodes: timeline.nodes.map(([x, y]) => ({ x, y })) } : undefined;
-  await engine.call("init", timeline.initialNodes, timeline.boardSize, firstPlayer, layout);
+  await engine.call(
+    "init",
+    timeline.initialNodes,
+    timeline.boardSize,
+    firstPlayer,
+    layout,
+    timeline.settleVersion,
+  );
   if (epoch !== gameEpoch) return;
   state.reviewing = fromLink;
   const reached = await seek(target);

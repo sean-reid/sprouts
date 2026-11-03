@@ -34,6 +34,9 @@ export interface GameRecord extends Omit<Fixture, "moves"> {
   version: 1;
   firstPlayer: Player;
   cursor: number;
+  // The settle the game was played under; 0 is a game recorded with no
+  // settling, which replays with none so its strokes still fit.
+  settleVersion: number;
   moves: RecordMove[];
 }
 
@@ -62,18 +65,29 @@ export const STORAGE_KEY = "sprouts.game";
 const HASH_PREFIX = "#game=";
 const RECORD_VERSION = 1;
 // Link version 1 carries thinned strokes, version 2 the fitted cubics,
-// version 3 the starting layout when it is not the default, and version 4
-// a move as its face move where the router redraws it; a version 1 or 2
-// link was drawn on the circle layout.
-const LINK_VERSION = 4;
-// Matches ROUTER_VERSION in src/protocol.rs; a version 4 link carries it
-// right after the version byte, and the engine refuses a rehearsal for
-// any other.
+// version 3 the starting layout when it is not the default, version 4 a
+// move as its face move where the router redraws it, and version 5 the
+// settle version; a version 1 or 2 link was drawn on the circle layout
+// and a link before version 5 was played with no settling.
+const LINK_VERSION = 5;
+// Matches ROUTER_VERSION in src/protocol.rs; a version 4 or later link
+// carries it right after the version byte, and the engine refuses a
+// rehearsal for any other.
 export const ROUTER_VERSION = 2;
+// Matches SETTLE_VERSION in src/protocol.rs: the settle a new game is
+// played under, carried after the router byte from link version 5 on.
+export const SETTLE_VERSION = 1;
+const FACE_LINK_VERSION = 4;
 const LAYOUT_LINK_VERSION = 3;
 const CUBIC_LINK_VERSION = 2;
 const STROKE_LINK_VERSION = 1;
-const LINK_VERSIONS = [LINK_VERSION, LAYOUT_LINK_VERSION, CUBIC_LINK_VERSION, STROKE_LINK_VERSION];
+const LINK_VERSIONS = [
+  LINK_VERSION,
+  FACE_LINK_VERSION,
+  LAYOUT_LINK_VERSION,
+  CUBIC_LINK_VERSION,
+  STROKE_LINK_VERSION,
+];
 const FLAG_AI_FIRST = 1;
 const FLAG_LAYOUT = 2;
 // Coordinates travel as tenths of a world unit in a version 1 link.
@@ -116,10 +130,16 @@ export class History {
     public initialNodes: number,
     public boardSize: number,
     public firstPlayer: Player = "human",
+    public settleVersion: number = SETTLE_VERSION,
   ) {}
 
   static from(record: GameRecord): History {
-    const history = new History(record.initialNodes, record.boardSize, record.firstPlayer);
+    const history = new History(
+      record.initialNodes,
+      record.boardSize,
+      record.firstPlayer,
+      record.settleVersion,
+    );
     history.nodes = record.nodes ?? null;
     history.moves = record.moves.map(fromRecordMove);
     history.cursor = Math.min(Math.max(record.cursor, 0), history.moves.length);
@@ -157,7 +177,12 @@ export class History {
 
   // A copy to work on while the game goes on.
   clone(): History {
-    const copy = new History(this.initialNodes, this.boardSize, this.firstPlayer);
+    const copy = new History(
+      this.initialNodes,
+      this.boardSize,
+      this.firstPlayer,
+      this.settleVersion,
+    );
     copy.nodes = this.nodes ? this.nodes.map(([x, y]) => [x, y]) : null;
     copy.moves = this.moves.map(cloneMove);
     copy.cursor = this.cursor;
@@ -238,6 +263,7 @@ export class History {
       boardSize: this.boardSize,
       ...(this.nodes ? { nodes: this.nodes } : {}),
       firstPlayer: this.firstPlayer,
+      settleVersion: this.settleVersion,
       moves: this.moves.map(toRecordMove),
       cursor: this.cursor,
     };
@@ -340,6 +366,8 @@ function asRecord(value: unknown): GameRecord | null {
   }
   if (v.cursor > v.moves.length) return null;
   if (v.nodes !== undefined && !isLayout(v.nodes, nodes)) return null;
+  const settleVersion = v.settleVersion ?? 0;
+  if (!isCount(settleVersion) || settleVersion > 255) return null;
   return {
     version: 1,
     initialNodes: v.initialNodes,
@@ -347,6 +375,7 @@ function asRecord(value: unknown): GameRecord | null {
     // A record saved without positions was played on the circle layout.
     nodes: v.nodes ?? circleLayout(nodes, v.boardSize),
     firstPlayer: v.firstPlayer,
+    settleVersion,
     moves: v.moves,
     cursor: v.cursor,
   };
@@ -414,8 +443,9 @@ function scaleOf(boardSize: number): number {
 }
 
 // Share link layout, little endian: version u8, the router version u8
-// from version 4 on, flags u8 (bit 0 says the AI opens, bit 1 says the
-// starting positions follow the header), initial
+// from version 4 on, the settle version u8 from version 5 on, flags u8
+// (bit 0 says the AI opens, bit 1 says the starting positions follow the
+// header), initial
 // nodes u16, board size u16, move count u16, cursor u16, the starting
 // positions as zigzag varint deltas in link quanta when they are not the
 // default layout, then per move: from and to as varints, a shape u8 and
@@ -441,6 +471,7 @@ export function encodeRecord(history: History): string {
       : null;
   out.u8(LINK_VERSION);
   out.u8(ROUTER_VERSION);
+  out.u8(history.settleVersion);
   out.u8((history.firstPlayer === "ai" ? FLAG_AI_FIRST : 0) | (layout ? FLAG_LAYOUT : 0));
   out.u16(history.initialNodes);
   out.u16(history.boardSize);
@@ -527,7 +558,8 @@ export function decodeRecord(payload: string): GameRecord | null {
   try {
     const version = reader.u8();
     if (!LINK_VERSIONS.includes(version)) return null;
-    if (version === LINK_VERSION && reader.u8() !== ROUTER_VERSION) throw new StaleLink();
+    if (version >= FACE_LINK_VERSION && reader.u8() !== ROUTER_VERSION) throw new StaleLink();
+    const settleVersion = version >= LINK_VERSION ? reader.u8() : 0;
     const flags = reader.u8();
     const initialNodes = reader.u16();
     const boardSize = reader.u16();
@@ -552,7 +584,7 @@ export function decodeRecord(payload: string): GameRecord | null {
       const move =
         version === STROKE_LINK_VERSION
           ? readStrokeMove(reader)
-          : readCurveMove(reader, boardSize, version === LINK_VERSION);
+          : readCurveMove(reader, boardSize, version >= FACE_LINK_VERSION);
       if (!move) return null;
       moves.push(move);
     }
@@ -563,6 +595,7 @@ export function decodeRecord(payload: string): GameRecord | null {
       boardSize,
       nodes,
       firstPlayer: flags & FLAG_AI_FIRST ? "ai" : "human",
+      settleVersion,
       moves,
       cursor,
     });
@@ -694,6 +727,7 @@ export function classification(history: History): Classification | null {
     boardSize: history.boardSize,
     firstPlayer: history.firstPlayer,
     nodes: history.nodes?.map(([x, y]) => ({ x, y })),
+    settleVersion: history.settleVersion,
     moves: history.moves.map(toMove),
     known: history.moves.map((move) => move.topology),
   };
@@ -706,6 +740,7 @@ export function rehearsal(history: History): Rehearsal | null {
   if (!record) return null;
   return {
     routerVersion: ROUTER_VERSION,
+    settleVersion: record.settleVersion,
     initialNodes: record.initialNodes,
     boardSize: record.boardSize,
     firstPlayer: record.firstPlayer,
@@ -840,7 +875,7 @@ function distanceToSegment(p: Point, a: Point, b: Point): number {
 // router put it, within the drift the share allowed.
 export function sameGame(a: GameRecord, b: GameRecord): boolean {
   if (a.initialNodes !== b.initialNodes || a.boardSize !== b.boardSize) return false;
-  if (a.firstPlayer !== b.firstPlayer) return false;
+  if (a.firstPlayer !== b.firstPlayer || a.settleVersion !== b.settleVersion) return false;
   const scale = scaleOf(a.boardSize);
   const quantum = LINK_QUANTUM * scale;
   if (!sameLayout(a.nodes, b.nodes, a.initialNodes, a.boardSize, quantum)) return false;

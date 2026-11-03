@@ -210,6 +210,9 @@ pub struct GameState {
     /// What each settle moved, one record per settled move, so an undo
     /// puts the geometry back.
     pub settles: Vec<settle::Undo>,
+    /// The settle this game is recorded under; 0 means none runs, so a
+    /// game recorded before settling replays as drawn.
+    pub settle_version: u8,
 }
 
 impl GameState {
@@ -241,6 +244,7 @@ impl GameState {
             initial_node_count: initial_nodes,
             board_size,
             settles: Vec::new(),
+            settle_version: crate::protocol::SETTLE_VERSION,
         }
     }
 

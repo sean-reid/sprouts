@@ -762,9 +762,17 @@ impl Undo {
 
 /// Relaxes the position in place and records what moved on the state's
 /// settle stack. Lines whose curve moves get the flattening of the new
-/// curve as their stroke.
+/// curve as their stroke. A game at settle version 0 moves nothing and
+/// records an empty settle, so the stack stays paired with the moves.
 pub fn settle(state: &mut GameState) {
-    let undo = relax(state);
+    let undo = if state.settle_version == 0 {
+        Undo {
+            board: state.lines.len(),
+            ..Undo::default()
+        }
+    } else {
+        relax(state)
+    };
     state.settles.push(undo);
 }
 

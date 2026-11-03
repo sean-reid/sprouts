@@ -217,12 +217,14 @@ pub fn hash_board(state: &GameState) -> String {
 }
 
 /// A fresh board on the recorded positions, or on the default layout when
-/// none are given. Positions that do not match the count are an error.
+/// none are given, settling under `settle_version` (0 for none).
+/// Positions that do not match the count are an error.
 pub fn start(
     initial_nodes: usize,
     board_size: usize,
     first_player: Player,
     nodes: Option<Vec<Point>>,
+    settle_version: u8,
 ) -> Result<GameState, String> {
     let mut state = match nodes {
         Some(nodes) if nodes.len() == initial_nodes => GameState::with_nodes(nodes, board_size),
@@ -235,6 +237,7 @@ pub fn start(
         None => GameState::with_board_size(initial_nodes, board_size),
     };
     state.current_player = first_player;
+    state.settle_version = settle_version;
     Ok(state)
 }
 
@@ -363,6 +366,11 @@ fn cut_off(model: &face::FaceModel) -> usize {
 /// the link instead of drawing a game the sharer never saw.
 pub const ROUTER_VERSION: u8 = 2;
 
+/// Changes whenever the settle moves a board differently. Records and
+/// links carry the version they were played under; 0 is a game recorded
+/// with no settling, replayed with none, so its strokes still fit.
+pub const SETTLE_VERSION: u8 = 1;
+
 /// A game with its real geometry, for working out which moves the router
 /// redraws. `known` holds the face move of a line already known to be
 /// router output, which is then taken as read.
@@ -373,6 +381,8 @@ pub struct Classification {
     pub board_size: usize,
     pub first_player: Player,
     pub nodes: Option<Vec<Point>>,
+    #[serde(default)]
+    pub settle_version: u8,
     pub moves: Vec<Move>,
     pub known: Vec<Option<FaceMove>>,
 }
@@ -393,6 +403,7 @@ pub fn classify(plan: Classification) -> Result<Classified, String> {
         plan.board_size,
         plan.first_player,
         plan.nodes,
+        plan.settle_version,
     )?;
     let mut out = Vec::with_capacity(plan.moves.len());
     for (index, (mov, known)) in plan.moves.into_iter().zip(plan.known).enumerate() {
@@ -449,6 +460,8 @@ pub enum LinkMove {
 #[serde(rename_all = "camelCase")]
 pub struct Rehearsal {
     pub router_version: u8,
+    #[serde(default)]
+    pub settle_version: u8,
     pub initial_nodes: usize,
     pub board_size: usize,
     pub first_player: Player,
@@ -481,6 +494,7 @@ pub fn rehearse(plan: Rehearsal) -> Result<Rehearsed, String> {
         plan.board_size,
         plan.first_player,
         plan.nodes,
+        plan.settle_version,
     )?;
     let mut nodes = vec![None; plan.moves.len()];
     for (index, mov) in plan.moves.into_iter().enumerate() {
@@ -801,7 +815,7 @@ mod tests {
     /// but has nobody to reach, so it is not active either.
     #[test]
     fn snapshot_of_a_finished_game() {
-        let mut state = start(1, 1000, Player::Human, None).unwrap();
+        let mut state = start(1, 1000, Player::Human, None, SETTLE_VERSION).unwrap();
         let a = state.nodes[0].position;
         let ring: Vec<Point> = (0..=48)
             .map(|i| {
@@ -872,20 +886,20 @@ mod tests {
     #[test]
     fn start_takes_recorded_positions_and_refuses_a_count_mismatch() {
         let given = vec![Point::new(100.0, 100.0), Point::new(400.0, 100.0)];
-        let placed = start(2, 500, Player::AI, Some(given.clone())).unwrap();
+        let placed = start(2, 500, Player::AI, Some(given.clone()), SETTLE_VERSION).unwrap();
         assert_eq!(placed.nodes[1].position, given[1]);
         assert_eq!(placed.current_player, Player::AI);
-        let refused = start(3, 500, Player::Human, Some(given))
+        let refused = start(3, 500, Player::Human, Some(given), SETTLE_VERSION)
             .err()
             .expect("a count mismatch is refused");
         assert!(refused.contains("2 starting positions for 3 nodes"));
-        let laid_out = start(3, 500, Player::Human, None).unwrap();
+        let laid_out = start(3, 500, Player::Human, None, SETTLE_VERSION).unwrap();
         assert_eq!(laid_out.nodes[0].position, types::opening_layout(3, 500)[0]);
     }
 
     #[test]
     fn the_ai_opening_on_a_full_size_board_is_accepted() {
-        let mut state = start(4, 1000, Player::AI, None).unwrap();
+        let mut state = start(4, 1000, Player::AI, None, SETTLE_VERSION).unwrap();
         let AiReply::Move { mov, .. } = ai_move(&mut state) else {
             panic!("the AI has an opening move");
         };
@@ -899,7 +913,7 @@ mod tests {
     /// draws the same line again.
     #[test]
     fn the_ai_reply_carries_a_face_move_that_redraws_its_line() {
-        let mut state = start(4, 1000, Player::AI, None).unwrap();
+        let mut state = start(4, 1000, Player::AI, None, SETTLE_VERSION).unwrap();
         let AiReply::Move { mov, topology, .. } = ai_move(&mut state) else {
             panic!("the AI has an opening move");
         };
@@ -972,6 +986,7 @@ mod tests {
             board_size: 1000,
             first_player: Player::Human,
             nodes: None,
+            settle_version: SETTLE_VERSION,
             moves: vec![chord.clone(), reply.clone()],
             known,
         };
@@ -1009,7 +1024,7 @@ mod tests {
     /// kind the visitor's page shows.
     #[test]
     fn a_face_move_whose_node_sits_on_a_node_is_rejected_as_too_close() {
-        let mut state = start(4, 1000, Player::AI, None).unwrap();
+        let mut state = start(4, 1000, Player::AI, None, SETTLE_VERSION).unwrap();
         let AiReply::Move { mov, topology, .. } = ai_move(&mut state) else {
             panic!("the AI has an opening move");
         };
@@ -1027,7 +1042,7 @@ mod tests {
     /// move is too short.
     #[test]
     fn a_rehearsal_names_the_first_move_a_fresh_engine_refuses() {
-        let mut state = start(4, 1000, Player::Human, None).unwrap();
+        let mut state = start(4, 1000, Player::Human, None, SETTLE_VERSION).unwrap();
         let a = state.nodes[0].position;
         let b = state.nodes[1].position;
         let polyline = straight(a, b, 10);
@@ -1051,6 +1066,7 @@ mod tests {
         };
         let plan = |face: FaceMove| Rehearsal {
             router_version: ROUTER_VERSION,
+            settle_version: SETTLE_VERSION,
             initial_nodes: 4,
             board_size: 1000,
             first_player: Player::Human,
@@ -1151,7 +1167,7 @@ mod tests {
 
     #[test]
     fn the_ai_answers_a_human_opening_with_a_move_that_applies() {
-        let mut state = start(4, 1000, Player::Human, None).unwrap();
+        let mut state = start(4, 1000, Player::Human, None, SETTLE_VERSION).unwrap();
         let a = state.nodes[0].position;
         let b = state.nodes[1].position;
         let polyline = straight(a, b, 20);
@@ -1181,7 +1197,7 @@ mod tests {
 
     #[test]
     fn the_ai_can_open_and_the_turn_passes_to_the_human() {
-        let mut state = start(4, 1000, Player::AI, None).unwrap();
+        let mut state = start(4, 1000, Player::AI, None, SETTLE_VERSION).unwrap();
         assert_eq!(snapshot(&state).current_player, Player::AI);
         let a = state.nodes[0].position;
         let b = state.nodes[1].position;
@@ -1259,6 +1275,7 @@ mod tests {
             recorded.board_size,
             Player::Human,
             nodes,
+            SETTLE_VERSION,
         )
         .unwrap();
         for mov in recorded.moves {
@@ -1573,7 +1590,7 @@ mod tests {
             .map(|p| Point::new(p[0].as_f64().unwrap(), p[1].as_f64().unwrap()))
             .collect();
         assert_eq!(raw["firstPlayer"], "ai");
-        let mut state = start(2, 1000, Player::AI, Some(nodes)).unwrap();
+        let mut state = start(2, 1000, Player::AI, Some(nodes), 0).unwrap();
         for m in raw["moves"].as_array().unwrap() {
             let polyline: Vec<Point> = m["polyline"]
                 .as_array()
