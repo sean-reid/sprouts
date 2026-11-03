@@ -53,6 +53,10 @@ h1 {
   flex-shrink: 0;
 }
 
+.controls button {
+  min-height: 44px;
+}
+
 button {
   background: #1a1a1a;
   border: 1px solid #2a2a2a;

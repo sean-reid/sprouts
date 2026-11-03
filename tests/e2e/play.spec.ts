@@ -1,5 +1,13 @@
 import { expect, test, type Page } from "@playwright/test";
-import { drawBetween, nodeOnScreen, openBoard, shot, touchStroke, type Client } from "./helpers";
+import {
+  drawBetween,
+  nodeOnScreen,
+  openBoard,
+  playExchange,
+  shot,
+  touchStroke,
+  type Client,
+} from "./helpers";
 
 // Installed before the page loads so a test can hold one request to the
 // worker back; the worker then answers a newer request first.
@@ -62,10 +70,7 @@ test("escape cancels a locked line", async ({ page }) => {
 });
 
 test("placing the node commits the move and the AI replies", async ({ page }) => {
-  const mid = await drawBetween(page, 0, 1);
-  await page.waitForTimeout(350);
-  await page.mouse.click(mid.x, mid.y);
-  await expect(page.locator("#status")).toHaveText("Your turn!", { timeout: 60_000 });
+  await playExchange(page);
   await expect(page.locator("#undoBtn")).toBeEnabled();
   await shot(page, "after-first-exchange");
   await page.locator("#undoBtn").click();
