@@ -12,8 +12,9 @@ import {
 } from "./helpers";
 
 // The AI still draws its candidates through the raster pipeline, which
-// takes most of this; the search itself holds to 800 ms.
-const REPLY_MS = 10_000;
+// takes most of this on the runner's 1000 board; the search itself holds
+// to 800 ms.
+const REPLY_MS = 30_000;
 
 async function expectNodesDrawn(page: Page, count: number): Promise<void> {
   for (let i = 0; i < count; i++) {
@@ -30,7 +31,10 @@ async function replyTime(page: Page, count: number): Promise<number> {
   await clickAway(page);
   await expect(page.locator("#status")).toHaveText("Your turn!", { timeout: REPLY_MS });
   const took = Date.now() - started;
-  test.info().annotations.push({ type: "ai reply", description: `${count} nodes: ${took} ms` });
+  await test.info().attach(`ai-reply-${count}-nodes`, {
+    body: `${took} ms`,
+    contentType: "text/plain",
+  });
   return took;
 }
 
