@@ -139,6 +139,15 @@ button.confirm-btn {
   font-weight: 600;
 }
 
+.play-area {
+  display: flex;
+  flex-direction: column;
+  flex-grow: 1;
+  width: 100%;
+  min-height: 0;
+  gap: 8px;
+}
+
 .canvas-container {
   position: relative;
   flex-grow: 1;
@@ -147,8 +156,81 @@ button.confirm-btn {
   align-items: center;
   width: 100%;
   min-height: 0;
-  padding-bottom: 20px;
   container-type: size;
+}
+
+#history {
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+  gap: 8px;
+  width: 100%;
+  max-height: 160px;
+  padding-bottom: 8px;
+}
+
+#history[hidden] {
+  display: none;
+}
+
+.history-nav {
+  display: flex;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.history-nav button {
+  flex: 1 1 0;
+  min-height: 44px;
+}
+
+#moveList {
+  list-style: none;
+  overflow-y: auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+#moveList button {
+  width: 100%;
+  min-height: 44px;
+  text-align: left;
+  text-transform: none;
+  letter-spacing: 0;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+
+#moveList button[aria-current] {
+  background: #252525;
+  color: #ffffff;
+  border-color: #3b82f6;
+}
+
+#shareUrl {
+  width: 100%;
+  min-height: 44px;
+  padding: 8px;
+  background: #1a1a1a;
+  border: 1px solid #2a2a2a;
+  color: #ffffff;
+  font-size: 12px;
+  border-radius: 4px;
+}
+
+@media (min-width: 1024px) {
+  .play-area {
+    flex-direction: row;
+  }
+
+  #history {
+    width: 240px;
+    max-height: none;
+    height: 100%;
+    padding-bottom: 0;
+  }
 }
 
 #canvas {

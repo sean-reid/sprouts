@@ -32,8 +32,20 @@
 
     <div id="status" role="status" aria-live="polite">Initializing...</div>
 
-    <div class="canvas-container">
-      <canvas id="canvas"></canvas>
+    <div class="play-area">
+      <div class="canvas-container">
+        <canvas id="canvas"></canvas>
+      </div>
+
+      <aside id="history" aria-label="Move list" hidden>
+        <div class="history-nav">
+          <button id="backBtn" disabled>Back</button>
+          <button id="forwardBtn" disabled>Forward</button>
+          <button id="shareBtn">Share</button>
+        </div>
+        <ol id="moveList"></ol>
+        <input id="shareUrl" type="text" readonly aria-label="Share link" hidden />
+      </aside>
     </div>
 
     <div id="mobileOverlay">
