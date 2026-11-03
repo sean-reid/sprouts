@@ -4,5 +4,6 @@
   "routing": 400,
   "search": 1000,
   "validation": 1,
-  "settle": 40
+  "settle": 40,
+  "settle_game": 1000
 }

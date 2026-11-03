@@ -163,6 +163,14 @@ fn run_bench() -> Result<bool, String> {
             fixture.initial_nodes,
             times.len()
         );
+        let budget = budgets
+            .get("settle_game")
+            .ok_or("fixtures/budgets.json: no budget for settle_game")?;
+        if peak > *budget {
+            failures.push(format!(
+                "{name}: settle {peak:.2} ms over budget {budget:.2} ms"
+            ));
+        }
     }
 
     for settled in [false, true] {
