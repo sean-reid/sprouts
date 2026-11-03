@@ -1,7 +1,7 @@
 import { readdirSync, readFileSync } from "node:fs";
 import { basename, join } from "node:path";
 import { describe, expect, it } from "vitest";
-import type { Cubic, FaceMove, Line, Point } from "../../pkg/sprouts";
+import type { Cubic, FaceMove, Line, Point, Rehearsal } from "../../pkg/sprouts";
 import {
   decodeRecord,
   demote,
@@ -485,6 +485,40 @@ describe("a move that arrives as topology", () => {
     expect(refusedAt).toBeUndefined();
     expect(seen.rehearsed).toBe(2);
     expect(history.moves.map((m) => m.topology)).toEqual([undefined, chord]);
+  });
+
+  it("blames a refused drawn move on the topology move before it", async () => {
+    const { engine, seen } = scripted([chord, undefined], [1, undefined]);
+    const { history, refusedAt } = await prepareLink(twoDrawnMoves(), engine);
+    expect(refusedAt).toBeUndefined();
+    expect(seen.rehearsed).toBe(2);
+    expect(history.moves.map((m) => m.topology)).toEqual([undefined, undefined]);
+  });
+
+  it("keeps the AI's face moves when the engine will not classify the history", async () => {
+    const source = twoDrawnMoves();
+    const aiFace: FaceMove = { a: 2, atA: undefined, b: 3, atB: undefined, enclosed: [] };
+    source.moves[1]!.topology = aiFace;
+    let rehearsed: Rehearsal | undefined;
+    const engine: LinkEngine = {
+      classify: () => Promise.reject(new Error("move 1: Path crosses an existing line")),
+      rehearse: (plan) => {
+        rehearsed = plan;
+        return Promise.resolve(undefined);
+      },
+    };
+    const { history, refusedAt } = await prepareLink(source, engine);
+    expect(refusedAt).toBeUndefined();
+    expect(history.moves.map((m) => m.topology)).toEqual([undefined, aiFace]);
+    expect(rehearsed?.moves.map((m) => m.kind)).toEqual(["drawn", "routed"]);
+  });
+
+  it("passes a failing rehearsal on to the caller", async () => {
+    const engine: LinkEngine = {
+      classify: (plan) => Promise.resolve({ topology: plan.moves.map(() => undefined) }),
+      rehearse: () => Promise.reject(new Error("Worker call 'rehearse' timed out")),
+    };
+    await expect(prepareLink(twoDrawnMoves(), engine)).rejects.toThrow(/timed out/);
   });
 
   it("reports a drawn move the rehearsal refuses and stops", async () => {

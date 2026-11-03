@@ -814,20 +814,24 @@ async function undoMove(): Promise<void> {
 
 // Copies text that is still being worked out. The clipboard write starts
 // inside the click, which is when Safari allows it, and takes the text
-// once it is ready; false when the browser would not take it.
-function copyLater(text: Promise<string>): Promise<boolean> {
-  const write =
-    typeof ClipboardItem === "undefined"
-      ? text.then((t) => navigator.clipboard.writeText(t))
-      : navigator.clipboard.write([
-          new ClipboardItem({
-            "text/plain": text.then((t) => new Blob([t], { type: "text/plain" })),
-          }),
-        ]);
-  return write.then(
-    () => true,
-    () => false,
-  );
+// once it is ready; without ClipboardItem the write waits for the text
+// and may have lost the activation by then. False whenever the browser
+// would not take it, including on an origin with no clipboard at all.
+async function copyLater(text: Promise<string>): Promise<boolean> {
+  try {
+    if (typeof ClipboardItem === "undefined") {
+      await navigator.clipboard.writeText(await text);
+    } else {
+      await navigator.clipboard.write([
+        new ClipboardItem({
+          "text/plain": text.then((t) => new Blob([t], { type: "text/plain" })),
+        }),
+      ]);
+    }
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 // A copy of the game is checked and encoded while play goes on; the link
@@ -838,12 +842,12 @@ async function share(): Promise<void> {
   sharing = true;
   shareBtn.disabled = true;
   setStatus("Checking the link");
-  const prepared = prepareLink(timeline, {
-    classify: (plan) => engine.call("classify", plan),
-    rehearse: (plan) => engine.call("rehearse", plan),
-  });
-  const copied = copyLater(prepared.then(({ history }) => shareUrl(history)));
   try {
+    const prepared = prepareLink(timeline, {
+      classify: (plan) => engine.call("classify", plan),
+      rehearse: (plan) => engine.call("rehearse", plan),
+    });
+    const copied = copyLater(prepared.then(({ history }) => shareUrl(history)));
     const { history, refusedAt } = await prepared;
     const url = shareUrl(history);
     window.history.replaceState(null, "", url);

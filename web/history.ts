@@ -723,8 +723,11 @@ export interface LinkEngine {
 // The game as the link will carry it, worked out on a copy: the engine
 // says which drawn moves the router redraws, then the link is replayed as
 // decoded and any topology move the replay refuses goes as geometry until
-// the whole link applies. A drawn move the replay refuses cannot be helped;
-// its index comes back so the sharer can be told.
+// the whole link applies. A refused drawn move is blamed on the latest
+// topology move before it, whose redraw shifted the board under it; when
+// none precedes it the index comes back so the sharer can be told. A
+// history the engine refuses to classify, as one left with moves past a
+// stopped restore, keeps the face moves the AI reported.
 export async function prepareLink(
   source: History,
   engine: LinkEngine,
@@ -732,18 +735,25 @@ export async function prepareLink(
   const history = source.clone();
   const plan = classification(history);
   if (plan) {
-    const { topology } = await engine.classify(plan);
-    topology.forEach((face, i) => {
-      const move = history.moves[i];
-      if (move && face && !move.topology) move.topology = face;
-    });
+    try {
+      const { topology } = await engine.classify(plan);
+      topology.forEach((face, i) => {
+        const move = history.moves[i];
+        if (move && face && !move.topology) move.topology = face;
+      });
+    } catch {
+      // The AI's own face moves stand; the rehearsal checks them anyway.
+    }
   }
   for (;;) {
     const link = rehearsal(history);
     if (!link) return { history };
     const refused = await engine.rehearse(link);
     if (refused === undefined) return { history };
-    if (!demote(history, refused)) return { history, refusedAt: refused };
+    if (demote(history, refused)) continue;
+    let blamed = refused - 1;
+    while (blamed >= 0 && !demote(history, blamed)) blamed--;
+    if (blamed < 0) return { history, refusedAt: refused };
   }
 }
 

@@ -428,15 +428,17 @@ fn unroutable(mv: &face::Move, why: Unroutable) -> Rejection {
 }
 
 /// The AI's line is router output, so its face move is read straight back
-/// off the curve.
+/// off the curve; a curve that will not read back cannot be applied
+/// either, so it is reported as undrawn rather than trapping the worker.
 pub fn ai_move(state: &mut GameState) -> AiReply {
     match ai::select_ai_move(state) {
-        ai::Reply::Move(mov) => AiReply::Move {
-            topology: embedding::embed(state, &mov)
-                .expect("the router read its own curve back")
-                .into(),
-            segments: mov.segments.clone(),
-            mov: Move::from(mov),
+        ai::Reply::Move(mov) => match embedding::embed(state, &mov) {
+            Ok(face) => AiReply::Move {
+                topology: face.into(),
+                segments: mov.segments.clone(),
+                mov: Move::from(mov),
+            },
+            Err(_) => AiReply::Undrawn,
         },
         ai::Reply::GameOver => AiReply::GameOver,
         ai::Reply::Undrawn => AiReply::Undrawn,
