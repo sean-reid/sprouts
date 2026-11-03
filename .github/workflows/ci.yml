@@ -68,6 +68,10 @@ jobs:
   e2e:
     runs-on: ubuntu-latest
     needs: web
+    strategy:
+      fail-fast: false
+      matrix:
+        project: [mobile, tablet, desktop]
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -83,19 +87,21 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npx playwright install --with-deps chromium
-      - run: npx playwright test
+      - run: npx playwright test --project=${{ matrix.project }}
         env:
           CI: 1
-      - run: cargo test --release --features bench exported_game_replays
+      - if: matrix.project == 'desktop'
+        run: cargo test --release --features bench exported_game_replays
         env:
           SPROUTS_FIXTURE: test-results/fixtures/desktop-game.json
-      - run: cargo test --release --features bench exported_game_replays
+      - if: matrix.project == 'desktop'
+        run: cargo test --release --features bench exported_game_replays
         env:
           SPROUTS_FIXTURE: test-results/fixtures/desktop-saved.json
       - uses: actions/upload-artifact@v7
         if: always()
         with:
-          name: playwright
+          name: playwright-${{ matrix.project }}
           path: |
             playwright-report
             test-results
