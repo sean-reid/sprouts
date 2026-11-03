@@ -456,6 +456,7 @@ function recordMove(move: Move, snapshot: Snapshot): void {
 }
 
 function applySnapshot(snapshot: Snapshot): void {
+  timeline.adopt(snapshot.lines);
   state.nodes = snapshot.nodes;
   state.lines = snapshot.lines;
   state.currentPlayer = snapshot.currentPlayer;
@@ -664,7 +665,7 @@ async function undoMove(): Promise<void> {
 }
 
 async function share(): Promise<void> {
-  const url = shareUrl(timeline.record());
+  const url = shareUrl(timeline);
   window.history.replaceState(null, "", url);
   try {
     await navigator.clipboard.writeText(url);
