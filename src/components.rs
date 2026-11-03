@@ -136,12 +136,14 @@ pub fn label_components(
             if comp_id == 0 {
                 continue;
             }
-            let meta = components.entry(comp_id).or_insert_with(|| ComponentMetadata {
-                pixel_count: 0,
-                accessible_nodes: HashSet::new(),
-                bounding_box: BoundingBox::new(),
-                max_internal_distance: 0.0,
-            });
+            let meta = components
+                .entry(comp_id)
+                .or_insert_with(|| ComponentMetadata {
+                    pixel_count: 0,
+                    accessible_nodes: HashSet::new(),
+                    bounding_box: BoundingBox::new(),
+                    max_internal_distance: 0.0,
+                });
             meta.pixel_count += 1;
             meta.bounding_box.update(x as i32, y as i32);
         }
@@ -200,8 +202,7 @@ pub fn label_components(
                         }
                         let px = node_x + dx;
                         let py = node_y + dy;
-                        let comp_id =
-                            component_labels.get(px, py).copied().unwrap_or(0) as usize;
+                        let comp_id = component_labels.get(px, py).copied().unwrap_or(0) as usize;
                         if comp_id > 0 {
                             found_components.entry(comp_id).or_insert(radius);
                         }

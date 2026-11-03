@@ -1,6 +1,6 @@
 use crate::components::label_components;
 use crate::morphology::{build_line_buffer_grid, generate_skeleton};
-use crate::types::{GameState, Grid, Point, scale};
+use crate::types::{scale, GameState, Grid, Point};
 use std::collections::{HashMap, HashSet, VecDeque};
 
 #[derive(Debug, Clone)]
@@ -17,8 +17,7 @@ pub fn classify_nodes(state: &mut GameState) -> NodeClassification {
         state.skeleton_cache.skeleton = skeleton;
         state.skeleton_cache.distance_transform = distance_transform;
 
-        let (labels, components) =
-            label_components(&state.skeleton_cache.skeleton, state);
+        let (labels, components) = label_components(&state.skeleton_cache.skeleton, state);
         state.skeleton_cache.component_labels = labels;
         state.skeleton_cache.components = components;
 
@@ -59,7 +58,9 @@ pub fn classify_nodes(state: &mut GameState) -> NodeClassification {
         if !active_nodes.contains(&node.id) {
             continue;
         }
-        if let Some(comp) = find_nearest_free_component(&freespace_labels, &freespace_blocked, &node.position) {
+        if let Some(comp) =
+            find_nearest_free_component(&freespace_labels, &freespace_blocked, &node.position)
+        {
             node_to_freespace.insert(node.id, comp);
         }
     }
@@ -137,7 +138,9 @@ fn label_freespace_components(blocked: &Grid<bool>) -> Grid<u32> {
             while let Some((cx, cy)) = queue.pop_front() {
                 for dy in -1..=1i32 {
                     for dx in -1..=1i32 {
-                        if dx == 0 && dy == 0 { continue; }
+                        if dx == 0 && dy == 0 {
+                            continue;
+                        }
                         let nx = cx + dx;
                         let ny = cy + dy;
                         if nx < 0 || ny < 0 || nx >= w as i32 || ny >= h as i32 {

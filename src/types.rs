@@ -248,7 +248,7 @@ impl GameState {
 pub struct SkeletonCache {
     pub skeleton: Grid<bool>,
     pub distance_transform: Grid<u8>,
-    pub component_labels: Grid<u32>,    // 0 = not skeleton, 1+ = component ID
+    pub component_labels: Grid<u32>, // 0 = not skeleton, 1+ = component ID
     pub components: HashMap<usize, ComponentMetadata>,
     pub is_valid: bool,
 }
@@ -397,8 +397,12 @@ mod tests {
         let gs = GameState::new(2);
         let center = BOARD_SIZE as f64 / 2.0;
         // Both nodes should be equidistant from center
-        let d0 = gs.nodes[0].position.distance_to(&Point::new(center, center));
-        let d1 = gs.nodes[1].position.distance_to(&Point::new(center, center));
+        let d0 = gs.nodes[0]
+            .position
+            .distance_to(&Point::new(center, center));
+        let d1 = gs.nodes[1]
+            .position
+            .distance_to(&Point::new(center, center));
         assert!((d0 - d1).abs() < 1e-6);
     }
 
@@ -414,7 +418,9 @@ mod tests {
             assert!(node.position.x > 0.0 && node.position.x < 500.0);
             assert!(node.position.y > 0.0 && node.position.y < 500.0);
         }
-        let d = gs.nodes[0].position.distance_to(&Point::new(center, center));
+        let d = gs.nodes[0]
+            .position
+            .distance_to(&Point::new(center, center));
         // Radius scales with board_size: 120 * (500/1000) = 60
         assert!((d - 60.0).abs() < 1e-6);
     }
@@ -464,7 +470,11 @@ mod tests {
         let mov = Move {
             from_node: 0,
             to_node: 0,
-            polyline: vec![Point::new(100.0, 100.0), Point::new(200.0, 200.0), Point::new(100.0, 100.0)],
+            polyline: vec![
+                Point::new(100.0, 100.0),
+                Point::new(200.0, 200.0),
+                Point::new(100.0, 100.0),
+            ],
             new_node_pos: Point::new(150.0, 150.0),
             player: Player::Human,
         };
@@ -477,7 +487,11 @@ mod tests {
     #[test]
     fn undo_move_reverses_apply() {
         let mut gs = GameState::new(2);
-        let orig_nodes: Vec<(usize, u8)> = gs.nodes.iter().map(|n| (n.id, n.connection_count)).collect();
+        let orig_nodes: Vec<(usize, u8)> = gs
+            .nodes
+            .iter()
+            .map(|n| (n.id, n.connection_count))
+            .collect();
 
         gs.apply_move(make_move(0, 1));
         assert_eq!(gs.nodes.len(), 3);
@@ -502,7 +516,11 @@ mod tests {
     #[test]
     fn repeated_apply_undo_identity() {
         let mut gs = GameState::new(3);
-        let snapshot: Vec<(usize, u8)> = gs.nodes.iter().map(|n| (n.id, n.connection_count)).collect();
+        let snapshot: Vec<(usize, u8)> = gs
+            .nodes
+            .iter()
+            .map(|n| (n.id, n.connection_count))
+            .collect();
 
         for _ in 0..5 {
             gs.apply_move(make_move(0, 1));
@@ -549,7 +567,7 @@ mod tests {
         let mut g: Grid<bool> = Grid::new(3, 3, false);
         g.set(1, 1, true);
         let inv = g.invert();
-        assert_eq!(*inv.get(0, 0).unwrap(), true);
-        assert_eq!(*inv.get(1, 1).unwrap(), false);
+        assert!(*inv.get(0, 0).unwrap());
+        assert!(!*inv.get(1, 1).unwrap());
     }
 }

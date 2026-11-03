@@ -1,9 +1,10 @@
-use crate::geometry::{closest_point_on_polyline, distance, polyline_length, segments_intersect, smooth_path_chaikin};
+use crate::geometry::{
+    closest_point_on_polyline, distance, polyline_length, segments_intersect, smooth_path_chaikin,
+};
 use crate::types::{
-    GameState, Move, Point, scale,
-    MIN_PATH_LENGTH, MIN_NODE_SPACING, MIN_NODE_SPACING_AI,
-    MIN_PATH_CLEARANCE, MIN_PATH_CLEARANCE_AI,
-    HUMAN_INTERSECTION_TOLERANCE, AI_INTERSECTION_TOLERANCE,
+    scale, GameState, Move, Point, AI_INTERSECTION_TOLERANCE, HUMAN_INTERSECTION_TOLERANCE,
+    MIN_NODE_SPACING, MIN_NODE_SPACING_AI, MIN_PATH_CLEARANCE, MIN_PATH_CLEARANCE_AI,
+    MIN_PATH_LENGTH,
 };
 
 macro_rules! debug_log {
@@ -17,10 +18,22 @@ macro_rules! debug_log {
 
 pub fn validate_move(state: &GameState, mov: &Move) -> Result<(), String> {
     debug_log!("[VALIDATION] Starting HUMAN move validation");
-    debug_log!("  From node: {} (connections: {})", mov.from_node,
-        state.find_node(mov.from_node).map(|n| n.connection_count).unwrap_or(99));
-    debug_log!("  To node: {} (connections: {})", mov.to_node,
-        state.find_node(mov.to_node).map(|n| n.connection_count).unwrap_or(99));
+    debug_log!(
+        "  From node: {} (connections: {})",
+        mov.from_node,
+        state
+            .find_node(mov.from_node)
+            .map(|n| n.connection_count)
+            .unwrap_or(99)
+    );
+    debug_log!(
+        "  To node: {} (connections: {})",
+        mov.to_node,
+        state
+            .find_node(mov.to_node)
+            .map(|n| n.connection_count)
+            .unwrap_or(99)
+    );
     debug_log!("  Path points: {}", mov.polyline.len());
     validate_move_internal(state, mov, false)
 }
@@ -41,13 +54,21 @@ fn validate_move_internal(state: &GameState, mov: &Move, is_ai_move: bool) -> Re
     #[cfg(feature = "debug_validation")]
     let mode = if is_ai_move { "AI" } else { "HUMAN" };
     let s = scale(state.board_size);
-    let from_node = state.find_node(mov.from_node).ok_or("Source node not found")?;
-    let to_node = state.find_node(mov.to_node).ok_or("Target node not found")?;
+    let from_node = state
+        .find_node(mov.from_node)
+        .ok_or("Source node not found")?;
+    let to_node = state
+        .find_node(mov.to_node)
+        .ok_or("Target node not found")?;
 
     // Self-loop: need 2 free connections on the same node
     if mov.from_node == mov.to_node {
         if from_node.connection_count > 1 {
-            debug_log!("[{}] FAIL: Self-loop node has {} connections (need <= 1)", mode, from_node.connection_count);
+            debug_log!(
+                "[{}] FAIL: Self-loop node has {} connections (need <= 1)",
+                mode,
+                from_node.connection_count
+            );
             return Err("Node needs at least 2 free connections for a self-loop".to_string());
         }
     } else {
@@ -66,16 +87,35 @@ fn validate_move_internal(state: &GameState, mov: &Move, is_ai_move: bool) -> Re
     let path_length = polyline_length(&mov.polyline);
     if path_length < scaled_min_path {
         debug_log!("[{}] FAIL: Path too short: {:.1}px", mode, path_length);
-        return Err(format!("Path too short: {:.1}px (minimum: {:.1}px)", path_length, scaled_min_path));
+        return Err(format!(
+            "Path too short: {:.1}px (minimum: {:.1}px)",
+            path_length, scaled_min_path
+        ));
     }
-    debug_log!("[{}] Check 2 passed: Path length {:.1}px OK", mode, path_length);
+    debug_log!(
+        "[{}] Check 2 passed: Path length {:.1}px OK",
+        mode,
+        path_length
+    );
 
-    let min_spacing = if is_ai_move { MIN_NODE_SPACING_AI } else { MIN_NODE_SPACING } * s;
+    let min_spacing = if is_ai_move {
+        MIN_NODE_SPACING_AI
+    } else {
+        MIN_NODE_SPACING
+    } * s;
     for node in &state.nodes {
         let dist = mov.new_node_pos.distance_to(&node.position);
         if dist < min_spacing {
-            debug_log!("[{}] FAIL: New node too close to node {}: {:.1}px", mode, node.id, dist);
-            return Err(format!("New node too close to existing node: {:.1}px (minimum: {:.1}px)", dist, min_spacing));
+            debug_log!(
+                "[{}] FAIL: New node too close to node {}: {:.1}px",
+                mode,
+                node.id,
+                dist
+            );
+            return Err(format!(
+                "New node too close to existing node: {:.1}px (minimum: {:.1}px)",
+                dist, min_spacing
+            ));
         }
     }
     debug_log!("[{}] Check 3 passed: Node spacing OK", mode);
@@ -87,17 +127,32 @@ fn validate_move_internal(state: &GameState, mov: &Move, is_ai_move: bool) -> Re
         smooth_path_chaikin(&mov.polyline, 2)
     };
 
-    let min_clearance = if is_ai_move { MIN_PATH_CLEARANCE_AI } else { MIN_PATH_CLEARANCE } * s;
+    let min_clearance = if is_ai_move {
+        MIN_PATH_CLEARANCE_AI
+    } else {
+        MIN_PATH_CLEARANCE
+    } * s;
     for node in &state.nodes {
-        if node.id == mov.from_node || node.id == mov.to_node { continue; }
+        if node.id == mov.from_node || node.id == mov.to_node {
+            continue;
+        }
         let (_, dist) = closest_point_on_polyline(&path_for_clearance, &node.position);
         if dist < min_clearance {
-            debug_log!("[{}] FAIL: Path too close to node {}: {:.1}px", mode, node.id, dist);
+            debug_log!(
+                "[{}] FAIL: Path too close to node {}: {:.1}px",
+                mode,
+                node.id,
+                dist
+            );
             return Err("Path passes too close to an existing node".to_string());
         }
     }
     debug_log!("[{}] Check 4 passed: Path clearance OK", mode);
-    debug_log!("[{}] Check 5: Intersection testing ({} existing lines)", mode, state.lines.len());
+    debug_log!(
+        "[{}] Check 5: Intersection testing ({} existing lines)",
+        mode,
+        state.lines.len()
+    );
 
     let path_for_intersect = if is_ai_move {
         &mov.polyline
@@ -107,18 +162,30 @@ fn validate_move_internal(state: &GameState, mov: &Move, is_ai_move: bool) -> Re
 
     let geom_share_dist = MIN_PATH_CLEARANCE * s;
     for line in &state.lines {
-        let shares_node =
-            line.from_node == mov.from_node || line.from_node == mov.to_node ||
-            line.to_node == mov.from_node || line.to_node == mov.to_node;
+        let shares_node = line.from_node == mov.from_node
+            || line.from_node == mov.to_node
+            || line.to_node == mov.from_node
+            || line.to_node == mov.to_node;
         let mut geometrically_shares_node = shares_node;
         if !shares_node {
             for node in &state.nodes {
-                let on_move_path = path_for_intersect.iter().any(|p| p.distance_to(&node.position) < geom_share_dist);
-                let on_line_path = line.polyline.iter().any(|p| p.distance_to(&node.position) < geom_share_dist);
+                let on_move_path = path_for_intersect
+                    .iter()
+                    .any(|p| p.distance_to(&node.position) < geom_share_dist);
+                let on_line_path = line
+                    .polyline
+                    .iter()
+                    .any(|p| p.distance_to(&node.position) < geom_share_dist);
                 if on_move_path && on_line_path {
                     geometrically_shares_node = true;
-                    debug_log!("[{}]   Line {}: geometrically shares node {} at ({:.1},{:.1})",
-                        mode, line.id, node.id, node.position.x, node.position.y);
+                    debug_log!(
+                        "[{}]   Line {}: geometrically shares node {} at ({:.1},{:.1})",
+                        mode,
+                        line.id,
+                        node.id,
+                        node.position.x,
+                        node.position.y
+                    );
                     break;
                 }
             }
@@ -134,7 +201,9 @@ fn validate_move_internal(state: &GameState, mov: &Move, is_ai_move: bool) -> Re
                 }
                 debug_log!("[{}]   Line {}: INTERSECTION DETECTED", mode, line.id);
                 if geometrically_shares_node {
-                    if let Some(intersection) = get_intersection_point(seg_start, seg_end, line_seg_start, line_seg_end) {
+                    if let Some(intersection) =
+                        get_intersection_point(seg_start, seg_end, line_seg_start, line_seg_end)
+                    {
                         let from_pos = from_node.position;
                         let to_pos = to_node.position;
                         let dist_from = intersection.distance_to(&from_pos);
@@ -145,14 +214,25 @@ fn validate_move_internal(state: &GameState, mov: &Move, is_ai_move: bool) -> Re
                             min_dist_to_any_node = min_dist_to_any_node.min(dist);
                         }
 
-                        let tolerance = if is_ai_move { AI_INTERSECTION_TOLERANCE } else { HUMAN_INTERSECTION_TOLERANCE } * s;
-                        debug_log!("    Min dist to node: {:.1}px, tolerance: {:.1}px", min_dist_to_any_node, tolerance);
+                        let tolerance = if is_ai_move {
+                            AI_INTERSECTION_TOLERANCE
+                        } else {
+                            HUMAN_INTERSECTION_TOLERANCE
+                        } * s;
+                        debug_log!(
+                            "    Min dist to node: {:.1}px, tolerance: {:.1}px",
+                            min_dist_to_any_node,
+                            tolerance
+                        );
 
                         if min_dist_to_any_node >= tolerance {
                             debug_log!("    FAIL: Intersection not at node");
                             return Err("Path intersects with an existing line".to_string());
                         } else {
-                            debug_log!("    PASS: Intersection at node (within {:.1}px)", tolerance);
+                            debug_log!(
+                                "    PASS: Intersection at node (within {:.1}px)",
+                                tolerance
+                            );
                         }
                     }
                 } else {
@@ -170,8 +250,12 @@ fn validate_move_internal(state: &GameState, mov: &Move, is_ai_move: bool) -> Re
 /// Reduces clearance and spacing proportionally, with further reductions.
 fn validate_move_internal_tight(state: &GameState, mov: &Move) -> Result<(), String> {
     let s = scale(state.board_size);
-    let from_node = state.find_node(mov.from_node).ok_or("Source node not found")?;
-    let to_node = state.find_node(mov.to_node).ok_or("Target node not found")?;
+    let from_node = state
+        .find_node(mov.from_node)
+        .ok_or("Source node not found")?;
+    let to_node = state
+        .find_node(mov.to_node)
+        .ok_or("Target node not found")?;
 
     if mov.from_node == mov.to_node {
         if from_node.connection_count > 1 {
@@ -196,14 +280,19 @@ fn validate_move_internal_tight(state: &GameState, mov: &Move) -> Result<(), Str
     for node in &state.nodes {
         let dist = mov.new_node_pos.distance_to(&node.position);
         if dist < tight_spacing {
-            return Err(format!("New node too close to existing node: {:.1}px", dist));
+            return Err(format!(
+                "New node too close to existing node: {:.1}px",
+                dist
+            ));
         }
     }
 
     // Tight path clearance: 3px scaled
     let tight_clearance = 3.0 * s;
     for node in &state.nodes {
-        if node.id == mov.from_node || node.id == mov.to_node { continue; }
+        if node.id == mov.from_node || node.id == mov.to_node {
+            continue;
+        }
         let (_, dist) = closest_point_on_polyline(&mov.polyline, &node.position);
         if dist < tight_clearance {
             return Err("Path passes too close to an existing node".to_string());
@@ -214,14 +303,21 @@ fn validate_move_internal_tight(state: &GameState, mov: &Move) -> Result<(), Str
     let tight_tolerance = 12.0 * s;
     let geom_dist = tight_clearance;
     for line in &state.lines {
-        let shares_node =
-            line.from_node == mov.from_node || line.from_node == mov.to_node ||
-            line.to_node == mov.from_node || line.to_node == mov.to_node;
+        let shares_node = line.from_node == mov.from_node
+            || line.from_node == mov.to_node
+            || line.to_node == mov.from_node
+            || line.to_node == mov.to_node;
         let mut geometrically_shares_node = shares_node;
         if !shares_node {
             for node in &state.nodes {
-                let on_move_path = mov.polyline.iter().any(|p| p.distance_to(&node.position) < geom_dist);
-                let on_line_path = line.polyline.iter().any(|p| p.distance_to(&node.position) < geom_dist);
+                let on_move_path = mov
+                    .polyline
+                    .iter()
+                    .any(|p| p.distance_to(&node.position) < geom_dist);
+                let on_line_path = line
+                    .polyline
+                    .iter()
+                    .any(|p| p.distance_to(&node.position) < geom_dist);
                 if on_move_path && on_line_path {
                     geometrically_shares_node = true;
                     break;
@@ -238,7 +334,9 @@ fn validate_move_internal_tight(state: &GameState, mov: &Move) -> Result<(), Str
                     continue;
                 }
                 if geometrically_shares_node {
-                    if let Some(intersection) = get_intersection_point(seg_start, seg_end, line_seg_start, line_seg_end) {
+                    if let Some(intersection) =
+                        get_intersection_point(seg_start, seg_end, line_seg_start, line_seg_end)
+                    {
                         let mut min_dist_to_any_node = f64::INFINITY;
                         for node in &state.nodes {
                             let dist = intersection.distance_to(&node.position);
@@ -263,7 +361,9 @@ fn get_intersection_point(a1: &Point, a2: &Point, b1: &Point, b2: &Point) -> Opt
     let s2_x = b2.x - b1.x;
     let s2_y = b2.y - b1.y;
     let denom = -s2_x * s1_y + s1_x * s2_y;
-    if denom.abs() < 1e-10 { return None; }
+    if denom.abs() < 1e-10 {
+        return None;
+    }
     let s = (-s1_y * (a1.x - b1.x) + s1_x * (a1.y - b1.y)) / denom;
     let t = (s2_x * (a1.y - b1.y) - s2_y * (a1.x - b1.x)) / denom;
     if (0.0..=1.0).contains(&s) && (0.0..=1.0).contains(&t) {
@@ -273,11 +373,19 @@ fn get_intersection_point(a1: &Point, a2: &Point, b1: &Point, b2: &Point) -> Opt
     }
 }
 
-pub fn validate_new_node_placement(polyline: &[Point], new_node_pos: &Point, existing_nodes: &[crate::types::Node], board_size: usize) -> Result<(), String> {
+pub fn validate_new_node_placement(
+    polyline: &[Point],
+    new_node_pos: &Point,
+    existing_nodes: &[crate::types::Node],
+    board_size: usize,
+) -> Result<(), String> {
     let s = scale(board_size);
     let (closest, dist_to_path) = closest_point_on_polyline(polyline, new_node_pos);
     if dist_to_path > 5.0 * s {
-        debug_log!("[PLACEMENT] FAIL: New node not on path (distance: {:.1}px)", dist_to_path);
+        debug_log!(
+            "[PLACEMENT] FAIL: New node not on path (distance: {:.1}px)",
+            dist_to_path
+        );
         return Err("New node must be placed on the drawn path".to_string());
     }
     let mut accumulated_length = 0.0;
@@ -294,18 +402,34 @@ pub fn validate_new_node_placement(polyline: &[Point], new_node_pos: &Point, exi
         accumulated_length += seg_len;
     }
     if !(0.1..=0.9).contains(&position_ratio) {
-        debug_log!("[PLACEMENT] FAIL: Node at {:.0}% (must be 10-90%)", position_ratio * 100.0);
-        return Err(format!("Node must be placed in the middle 80% of the path (currently at {:.0}%)", position_ratio * 100.0));
+        debug_log!(
+            "[PLACEMENT] FAIL: Node at {:.0}% (must be 10-90%)",
+            position_ratio * 100.0
+        );
+        return Err(format!(
+            "Node must be placed in the middle 80% of the path (currently at {:.0}%)",
+            position_ratio * 100.0
+        ));
     }
     let scaled_spacing = MIN_NODE_SPACING * s;
     for node in existing_nodes {
         let dist = new_node_pos.distance_to(&node.position);
         if dist < scaled_spacing {
-            debug_log!("[PLACEMENT] FAIL: Too close to node {}: {:.1}px", node.id, dist);
-            return Err(format!("Too close to existing node: {:.1}px (minimum: {:.1}px)", dist, scaled_spacing));
+            debug_log!(
+                "[PLACEMENT] FAIL: Too close to node {}: {:.1}px",
+                node.id,
+                dist
+            );
+            return Err(format!(
+                "Too close to existing node: {:.1}px (minimum: {:.1}px)",
+                dist, scaled_spacing
+            ));
         }
     }
-    debug_log!("[PLACEMENT] Placement valid at {:.0}%", position_ratio * 100.0);
+    debug_log!(
+        "[PLACEMENT] Placement valid at {:.0}%",
+        position_ratio * 100.0
+    );
     Ok(())
 }
 
@@ -328,7 +452,10 @@ mod tests {
         let polyline: Vec<Point> = (0..=20)
             .map(|i| {
                 let t = i as f64 / 20.0;
-                p(200.0 + t * 600.0, 500.0 + 80.0 * (t * std::f64::consts::PI).sin())
+                p(
+                    200.0 + t * 600.0,
+                    500.0 + 80.0 * (t * std::f64::consts::PI).sin(),
+                )
             })
             .collect();
         let new_node_pos = p(500.0, 500.0 + 80.0 * (0.5 * std::f64::consts::PI).sin());
@@ -409,7 +536,10 @@ mod tests {
         let polyline: Vec<Point> = (0..=20)
             .map(|i| {
                 let t = i as f64 / 20.0;
-                p(200.0 + t * 600.0, 500.0 + 80.0 * (t * std::f64::consts::PI).sin())
+                p(
+                    200.0 + t * 600.0,
+                    500.0 + 80.0 * (t * std::f64::consts::PI).sin(),
+                )
             })
             .collect();
         let mov = Move {

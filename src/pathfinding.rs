@@ -1,6 +1,8 @@
-use crate::geometry::{decimate_polyline, polyline_length, resample_polyline, shortcut_path, smooth_path_chaikin};
+use crate::geometry::{
+    decimate_polyline, polyline_length, resample_polyline, shortcut_path, smooth_path_chaikin,
+};
 use crate::morphology::build_line_buffer_grid;
-use crate::types::{GameState, Grid, Point, PixelCoord, MAX_ASTAR_ITERATIONS, scale};
+use crate::types::{scale, GameState, Grid, PixelCoord, Point, MAX_ASTAR_ITERATIONS};
 use std::collections::{BinaryHeap, HashMap, HashSet};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -71,8 +73,14 @@ fn find_path_relaxed_inner(
 
     let blocked = build_line_buffer_grid(&state.lines, buffer_radius, state.board_size);
 
-    let start = PixelCoord::new(from_node.position.x.round() as i32, from_node.position.y.round() as i32);
-    let goal = PixelCoord::new(to_node.position.x.round() as i32, to_node.position.y.round() as i32);
+    let start = PixelCoord::new(
+        from_node.position.x.round() as i32,
+        from_node.position.y.round() as i32,
+    );
+    let goal = PixelCoord::new(
+        to_node.position.x.round() as i32,
+        to_node.position.y.round() as i32,
+    );
 
     let mut open_set = BinaryHeap::new();
     let mut came_from: HashMap<PixelCoord, PixelCoord> = HashMap::new();
@@ -80,43 +88,71 @@ fn find_path_relaxed_inner(
     let mut closed_set: HashSet<PixelCoord> = HashSet::new();
 
     g_score.insert(start, 0.0);
-    open_set.push(AStarNode { coord: start, g_score: 0.0, f_score: heuristic(&start, &goal) });
+    open_set.push(AStarNode {
+        coord: start,
+        g_score: 0.0,
+        f_score: heuristic(&start, &goal),
+    });
 
     let mut iterations = 0;
     while let Some(current_node) = open_set.pop() {
         iterations += 1;
-        if iterations > MAX_ASTAR_ITERATIONS { return None; }
+        if iterations > MAX_ASTAR_ITERATIONS {
+            return None;
+        }
 
         let current = current_node.coord;
-        if current == goal { break; }
-        if closed_set.contains(&current) { continue; }
+        if current == goal {
+            break;
+        }
+        if closed_set.contains(&current) {
+            continue;
+        }
         closed_set.insert(current);
 
         for dy in -1..=1i32 {
             for dx in -1..=1i32 {
-                if dx == 0 && dy == 0 { continue; }
+                if dx == 0 && dy == 0 {
+                    continue;
+                }
                 let neighbor = PixelCoord::new(current.x + dx, current.y + dy);
-                if neighbor.x < 0 || neighbor.y < 0 || neighbor.x >= bs_i || neighbor.y >= bs_i { continue; }
-                if *blocked.get(neighbor.x, neighbor.y).unwrap_or(&true) && neighbor != goal { continue; }
-                if closed_set.contains(&neighbor) { continue; }
+                if neighbor.x < 0 || neighbor.y < 0 || neighbor.x >= bs_i || neighbor.y >= bs_i {
+                    continue;
+                }
+                if *blocked.get(neighbor.x, neighbor.y).unwrap_or(&true) && neighbor != goal {
+                    continue;
+                }
+                if closed_set.contains(&neighbor) {
+                    continue;
+                }
 
                 let move_cost = if dx == 0 || dy == 0 { 1.0 } else { 1.414 };
                 // Prefer pixels far from obstacles (use the full distance_transform for aesthetics)
-                let dt_dist = distance_transform.get(neighbor.x, neighbor.y).copied().unwrap_or(0) as f64;
+                let dt_dist = distance_transform
+                    .get(neighbor.x, neighbor.y)
+                    .copied()
+                    .unwrap_or(0) as f64;
                 let clearance_bonus = 1.0 + 2.0 / (1.0 + dt_dist * dt_dist);
-                let tentative_g = g_score.get(&current).unwrap_or(&f64::INFINITY) + move_cost * clearance_bonus;
+                let tentative_g =
+                    g_score.get(&current).unwrap_or(&f64::INFINITY) + move_cost * clearance_bonus;
 
                 if tentative_g < *g_score.get(&neighbor).unwrap_or(&f64::INFINITY) {
                     came_from.insert(neighbor, current);
                     g_score.insert(neighbor, tentative_g);
                     let h = heuristic(&neighbor, &goal);
-                    open_set.push(AStarNode { coord: neighbor, g_score: tentative_g, f_score: tentative_g + h });
+                    open_set.push(AStarNode {
+                        coord: neighbor,
+                        g_score: tentative_g,
+                        f_score: tentative_g + h,
+                    });
                 }
             }
         }
     }
 
-    if !came_from.contains_key(&goal) && start != goal { return None; }
+    if !came_from.contains_key(&goal) && start != goal {
+        return None;
+    }
     let path_pixels = reconstruct_path(&came_from, goal);
 
     let mut path_points: Vec<Point> = path_pixels
@@ -243,7 +279,9 @@ pub fn find_self_loop_on_skeleton(state: &GameState, node_id: usize) -> Option<V
     for r in 3i32..60 {
         for dy in -r..=r {
             for dx in -r..=r {
-                if dx.abs() != r && dy.abs() != r { continue; }
+                if dx.abs() != r && dy.abs() != r {
+                    continue;
+                }
                 let x = cx + dx;
                 let y = cy + dy;
                 if skeleton.in_bounds(x, y) && *skeleton.get(x, y).unwrap_or(&false) {
@@ -252,7 +290,9 @@ pub fn find_self_loop_on_skeleton(state: &GameState, node_id: usize) -> Option<V
                 }
             }
         }
-        if by_angle.len() >= 40 { break; }
+        if by_angle.len() >= 40 {
+            break;
+        }
     }
 
     if by_angle.len() < 2 {
@@ -365,7 +405,9 @@ pub fn generate_geometric_self_loop(state: &GameState, node_id: usize) -> Option
 
     for &radius in &radii {
         let r = radius.min(max_radius);
-        if r < 10.0 * s { continue; }
+        if r < 10.0 * s {
+            continue;
+        }
 
         for angle_idx in 0..24 {
             let base_angle = (angle_idx as f64) * std::f64::consts::PI / 12.0;
@@ -401,22 +443,30 @@ pub fn generate_geometric_self_loop(state: &GameState, node_id: usize) -> Option
                     let ipy = pt.y.round() as i32;
                     let d = dt.get(ipx, ipy).copied().unwrap_or(0) as f64;
                     min_clearance = min_clearance.min(d);
-                    if d < 2.0 * s { valid = false; break; }
+                    if d < 2.0 * s {
+                        valid = false;
+                        break;
+                    }
 
                     // Check distance to existing lines
                     for line in &state.lines {
                         for si in 1..line.polyline.len() {
                             let p1 = &line.polyline[si - 1];
                             let p2 = &line.polyline[si];
-                            let ld = point_to_segment_distance(
-                                pt.x, pt.y, p1.x, p1.y, p2.x, p2.y,
-                            );
+                            let ld = point_to_segment_distance(pt.x, pt.y, p1.x, p1.y, p2.x, p2.y);
                             min_clearance = min_clearance.min(ld);
-                            if ld < 4.0 * s { valid = false; break; }
+                            if ld < 4.0 * s {
+                                valid = false;
+                                break;
+                            }
                         }
-                        if !valid { break; }
+                        if !valid {
+                            break;
+                        }
                     }
-                    if !valid { break; }
+                    if !valid {
+                        break;
+                    }
                 }
 
                 if valid && polyline_length(&points) >= 20.0 * s && min_clearance > best_clearance {
@@ -479,7 +529,6 @@ fn find_nearest_skeleton_pixel(skeleton: &Grid<bool>, pos: &Point) -> Option<Pix
 
     None
 }
-
 
 fn astar_search(
     skeleton: &Grid<bool>,
@@ -600,8 +649,7 @@ fn astar_search(
                     continue;
                 }
 
-                let neighbor_point =
-                    Point::new(neighbor.x as f64 + 0.5, neighbor.y as f64 + 0.5);
+                let neighbor_point = Point::new(neighbor.x as f64 + 0.5, neighbor.y as f64 + 0.5);
                 let mut too_close_to_forbidden = false;
                 for forbidden in forbidden_nodes {
                     let fdx = neighbor_point.x - forbidden.x;
@@ -623,7 +671,8 @@ fn astar_search(
                 // is still preferred when it runs through open space.
                 let off_skeleton_cost = if on_skeleton { 1.0 } else { 1.5 };
 
-                let dist_penalty = 1.0 + dist_penalty_strength / (1.0 + neighbor_dist * neighbor_dist);
+                let dist_penalty =
+                    1.0 + dist_penalty_strength / (1.0 + neighbor_dist * neighbor_dist);
 
                 let tentative_g = g_score.get(&current).unwrap_or(&f64::INFINITY)
                     + move_cost * dist_penalty * off_skeleton_cost;
