@@ -26,7 +26,8 @@ fn fixtures_under(dir: &str) -> Vec<replay::Fixture> {
     paths.iter().map(|p| replay::load(p).unwrap()).collect()
 }
 
-fn bits(state: &GameState) -> Vec<u64> {
+/// Every coordinate on the board, bit for bit.
+pub(crate) fn bits(state: &GameState) -> Vec<u64> {
     let mut out = Vec::new();
     for node in &state.nodes {
         out.extend([node.position.x.to_bits(), node.position.y.to_bits()]);

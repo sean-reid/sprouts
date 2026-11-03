@@ -865,4 +865,4 @@ fn relax(state: &mut GameState) -> Undo {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

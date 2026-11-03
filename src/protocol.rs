@@ -384,8 +384,9 @@ pub struct Classified {
     pub topology: Vec<Option<FaceMove>>,
 }
 
-/// Replays the real history and classifies each move. A move the engine
-/// refuses is an error, since the history came from it.
+/// Replays the real history, settling after each move as the game did, and
+/// classifies each move. A move the engine refuses is an error, since the
+/// history came from it.
 pub fn classify(plan: Classification) -> Result<Classified, String> {
     let mut state = start(
         plan.initial_nodes,
@@ -401,6 +402,7 @@ pub fn classify(plan: Classification) -> Result<Classified, String> {
         state
             .apply_move(mov)
             .map_err(|e| format!("move {index}: {}", e.message))?;
+        settle::settle(&mut state);
     }
     Ok(Classified { topology: out })
 }
@@ -524,7 +526,7 @@ pub(crate) fn redraws(state: &GameState, face: &face::Move, mov: &types::Move) -
 
 /// Draws a move named by its topology with the router, puts its node at
 /// the point of the curve nearest `at`, and applies it as the player to
-/// move.
+/// move; the board then settles as it does for a drawn move.
 pub fn apply_face_move(state: &mut GameState, mov: FaceMove, at: Point) -> Outcome {
     let listed: face::Move = mov.clone().into();
     let drawn = state
@@ -575,17 +577,17 @@ fn unroutable(mv: &face::Move, why: Unroutable) -> Rejection {
 
 /// Takes the last move back and puts the geometry back as it was before
 /// that move settled, so the board is the one the next move was drawn on.
+/// Records left above the board are dropped unused; every record of the
+/// undone move is restored, newest first, so a move settled twice still
+/// comes back as drawn and the stack never outgrows the moves.
 pub fn undo(state: &mut GameState) -> bool {
     let undone = state.undo_move();
     if undone {
-        // Every applied move settles once, so the record on top belongs to
-        // the move just taken back.
-        let paired = state
-            .settles
-            .last()
-            .is_some_and(|settled| settled.board == state.lines.len() + 1);
-        debug_assert!(paired, "undo of a move that was not settled once");
-        if paired {
+        let board = state.lines.len() + 1;
+        while state.settles.last().is_some_and(|s| s.board > board) {
+            state.settles.pop();
+        }
+        while state.settles.last().is_some_and(|s| s.board == board) {
             if let Some(settled) = state.settles.pop() {
                 settled.restore(state);
             }
@@ -1708,6 +1710,54 @@ mod tests {
         let wire = serde_json::to_value(route_move(&state, face_move(0, 1, vec![]))).unwrap();
         assert_eq!(wire["kind"], json!("routed"));
         assert!(!wire["segments"].as_array().unwrap().is_empty());
+    }
+
+    /// The routed line settles the same way whether it arrives drawn or as
+    /// its face move, and each path leaves one settle record.
+    #[test]
+    fn a_face_move_applies_to_the_board_a_drawn_copy_of_it_does() {
+        let mut state = GameState::new(4);
+        state.current_player = Player::Human;
+        for listed in moves_from(&state, 0).moves {
+            let RouteReply::Routed { mov, .. } = route_move(&state, listed.clone()) else {
+                continue;
+            };
+            let mut drawn = state.clone();
+            let mut routed = state.clone();
+            assert!(matches!(
+                apply(&mut drawn, mov.clone()),
+                Outcome::Applied { .. }
+            ));
+            assert!(matches!(
+                apply_face_move(&mut routed, listed.clone(), mov.new_node_pos),
+                Outcome::Applied { .. }
+            ));
+            assert_eq!(
+                settle::tests::bits(&drawn),
+                settle::tests::bits(&routed),
+                "{listed:?}"
+            );
+            assert_eq!(drawn.settles.len(), 1);
+            assert_eq!(routed.settles.len(), 1);
+        }
+    }
+
+    /// A second settle of one move leaves a record above the board; undo
+    /// drops it and restores from the one that matches.
+    #[test]
+    fn undo_drops_a_duplicate_settle_record_and_restores_the_drawn_board() {
+        let mut state = GameState::new(4);
+        state.current_player = Player::Human;
+        let before = settle::tests::bits(&state);
+        let RouteReply::Routed { mov, .. } = route_move(&state, face_move(0, 1, vec![])) else {
+            panic!("the chord did not route");
+        };
+        assert!(matches!(apply(&mut state, mov), Outcome::Applied { .. }));
+        settle::settle(&mut state);
+        assert_eq!(state.settles.len(), 2);
+        assert!(undo(&mut state));
+        assert!(state.settles.is_empty());
+        assert_eq!(settle::tests::bits(&state), before);
     }
 
     #[test]
