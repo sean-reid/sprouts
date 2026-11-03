@@ -11,8 +11,6 @@
 //! tree's centres and over both orientations, so a mirror image has the
 //! same form.
 
-use std::collections::HashMap;
-
 use super::{Component, FaceId, FaceModel};
 
 const NONE: u32 = u32::MAX;
@@ -21,7 +19,10 @@ const PIECE: u32 = 1;
 
 type Corner = usize;
 type Piece = usize;
+/// Start and length of a form in the scratch's store.
+type Span = (usize, usize);
 
+#[derive(Default)]
 struct Corners {
     next: Vec<Corner>,
     prev: Vec<Corner>,
@@ -31,37 +32,47 @@ struct Corners {
 }
 
 impl Corners {
+    #[cfg(test)]
+    fn of(m: &FaceModel, frozen: usize) -> Self {
+        let mut out = Self::default();
+        out.fill(m, frozen, &mut Vec::new());
+        out
+    }
+
+    fn clear(&mut self) {
+        self.next.clear();
+        self.prev.clear();
+        self.partner.clear();
+        self.lives.clear();
+        self.face.clear();
+    }
+
     /// The live corners of the faces from `frozen` on: one per half-edge
     /// out of a node with lives left, one per isolated node, boundary by
     /// boundary.
-    fn of(m: &FaceModel, frozen: usize) -> Self {
-        let mut out = Self {
-            next: Vec::new(),
-            prev: Vec::new(),
-            partner: Vec::new(),
-            lives: Vec::new(),
-            face: Vec::new(),
-        };
-        let mut of_dart = vec![NONE as usize; m.half_edges.len()];
+    fn fill(&mut self, m: &FaceModel, frozen: usize, of_dart: &mut Vec<usize>) {
+        self.clear();
+        of_dart.clear();
+        of_dart.resize(m.half_edges.len(), NONE as usize);
         for f in frozen..m.faces.len() {
             for comp in &m.faces[f].components {
-                let first = out.lives.len();
+                let first = self.lives.len();
                 match *comp {
-                    Component::Node(_) => out.push(3, f),
+                    Component::Node(_) => self.push(3, f),
                     Component::Cycle(start) => {
                         for h in m.cycle(start) {
                             let degree = m.nodes[m.origin(h)].degree;
                             if degree < 3 {
-                                of_dart[h] = out.lives.len();
-                                out.push(3 - u32::from(degree), f);
+                                of_dart[h] = self.lives.len();
+                                self.push(3 - u32::from(degree), f);
                             }
                         }
                     }
                 }
-                let last = out.lives.len();
+                let last = self.lives.len();
                 if last > first {
-                    out.next[last - 1] = first;
-                    out.prev[first] = last - 1;
+                    self.next[last - 1] = first;
+                    self.prev[first] = last - 1;
                 }
             }
         }
@@ -73,10 +84,9 @@ impl Corners {
             if node.degree == 2 {
                 let other = of_dart[node.spokes[usize::from(node.spokes[0] == h)]];
                 debug_assert_ne!(other, NONE as usize, "a live node's corners share a region");
-                out.partner[c] = Some(other).filter(|&o| o != NONE as usize);
+                self.partner[c] = Some(other).filter(|&o| o != NONE as usize);
             }
         }
-        out
     }
 
     fn push(&mut self, lives: u32, face: FaceId) {
@@ -87,41 +97,31 @@ impl Corners {
         self.lives.push(lives);
         self.face.push(face);
     }
-
-    /// Corners joined by `next` and `partner`, numbered from zero.
-    fn pieces(&self) -> (Vec<Piece>, usize) {
-        let n = self.lives.len();
-        let mut parent: Vec<usize> = (0..n).collect();
-        fn find(parent: &mut [usize], mut v: usize) -> usize {
-            while parent[v] != v {
-                parent[v] = parent[parent[v]];
-                v = parent[v];
-            }
-            v
-        }
-        for c in 0..n {
-            for other in [Some(self.next[c]), self.partner[c]].into_iter().flatten() {
-                let (a, b) = (find(&mut parent, c), find(&mut parent, other));
-                parent[a] = b;
-            }
-        }
-        let mut number = vec![NONE as usize; n];
-        let mut count = 0;
-        let mut of_corner = vec![0; n];
-        for (c, slot) in of_corner.iter_mut().enumerate() {
-            let root = find(&mut parent, c);
-            if number[root] == NONE as usize {
-                number[root] = count;
-                count += 1;
-            }
-            *slot = number[root];
-        }
-        (of_corner, count)
-    }
 }
 
-struct Tree<'a> {
-    corners: &'a Corners,
+fn find(parent: &mut [usize], mut v: usize) -> usize {
+    while parent[v] != v {
+        parent[v] = parent[parent[v]];
+        v = parent[v];
+    }
+    v
+}
+
+fn reset<T>(lists: &mut Vec<Vec<T>>, n: usize) {
+    lists.truncate(n);
+    lists.iter_mut().for_each(Vec::clear);
+    lists.resize_with(n, Vec::new);
+}
+
+/// Buffers for building live forms, kept between calls so a search pays
+/// for allocation once.
+#[derive(Default)]
+pub struct LiveScratch {
+    corners: Corners,
+    of_dart: Vec<usize>,
+    parent: Vec<usize>,
+    number: Vec<usize>,
+    piece_of: Vec<Piece>,
     forward: bool,
     /// Corners of each piece, ascending.
     members: Vec<Vec<Corner>>,
@@ -129,34 +129,125 @@ struct Tree<'a> {
     faces_of_piece: Vec<Vec<FaceId>>,
     /// Pieces touching each face, ascending; indexed by face id.
     pieces_of_face: Vec<Vec<Piece>>,
-    face_memo: HashMap<(FaceId, Option<Piece>), Vec<u32>>,
-    piece_memo: HashMap<(Piece, Option<FaceId>), Vec<u32>>,
+    store: Vec<u32>,
+    face_memo: Vec<Span>,
+    piece_memo: Vec<Span>,
+    spans: Vec<Span>,
+    inner: Vec<Span>,
+    labels: Vec<u32>,
+    order: Vec<Corner>,
+    code: Vec<u32>,
+    lowest: Vec<u32>,
+    orbits: Vec<(u32, FaceId, usize)>,
+    kept: Vec<u32>,
+    kept_spans: Vec<Span>,
+    out: Vec<u32>,
 }
 
-impl<'a> Tree<'a> {
-    fn new(corners: &'a Corners, forward: bool) -> Self {
-        let (piece_of_corner, count) = corners.pieces();
-        let faces = corners.face.iter().copied().max().map_or(0, |f| f + 1);
-        let mut members = vec![Vec::new(); count];
-        let mut faces_of_piece = vec![Vec::new(); count];
-        let mut pieces_of_face = vec![Vec::new(); faces];
-        for (c, &p) in piece_of_corner.iter().enumerate() {
-            members[p].push(c);
-            faces_of_piece[p].push(corners.face[c]);
-            pieces_of_face[corners.face[c]].push(p);
+impl LiveScratch {
+    /// `live_form` into the scratch's own buffer.
+    pub fn form(&mut self, m: &FaceModel, frozen: usize) -> &[u32] {
+        let mut corners = std::mem::take(&mut self.corners);
+        corners.fill(m, frozen, &mut self.of_dart);
+        self.corners = corners;
+        self.out.clear();
+        if self.corners.lives.is_empty() {
+            return &self.out;
         }
-        for list in faces_of_piece.iter_mut().chain(pieces_of_face.iter_mut()) {
+        self.build_pieces();
+        let centres = self.centres();
+
+        self.kept.clear();
+        self.kept_spans.clear();
+        self.forward = true;
+        self.start_orientation();
+        for tree in &centres {
+            let span = self.tree_form(tree);
+            let at = self.kept.len();
+            self.kept
+                .extend_from_slice(&self.store[span.0..span.0 + span.1]);
+            self.kept_spans.push((at, span.1));
+        }
+        self.forward = false;
+        self.start_orientation();
+        for (i, tree) in centres.iter().enumerate() {
+            let back = self.tree_form(tree);
+            let (at, len) = self.kept_spans[i];
+            if self.store[back.0..back.0 + back.1] < self.kept[at..at + len] {
+                let at = self.kept.len();
+                self.kept
+                    .extend_from_slice(&self.store[back.0..back.0 + back.1]);
+                self.kept_spans[i] = (at, back.1);
+            }
+        }
+        let kept = &self.kept;
+        self.kept_spans
+            .sort_unstable_by(|a, b| kept[a.0..a.0 + a.1].cmp(&kept[b.0..b.0 + b.1]));
+        for &(at, len) in &self.kept_spans {
+            self.out.push(len as u32);
+            self.out.extend_from_slice(&self.kept[at..at + len]);
+        }
+        &self.out
+    }
+
+    fn start_orientation(&mut self) {
+        self.store.clear();
+        let faces = self.pieces_of_face.len();
+        let pieces = self.members.len();
+        self.face_memo.clear();
+        self.face_memo.resize(faces * (pieces + 1), (usize::MAX, 0));
+        self.piece_memo.clear();
+        self.piece_memo
+            .resize(pieces * (faces + 1), (usize::MAX, 0));
+        self.labels.clear();
+        self.labels.resize(self.corners.lives.len(), NONE);
+        self.order.clear();
+        self.lowest.clear();
+        self.lowest.resize(faces, NONE);
+    }
+
+    /// Corners joined by `next` and `partner` are one piece, numbered
+    /// from zero; fills the piece and face incidence lists.
+    fn build_pieces(&mut self) {
+        let n = self.corners.lives.len();
+        self.parent.clear();
+        self.parent.extend(0..n);
+        for c in 0..n {
+            let (next, partner) = (self.corners.next[c], self.corners.partner[c]);
+            for other in [Some(next), partner].into_iter().flatten() {
+                let (a, b) = (find(&mut self.parent, c), find(&mut self.parent, other));
+                self.parent[a] = b;
+            }
+        }
+        self.number.clear();
+        self.number.resize(n, NONE as usize);
+        self.piece_of.clear();
+        let mut count = 0;
+        for c in 0..n {
+            let root = find(&mut self.parent, c);
+            if self.number[root] == NONE as usize {
+                self.number[root] = count;
+                count += 1;
+            }
+            self.piece_of.push(self.number[root]);
+        }
+        let faces = self.corners.face.iter().copied().max().map_or(0, |f| f + 1);
+        reset(&mut self.members, count);
+        reset(&mut self.faces_of_piece, count);
+        reset(&mut self.pieces_of_face, faces);
+        for (c, &p) in self.piece_of.iter().enumerate() {
+            let f = self.corners.face[c];
+            self.members[p].push(c);
+            self.faces_of_piece[p].push(f);
+            self.pieces_of_face[f].push(p);
+        }
+        for list in self
+            .faces_of_piece
+            .iter_mut()
+            .chain(self.pieces_of_face.iter_mut())
+        {
             list.sort_unstable();
             list.dedup();
-        }
-        Self {
-            corners,
-            forward,
-            members,
-            faces_of_piece,
-            pieces_of_face,
-            face_memo: HashMap::new(),
-            piece_memo: HashMap::new(),
         }
     }
 
@@ -171,90 +262,117 @@ impl<'a> Tree<'a> {
     /// Breadth-first code of the piece holding `root`: for each corner
     /// in label order, the labels of the corner after it along its
     /// boundary and of its node's other corner, and its node's lives.
-    fn code(&self, root: Corner, labels: &mut [u32], order: &mut Vec<Corner>, code: &mut Vec<u32>) {
-        for &c in order.iter() {
-            labels[c] = NONE;
+    fn code_from(&mut self, root: Corner) {
+        for &c in &self.order {
+            self.labels[c] = NONE;
         }
-        order.clear();
-        code.clear();
-        order.push(root);
-        labels[root] = 0;
+        self.order.clear();
+        self.code.clear();
+        self.order.push(root);
+        self.labels[root] = 0;
         let mut i = 0;
-        while i < order.len() {
-            let c = order[i];
+        while i < self.order.len() {
+            let c = self.order[i];
             for e in [Some(self.step(c)), self.corners.partner[c]] {
                 let Some(e) = e else {
-                    code.push(NONE);
+                    self.code.push(NONE);
                     continue;
                 };
-                if labels[e] == NONE {
-                    labels[e] = order.len() as u32;
-                    order.push(e);
+                if self.labels[e] == NONE {
+                    self.labels[e] = self.order.len() as u32;
+                    self.order.push(e);
                 }
-                code.push(labels[e]);
+                self.code.push(self.labels[e]);
             }
-            code.push(self.corners.lives[c]);
+            self.code.push(self.corners.lives[c]);
             i += 1;
         }
     }
 
-    fn face(&mut self, f: FaceId, parent: Option<Piece>) -> Vec<u32> {
-        if let Some(done) = self.face_memo.get(&(f, parent)) {
-            return done.clone();
+    fn face(&mut self, f: FaceId, parent: Option<Piece>) -> Span {
+        let slot = f * (self.members.len() + 1) + parent.unwrap_or(self.members.len());
+        if self.face_memo[slot].0 != usize::MAX {
+            return self.face_memo[slot];
         }
-        let mut inside: Vec<Vec<u32>> = self.pieces_of_face[f]
-            .clone()
-            .into_iter()
-            .filter(|&p| Some(p) != parent)
-            .map(|p| self.piece(p, Some(f)))
-            .collect();
-        inside.sort();
-        let mut out = vec![FACE, inside.len() as u32];
-        for form in inside {
-            out.push(form.len() as u32);
-            out.extend(form);
+        let base = self.spans.len();
+        for i in 0..self.pieces_of_face[f].len() {
+            let p = self.pieces_of_face[f][i];
+            if Some(p) != parent {
+                let span = self.piece(p, Some(f));
+                self.spans.push(span);
+            }
         }
-        self.face_memo.insert((f, parent), out.clone());
+        let store = &self.store;
+        self.spans[base..]
+            .sort_unstable_by(|a, b| store[a.0..a.0 + a.1].cmp(&store[b.0..b.0 + b.1]));
+        let start = self.store.len();
+        self.store.push(FACE);
+        self.store.push((self.spans.len() - base) as u32);
+        for i in base..self.spans.len() {
+            let (at, len) = self.spans[i];
+            self.store.push(len as u32);
+            self.store.extend_from_within(at..at + len);
+        }
+        self.spans.truncate(base);
+        let out = (start, self.store.len() - start);
+        self.face_memo[slot] = out;
         out
     }
 
-    fn piece(&mut self, p: Piece, parent: Option<FaceId>) -> Vec<u32> {
-        if let Some(done) = self.piece_memo.get(&(p, parent)) {
-            return done.clone();
+    fn piece(&mut self, p: Piece, parent: Option<FaceId>) -> Span {
+        let slot =
+            p * (self.pieces_of_face.len() + 1) + parent.unwrap_or(self.pieces_of_face.len());
+        if self.piece_memo[slot].0 != usize::MAX {
+            return self.piece_memo[slot];
         }
-        let mut best: Option<Vec<u32>> = None;
-        let mut labels = vec![NONE; self.corners.lives.len()];
-        let mut order = Vec::with_capacity(self.members[p].len());
-        let mut code = Vec::with_capacity(3 * self.members[p].len());
-        let mut lowest: HashMap<FaceId, u32> = HashMap::new();
-        for root in self.members[p].clone() {
-            self.code(root, &mut labels, &mut order, &mut code);
-            lowest.clear();
-            for &c in &order {
-                let slot = lowest.entry(self.corners.face[c]).or_insert(NONE);
-                *slot = (*slot).min(labels[c]);
+        let base = self.inner.len();
+        for i in 0..self.faces_of_piece[p].len() {
+            let f = self.faces_of_piece[p][i];
+            let span = if Some(f) == parent {
+                (0, 0)
+            } else {
+                self.face(f, Some(p))
+            };
+            self.inner.push(span);
+        }
+        let mut best: Span = (usize::MAX, 0);
+        for r in 0..self.members[p].len() {
+            let root = self.members[p][r];
+            self.code_from(root);
+            for &c in &self.order {
+                let f = self.corners.face[c];
+                self.lowest[f] = self.lowest[f].min(self.labels[c]);
             }
-            let mut orbits: Vec<(u32, FaceId)> = lowest.iter().map(|(&f, &l)| (l, f)).collect();
-            orbits.sort_unstable();
-            let mut form = vec![PIECE, code.len() as u32];
-            form.extend_from_slice(&code);
-            for (lowest, f) in orbits {
-                form.push(lowest);
+            self.orbits.clear();
+            for (i, &f) in self.faces_of_piece[p].iter().enumerate() {
+                self.orbits.push((self.lowest[f], f, i));
+                self.lowest[f] = NONE;
+            }
+            self.orbits.sort_unstable();
+            let start = self.store.len();
+            self.store.push(PIECE);
+            self.store.push(self.code.len() as u32);
+            self.store.extend_from_slice(&self.code);
+            for &(low, f, i) in &self.orbits {
+                self.store.push(low);
                 if Some(f) == parent {
-                    form.push(0);
+                    self.store.push(0);
                 } else {
-                    let inner = self.face(f, Some(p));
-                    form.push(inner.len() as u32);
-                    form.extend(inner);
+                    let (at, len) = self.inner[base + i];
+                    self.store.push(len as u32);
+                    self.store.extend_from_within(at..at + len);
                 }
             }
-            if best.as_ref().is_none_or(|b| form < *b) {
-                best = Some(form);
+            let len = self.store.len() - start;
+            if best.0 == usize::MAX || self.store[start..] < self.store[best.0..best.0 + best.1] {
+                best = (start, len);
+            } else {
+                self.store.truncate(start);
             }
         }
-        let out = best.expect("a piece has a corner");
-        self.piece_memo.insert((p, parent), out.clone());
-        out
+        self.inner.truncate(base);
+        self.piece_memo[slot] = best;
+        best
     }
 
     /// Centres of each tree of pieces and faces, by stripping leaves,
@@ -332,24 +450,22 @@ impl<'a> Tree<'a> {
         out
     }
 
-    /// One form per tree, each the minimum over its centres.
-    fn forms(&mut self) -> Vec<Vec<u32>> {
-        self.centres()
-            .into_iter()
-            .map(|centres| {
-                centres
-                    .into_iter()
-                    .map(|(is_piece, id)| {
-                        if is_piece {
-                            self.piece(id, None)
-                        } else {
-                            self.face(id, None)
-                        }
-                    })
-                    .min()
-                    .expect("a tree has a centre")
-            })
-            .collect()
+    /// The form of one tree: the minimum over its centres.
+    fn tree_form(&mut self, centres: &[(bool, usize)]) -> Span {
+        let mut best: Option<Span> = None;
+        for &(is_piece, id) in centres {
+            let span = if is_piece {
+                self.piece(id, None)
+            } else {
+                self.face(id, None)
+            };
+            let better = best
+                .is_none_or(|b| self.store[span.0..span.0 + span.1] < self.store[b.0..b.0 + b.1]);
+            if better {
+                best = Some(span);
+            }
+        }
+        best.expect("a tree has a centre")
     }
 }
 
@@ -358,21 +474,7 @@ impl<'a> Tree<'a> {
 /// lower and led by its length, so `parts` splits them out again. Empty
 /// when no node there has a life left.
 pub fn live_form(m: &FaceModel, frozen: usize) -> Vec<u32> {
-    let corners = Corners::of(m, frozen);
-    let forward = Tree::new(&corners, true).forms();
-    let backward = Tree::new(&corners, false).forms();
-    let mut parts: Vec<Vec<u32>> = forward
-        .into_iter()
-        .zip(backward)
-        .map(|(f, b)| f.min(b))
-        .collect();
-    parts.sort();
-    let mut out = Vec::new();
-    for part in parts {
-        out.push(part.len() as u32);
-        out.extend(part);
-    }
-    out
+    LiveScratch::default().form(m, frozen).to_vec()
 }
 
 /// The forms of a position's regions, as `Region::form` gives them, read
@@ -393,6 +495,7 @@ mod tests {
     use super::*;
     use crate::face::Move;
     use proptest::prelude::*;
+    use std::collections::HashMap;
 
     fn apply_all(n: usize, moves: &[Move]) -> FaceModel {
         let mut m = FaceModel::new(n);

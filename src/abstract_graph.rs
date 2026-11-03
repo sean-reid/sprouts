@@ -5,7 +5,7 @@
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 
-use crate::face::{live_form, parts, FaceModel, Move, NodeId};
+use crate::face::{live_form, parts, FaceModel, LiveScratch, Move, NodeId};
 use crate::nimber::{Nimbers, EXACT_LIVES, NIMBER_BUDGET};
 
 /// Thinking time per move.
@@ -217,6 +217,7 @@ pub struct Search<'a, C: Clock> {
     killers: Vec<Option<Move>>,
     budget: &'a mut Budget<C>,
     nimbers: &'a mut Nimbers,
+    live: LiveScratch,
 }
 
 impl<'a, C: Clock> Search<'a, C> {
@@ -226,6 +227,7 @@ impl<'a, C: Clock> Search<'a, C> {
             killers: Vec::new(),
             budget,
             nimbers,
+            live: LiveScratch::default(),
         }
     }
 
@@ -240,8 +242,8 @@ impl<'a, C: Clock> Search<'a, C> {
         mut beta: f64,
         maximizing: bool,
     ) -> f64 {
-        let form = live_form(&state.face, 0);
-        let key = key_of(&form, state.is_ai_turn);
+        let form = self.live.form(&state.face, 0);
+        let key = key_of(form, state.is_ai_turn);
         if let Some(score) = self.tt.probe(key, depth, alpha, beta) {
             return score;
         }
@@ -249,7 +251,7 @@ impl<'a, C: Clock> Search<'a, C> {
         if self.budget.exhausted() {
             return 0.0;
         }
-        if let Some(lost) = self.nimbers.known_lost(&parts(&form)) {
+        if let Some(lost) = self.nimbers.known_lost(&parts(form)) {
             let score = if lost == state.is_ai_turn {
                 -SOLVED
             } else {
