@@ -38,7 +38,7 @@ Web Worker (game state)
 Rust/WASM (logic, AI, validation)
 ```
 
-**Modules:** `curve.rs` (spline fit, flatten, nearest point), `face.rs` (planar model, move enumeration), `face/region.rs` (regions), `face/live.rs` (live form), `embedding.rs` (drawn line to face move), `route.rs` (face routing), `abstract_graph.rs` (move choice and time-boxed search), `nimber.rs` (region outcomes and nimbers), `ai.rs` (move choice and drawing), `validation.rs` (collision), `geometry.rs` (segment and polyline helpers)
+**Modules:** `curve.rs` (spline fit, flatten, nearest point), `face.rs` (planar model, move enumeration), `face/region.rs` (regions), `face/live.rs` (live form), `embedding.rs` (drawn line to face move), `settle.rs` (relaxes the board after each move), `route.rs` (face routing), `abstract_graph.rs` (move choice and time-boxed search), `nimber.rs` (region outcomes and nimbers), `ai.rs` (move choice and drawing), `validation.rs` (collision), `geometry.rs` (segment and polyline helpers)
 
 ## How to Play
 
