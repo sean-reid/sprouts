@@ -246,13 +246,13 @@ button:disabled {
     flex-direction: row;
     justify-content: center;
     gap: 20px;
+    container-type: size;
   }
 
+  /* WebKit does not carry a stretched height through aspect-ratio into a flex width. */
   .canvas-container {
-    flex: 0 1 auto;
-    width: auto;
-    min-width: 0;
-    aspect-ratio: 1 / 1;
+    flex: none;
+    width: min(100cqh, 100cqw - 260px);
   }
 
   #history {
