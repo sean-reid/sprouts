@@ -1443,14 +1443,15 @@ mod tests {
         ));
     }
 
-    /// A pocket where the three listed moves are all too cramped to draw:
-    /// the AI reports that it cannot draw, and the game stays open. The
-    /// pocket serves only while the router cannot draw it; if routing
-    /// improves, record a tighter one.
+    /// A bare node sealed inside a loop of radius 18 with every other node
+    /// dead: its only moves are loops, and the cell is smaller than the
+    /// smallest loop the router draws, so the AI reports that it cannot
+    /// draw and the game stays open. Each recorded move passes the check
+    /// its player gets.
     #[test]
     fn an_undrawn_position_does_not_end_the_game() {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("fixtures/undrawn/pocket-6n-1000.json");
+            .join("fixtures/undrawn/sealed-2n-1000.json");
         let raw: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
         let nodes: Vec<Point> = raw["nodes"]
@@ -1459,7 +1460,8 @@ mod tests {
             .iter()
             .map(|p| Point::new(p[0].as_f64().unwrap(), p[1].as_f64().unwrap()))
             .collect();
-        let mut state = start(6, 1000, Player::AI, Some(nodes)).unwrap();
+        assert_eq!(raw["firstPlayer"], "ai");
+        let mut state = start(2, 1000, Player::AI, Some(nodes)).unwrap();
         for m in raw["moves"].as_array().unwrap() {
             let polyline: Vec<Point> = m["polyline"]
                 .as_array()
@@ -1476,12 +1478,13 @@ mod tests {
                 m["to"].as_u64().unwrap() as usize,
                 polyline,
                 new_node,
-                Player::AI,
+                state.current_player,
                 1000,
             );
+            assert_eq!(check(&state, &mov), Ok(()));
             state.apply_move(mov).unwrap();
-            state.current_player = Player::AI;
         }
+        assert_eq!(state.current_player, Player::AI);
         assert!(!state.face.search_moves().is_empty());
         assert!(matches!(ai_move(&mut state), AiReply::Undrawn));
         assert!(!snapshot(&state).game_over);
