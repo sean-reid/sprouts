@@ -216,10 +216,15 @@ async function autoPlaceMidpoint(): Promise<void> {
   if (spot && !state.placementDot) state.placementDot = spot;
 }
 
+function abandonStroke(): void {
+  if (state.mode !== "dragging") return;
+  state.mode = "idle";
+  state.dragPath = [];
+}
+
 async function handleTap(point: Point, kind: PointerKind): Promise<void> {
   if (state.mode === "dragging") {
-    state.mode = "idle";
-    state.dragPath = [];
+    abandonStroke();
     return;
   }
   if (state.mode !== "placing" || kind === "touch") return;
@@ -399,6 +404,7 @@ function wireInput(): void {
       move: (world, kind) => void handleMove(world, kind),
       end: handleEnd,
       tap: (world, kind) => void handleTap(world, kind),
+      cancel: abandonStroke,
     },
     { minStrokeLength: MIN_STROKE_LENGTH },
   );

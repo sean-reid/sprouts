@@ -8,6 +8,7 @@ export interface StrokeHandlers {
   move(world: Point, kind: PointerKind): void;
   end(world: Point, kind: PointerKind): void;
   tap(world: Point, kind: PointerKind): void;
+  cancel(): void;
 }
 
 export interface InputOptions {
@@ -192,7 +193,21 @@ export function attachInput(
     }
   };
   canvas.addEventListener("pointerup", release);
-  canvas.addEventListener("pointercancel", release);
+
+  // A cancelled pointer never finishes a stroke; everything it drove resets.
+  const cancelAll = (): void => {
+    const hadStroke = stroke !== null;
+    pointers.clear();
+    stroke = null;
+    pinch = null;
+    panPointer = null;
+    if (hadStroke) handlers.cancel();
+  };
+  const cancel = (e: PointerEvent): void => {
+    if (pointers.has(e.pointerId)) cancelAll();
+  };
+  canvas.addEventListener("pointercancel", cancel);
+  canvas.addEventListener("lostpointercapture", cancel);
 
   canvas.addEventListener(
     "wheel",
@@ -224,5 +239,6 @@ export function attachInput(
   window.addEventListener("blur", () => {
     spaceHeld = false;
     canvas.classList.remove("pan");
+    cancelAll();
   });
 }
