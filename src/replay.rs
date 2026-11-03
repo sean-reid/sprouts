@@ -2,7 +2,7 @@
 
 use crate::ai;
 use crate::components::label_components;
-use crate::game_over::is_game_over;
+use crate::face::Move as FaceMove;
 use crate::morphology::generate_skeleton;
 use crate::node_classifier::classify_nodes;
 use crate::protocol;
@@ -188,17 +188,20 @@ pub fn replay(fixture: &Fixture) -> Replay {
         phases.classification = t.elapsed();
 
         let t = Instant::now();
-        let moves = ai::generate_concrete_moves_from_classification(&mut state, &classification);
+        let generated =
+            ai::generate_concrete_moves_from_classification(&mut state, &classification);
+        let candidates = ai::embedded_moves(&state, generated);
         phases.generation = t.elapsed();
 
         let t = Instant::now();
-        if moves.len() > 1 {
-            black_box(ai::search_best_index(&state, &classification, &moves));
+        if candidates.len() > 1 {
+            let topologies: Vec<FaceMove> = candidates.iter().map(|(_, t)| t.clone()).collect();
+            black_box(ai::search_best_index(&state, &topologies));
         }
         phases.search = t.elapsed();
 
         let t = Instant::now();
-        black_box(is_game_over(&state, &classification));
+        black_box(state.face.is_game_over());
         phases.game_over = t.elapsed();
 
         let recorded = fixture.moves.get(index);
@@ -218,7 +221,12 @@ pub fn replay(fixture: &Fixture) -> Replay {
         });
 
         match verdict {
-            Some((mov, Ok(()))) => state.apply_move(mov),
+            Some((mov, Ok(()))) => {
+                if let Err(e) = state.apply_move(mov) {
+                    failure = Some(format!("move {index} rejected: {}", e.message));
+                    break;
+                }
+            }
             Some((_, Err(e))) => {
                 failure = Some(format!("move {index} rejected: {}", e.message));
                 break;
@@ -237,7 +245,7 @@ pub fn record(initial_nodes: usize, board_size: usize) -> Fixture {
     let mut moves = Vec::new();
     while let Some(mov) = next_accepted_move(&mut state) {
         moves.push(FixtureMove::from_move(&mov));
-        state.apply_move(mov);
+        state.apply_move(mov).expect("an accepted move applies");
     }
     Fixture {
         version: FIXTURE_VERSION,
@@ -253,16 +261,17 @@ fn next_accepted_move(state: &mut GameState) -> Option<Move> {
         return Some(preferred);
     }
     let classification = classify_nodes(state);
-    let mut accepted: Vec<Move> =
-        ai::generate_concrete_moves_from_classification(state, &classification)
-            .into_iter()
-            .filter(|m| validate_for(state, m).is_ok())
-            .collect();
+    let generated = ai::generate_concrete_moves_from_classification(state, &classification);
+    let mut accepted: Vec<(Move, FaceMove)> = ai::embedded_moves(state, generated)
+        .into_iter()
+        .filter(|(m, _)| validate_for(state, m).is_ok())
+        .collect();
     if accepted.len() > 1 {
-        let best = ai::search_best_index(state, &classification, &accepted);
+        let topologies: Vec<FaceMove> = accepted.iter().map(|(_, t)| t.clone()).collect();
+        let best = ai::search_best_index(state, &topologies);
         accepted.swap(0, best);
     }
-    accepted.into_iter().next()
+    accepted.into_iter().next().map(|(m, _)| m)
 }
 
 #[cfg(test)]

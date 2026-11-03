@@ -60,6 +60,35 @@ pub fn closest_point_on_segment(a: &Point, b: &Point, p: &Point) -> (Point, f64)
     (closest, distance(&closest, p))
 }
 
+/// Area of the closed polygon through `points`, positive when it runs
+/// counterclockwise on screen, where y grows downward.
+pub fn signed_area(points: &[Point]) -> f64 {
+    let n = points.len();
+    let twice: f64 = (0..n)
+        .map(|i| {
+            let (p, q) = (points[i], points[(i + 1) % n]);
+            p.x * q.y - q.x * p.y
+        })
+        .sum();
+    -twice / 2.0
+}
+
+/// Even-odd test against the closed polygon through `polygon`.
+pub fn point_in_polygon(polygon: &[Point], p: &Point) -> bool {
+    let n = polygon.len();
+    let mut inside = false;
+    for i in 0..n {
+        let (a, b) = (polygon[i], polygon[(i + 1) % n]);
+        if (a.y > p.y) != (b.y > p.y) {
+            let x = a.x + (p.y - a.y) * (b.x - a.x) / (b.y - a.y);
+            if p.x < x {
+                inside = !inside;
+            }
+        }
+    }
+    inside
+}
+
 /// Check if two line segments intersect (excluding endpoints)
 pub fn segments_intersect(a1: &Point, a2: &Point, b1: &Point, b2: &Point) -> bool {
     fn ccw(a: &Point, b: &Point, c: &Point) -> bool {
@@ -260,6 +289,22 @@ mod tests {
 
     fn p(x: f64, y: f64) -> Point {
         Point::new(x, y)
+    }
+
+    #[test]
+    fn signed_area_is_positive_counterclockwise_on_screen() {
+        let square = [p(0.0, 0.0), p(0.0, 10.0), p(10.0, 10.0), p(10.0, 0.0)];
+        assert_eq!(signed_area(&square), 100.0);
+        let reversed: Vec<Point> = square.iter().rev().copied().collect();
+        assert_eq!(signed_area(&reversed), -100.0);
+    }
+
+    #[test]
+    fn point_in_polygon_tells_inside_from_outside() {
+        let square = [p(0.0, 0.0), p(0.0, 10.0), p(10.0, 10.0), p(10.0, 0.0)];
+        assert!(point_in_polygon(&square, &p(5.0, 5.0)));
+        assert!(!point_in_polygon(&square, &p(15.0, 5.0)));
+        assert!(!point_in_polygon(&square, &p(5.0, -1.0)));
     }
 
     // --- point_to_segment_distance ---

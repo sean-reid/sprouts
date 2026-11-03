@@ -5,7 +5,6 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 #[derive(Debug, Clone)]
 pub struct NodeClassification {
-    pub active_nodes: HashSet<usize>,
     pub legal_pairs: Vec<(usize, usize)>,
     pub self_loop_candidates: Vec<usize>,
 }
@@ -111,7 +110,6 @@ pub fn classify_nodes(state: &mut GameState) -> NodeClassification {
         .collect();
 
     NodeClassification {
-        active_nodes,
         legal_pairs,
         self_loop_candidates,
     }

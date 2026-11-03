@@ -2,8 +2,8 @@ mod abstract_graph;
 mod ai;
 mod components;
 mod curve;
+mod embedding;
 pub mod face;
-mod game_over;
 mod geometry;
 mod morphology;
 mod node_classifier;
@@ -41,8 +41,8 @@ impl SproutsGame {
         })
     }
 
-    pub fn snapshot(&mut self) -> Result<Ts<Snapshot>, JsError> {
-        Ok(protocol::snapshot(&mut self.state).into_ts()?)
+    pub fn snapshot(&self) -> Result<Ts<Snapshot>, JsError> {
+        Ok(protocol::snapshot(&self.state).into_ts()?)
     }
 
     #[wasm_bindgen(js_name = applyMove)]

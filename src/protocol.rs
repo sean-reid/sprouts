@@ -3,9 +3,8 @@ use tsify::Tsify;
 
 use crate::ai;
 use crate::curve::{self, Cubic};
-use crate::game_over;
+use crate::embedding;
 use crate::geometry;
-use crate::node_classifier;
 use crate::types::{self, scale, GameState, Line, Node, Player, Point, MIN_NODE_SPACING};
 use crate::validation::{self, Rejection};
 
@@ -113,11 +112,12 @@ pub fn start(initial_nodes: usize, board_size: usize, first_player: Player) -> G
     state
 }
 
-pub fn snapshot(state: &mut GameState) -> Snapshot {
-    let classification = node_classifier::classify_nodes(state);
-    let game_over = game_over::is_game_over(state, &classification);
-    let mut active_nodes: Vec<usize> = classification.active_nodes.into_iter().collect();
+/// Lists the legal moves once; a node is active when one of them uses it.
+pub fn snapshot(state: &GameState) -> Snapshot {
+    let moves = state.face.moves();
+    let mut active_nodes: Vec<usize> = moves.iter().flat_map(|m| [m.a, m.b]).collect();
     active_nodes.sort_unstable();
+    active_nodes.dedup();
     Snapshot {
         board_size: state.board_size,
         initial_nodes: state.initial_node_count,
@@ -125,7 +125,7 @@ pub fn snapshot(state: &mut GameState) -> Snapshot {
         lines: state.lines.clone(),
         current_player: state.current_player,
         active_nodes,
-        game_over,
+        game_over: moves.is_empty(),
     }
 }
 
@@ -135,18 +135,16 @@ pub fn check(state: &GameState, mov: &types::Move) -> Result<(), Rejection> {
         Player::AI => validation::validate_ai_move(state, mov)
             .or_else(|_| validation::validate_ai_move_tight(state, mov)),
         Player::Human => validation::validate_move(state, mov),
-    }
+    }?;
+    embedding::embed(state, mov).map(drop)
 }
 
 pub fn apply(state: &mut GameState, mov: Move) -> Outcome {
     let mov = mov.by(state.current_player, state.board_size);
-    match check(state, &mov) {
-        Ok(()) => {
-            state.apply_move(mov);
-            Outcome::Applied {
-                snapshot: snapshot(state),
-            }
-        }
+    match check(state, &mov).and_then(|()| state.apply_move(mov)) {
+        Ok(()) => Outcome::Applied {
+            snapshot: snapshot(state),
+        },
         Err(rejection) => Outcome::Rejected { rejection },
     }
 }
@@ -258,8 +256,8 @@ mod tests {
 
     #[test]
     fn snapshot_of_a_fresh_board() {
-        let mut state = GameState::new(4);
-        let snap = snapshot(&mut state);
+        let state = GameState::new(4);
+        let snap = snapshot(&state);
         assert_eq!(snap.nodes.len(), 4);
         assert!(snap.lines.is_empty());
         assert_eq!(snap.active_nodes, vec![0, 1, 2, 3]);
@@ -270,6 +268,54 @@ mod tests {
         assert_eq!(wire["nodes"][0]["connectionCount"], json!(0));
         assert_eq!(wire["boardSize"], json!(1000));
         assert_eq!(wire["initialNodes"], json!(4));
+    }
+
+    /// One node: a loop, then the chord that closes it. Node 2 keeps a life
+    /// but has nobody to reach, so it is not active either.
+    #[test]
+    fn snapshot_of_a_finished_game() {
+        let mut state = start(1, 1000, Player::Human);
+        let a = state.nodes[0].position;
+        let ring: Vec<Point> = (0..=48)
+            .map(|i| {
+                let t = i as f64 / 48.0 * std::f64::consts::TAU;
+                Point::new(a.x + 60.0 - 60.0 * t.cos(), a.y + 60.0 * t.sin())
+            })
+            .collect();
+        let far = ring[24];
+        let Outcome::Applied { snapshot: snap } = apply(
+            &mut state,
+            Move {
+                from_node: 0,
+                to_node: 0,
+                polyline: ring,
+                new_node_pos: far,
+            },
+        ) else {
+            panic!("the loop was rejected");
+        };
+        assert!(!snap.game_over);
+        assert_eq!(snap.active_nodes, vec![0, 1]);
+        let over = vec![
+            a,
+            Point::new(a.x, a.y - 100.0),
+            Point::new(far.x, far.y - 100.0),
+            far,
+        ];
+        let Outcome::Applied { snapshot: snap } = apply(
+            &mut state,
+            Move {
+                from_node: 0,
+                to_node: 1,
+                polyline: over.clone(),
+                new_node_pos: over[1],
+            },
+        ) else {
+            panic!("the closing chord was rejected");
+        };
+        assert!(snap.game_over);
+        assert_eq!(snap.active_nodes, Vec::<usize>::new());
+        assert_eq!(snap.nodes[2].connection_count, 2);
     }
 
     #[test]
@@ -306,7 +352,7 @@ mod tests {
     #[test]
     fn the_ai_can_open_and_the_turn_passes_to_the_human() {
         let mut state = start(4, 1000, Player::AI);
-        assert_eq!(snapshot(&mut state).current_player, Player::AI);
+        assert_eq!(snapshot(&state).current_player, Player::AI);
         let a = state.nodes[0].position;
         let b = state.nodes[1].position;
         let polyline = straight(a, b, 10);

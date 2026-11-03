@@ -74,6 +74,16 @@ impl Rejection {
         }
     }
 
+    /// A crossing the geometry checks missed, known only from the path
+    /// ending in a different region than it started.
+    pub(crate) fn crossing_somewhere(path: &[Point]) -> Self {
+        Self::whole_path(
+            RejectionKind::PathCrossesLine,
+            path,
+            "Path crosses an existing line",
+        )
+    }
+
     fn crossing(path: &[Point], crossing: &Point) -> Self {
         let segment = nearest_segment(path, crossing);
         Self {
@@ -86,7 +96,7 @@ impl Rejection {
         }
     }
 
-    fn missing_node(id: usize, role: &str) -> Self {
+    pub(crate) fn missing_node(id: usize, role: &str) -> Self {
         Self::node(
             RejectionKind::MissingNode,
             id,
@@ -94,7 +104,7 @@ impl Rejection {
         )
     }
 
-    fn node_full(id: usize, role: &str) -> Self {
+    pub(crate) fn node_full(id: usize, role: &str) -> Self {
         Self::node(
             RejectionKind::NodeFull,
             id,
@@ -102,7 +112,7 @@ impl Rejection {
         )
     }
 
-    fn self_loop_full(id: usize) -> Self {
+    pub(crate) fn self_loop_full(id: usize) -> Self {
         Self::node(
             RejectionKind::NodeFull,
             id,
@@ -770,7 +780,8 @@ mod tests {
             p(500.0, 500.0),
             Player::Human,
             1000,
-        ));
+        ))
+        .unwrap();
         gs
     }
 
@@ -941,7 +952,7 @@ mod tests {
         let apex = first[20];
         let opening = Move::new(0, 1, first, apex, Player::Human, 1000);
         validate_move(&gs, &opening)?;
-        gs.apply_move(opening);
+        gs.apply_move(opening).unwrap();
 
         let from = gs.nodes[3].position;
         let to = gs.nodes[2].position;

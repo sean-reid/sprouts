@@ -1,11 +1,13 @@
-use crate::abstract_graph::{abstract_minimax, AbstractMove, AbstractState, TranspositionTable};
+use crate::abstract_graph::{abstract_minimax, AbstractState, NodeBudget, TranspositionTable};
+use crate::embedding;
+use crate::face::Move as FaceMove;
 use crate::node_classifier::{classify_nodes, NodeClassification};
 use crate::opening_book;
 use crate::pathfinding::{
     find_path_on_skeleton, find_path_relaxed, find_path_tight, find_self_loop_on_skeleton,
     generate_geometric_self_loop,
 };
-use crate::types::{GameState, Move};
+use crate::types::{GameState, Move, Player};
 use crate::validation::{validate_ai_move, validate_ai_move_tight};
 
 /// Generate all concrete moves with pixel paths (expensive — called once at root).
@@ -127,6 +129,17 @@ pub(crate) fn generate_concrete_moves_from_classification(
     moves
 }
 
+/// The drawn moves the face model can place, each with its topology.
+pub(crate) fn embedded_moves(state: &GameState, moves: Vec<Move>) -> Vec<(Move, FaceMove)> {
+    moves
+        .into_iter()
+        .filter_map(|mov| {
+            let topology = embedding::embed(state, &mov).ok()?;
+            Some((mov, topology))
+        })
+        .collect()
+}
+
 pub fn find_best_move(state: &mut GameState) -> Option<Move> {
     // 1. OPENING BOOK
     if let Some((from, to)) = opening_book::lookup_opening(state) {
@@ -141,7 +154,7 @@ pub fn find_best_move(state: &mut GameState) -> Option<Move> {
                     state.current_player,
                     state.board_size,
                 );
-                if validate_ai_move(state, &mov).is_ok() {
+                if validate_ai_move(state, &mov).is_ok() && embedding::embed(state, &mov).is_ok() {
                     return Some(mov);
                 }
             }
@@ -149,64 +162,65 @@ pub fn find_best_move(state: &mut GameState) -> Option<Move> {
     }
 
     // 2. GENERATE CONCRETE MOVES (pixel-level, once)
-    //    classify_nodes() gives us the real spatial connectivity — we pass
-    //    it to the abstract model so it doesn't hallucinate impossible moves.
     let classification = classify_nodes(state);
-    let concrete_moves = generate_concrete_moves_from_classification(state, &classification);
-    if concrete_moves.is_empty() {
+    let generated = generate_concrete_moves_from_classification(state, &classification);
+    let mut candidates = embedded_moves(state, generated);
+    if candidates.is_empty() {
         return None;
     }
-    if concrete_moves.len() == 1 {
-        return Some(concrete_moves.into_iter().next().unwrap());
+    if candidates.len() == 1 {
+        return candidates.pop().map(|(mov, _)| mov);
     }
 
-    // 3. ABSTRACT SEARCH seeded with real topology.
-    let best_idx = search_best_index(state, &classification, &concrete_moves);
+    // 3. SEARCH over the face model from each candidate.
+    let topologies: Vec<FaceMove> = candidates.iter().map(|(_, t)| t.clone()).collect();
+    let best_idx = search_best_index(state, &topologies);
 
     // 4. RETURN best concrete move (already validated during generation)
-    Some(concrete_moves.into_iter().nth(best_idx).unwrap())
+    candidates.into_iter().nth(best_idx).map(|(mov, _)| mov)
 }
 
-/// Index into `concrete_moves` of the move the abstract search prefers.
-pub(crate) fn search_best_index(
-    state: &GameState,
-    classification: &NodeClassification,
-    concrete_moves: &[Move],
-) -> usize {
-    let abstract_state = AbstractState::from_game_state_with_classification(
-        state,
-        &classification.legal_pairs,
-        &classification.self_loop_candidates,
-    );
-    let max_depth = abstract_state.choose_depth();
+/// Positions one search may visit across all its depths.
+const SEARCH_NODES: usize = 50_000;
+
+/// Index into `candidates` of the move the search prefers: the pick of the
+/// deepest iteration that finished within the node budget.
+pub(crate) fn search_best_index(state: &GameState, candidates: &[FaceMove]) -> usize {
+    let mut root = AbstractState::new(state.face.clone(), state.current_player == Player::AI);
+    let max_depth = root.choose_depth();
     let mut tt = TranspositionTable::new();
+    let mut budget = NodeBudget::new(SEARCH_NODES);
 
     let mut best_idx = 0;
 
     for depth in 1..=max_depth {
         let mut best_score = f64::NEG_INFINITY;
-        for (idx, mov) in concrete_moves.iter().enumerate() {
-            let abstract_mov = AbstractMove {
-                from: mov.from_node,
-                to: mov.to_node,
-            };
-            let mut sim = abstract_state.clone();
-            sim.apply_move(&abstract_mov);
-
+        let mut best_at_depth = 0;
+        for (idx, mov) in candidates.iter().enumerate() {
+            root.apply_move(mov);
             let score = abstract_minimax(
-                &sim,
+                &mut root,
                 depth.saturating_sub(1),
                 f64::NEG_INFINITY,
                 f64::INFINITY,
                 false, // After AI's move, human minimizes
                 &mut tt,
+                &mut budget,
             );
+            root.undo_move();
+            if budget.exhausted() {
+                break;
+            }
 
             if score > best_score {
                 best_score = score;
-                best_idx = idx;
+                best_at_depth = idx;
             }
         }
+        if budget.exhausted() {
+            break;
+        }
+        best_idx = best_at_depth;
     }
     best_idx
 }
