@@ -96,8 +96,10 @@ pub fn snapshot(state: &mut GameState) -> Snapshot {
 
 pub fn apply(state: &mut GameState, mov: Move) -> Outcome {
     let mov = mov.by(state.current_player);
+    // The AI generator keeps a move that passes either check, so apply must too.
     let checked = match state.current_player {
-        Player::AI => validation::validate_ai_move(state, &mov),
+        Player::AI => validation::validate_ai_move(state, &mov)
+            .or_else(|_| validation::validate_ai_move_tight(state, &mov)),
         Player::Human => validation::validate_move(state, &mov),
     };
     match checked {
@@ -197,6 +199,16 @@ mod tests {
         );
         assert!(!wire["rejection"]["message"].as_str().unwrap().is_empty());
         assert!(state.lines.is_empty());
+    }
+
+    #[test]
+    fn the_ai_opening_on_a_full_size_board_is_accepted() {
+        let mut state = start(4, 1000, Player::AI);
+        let mov = ai_move(&mut state).expect("the AI has an opening move");
+        match apply(&mut state, mov) {
+            Outcome::Applied { snapshot } => assert_eq!(snapshot.current_player, Player::Human),
+            Outcome::Rejected { rejection } => panic!("opening rejected: {}", rejection.message),
+        }
     }
 
     #[test]

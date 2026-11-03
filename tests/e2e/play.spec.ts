@@ -1,6 +1,8 @@
 import { expect, test, type Page } from "@playwright/test";
 import {
   drawBetween,
+  holdNext,
+  holdOneWorkerMessage,
   nodeOnScreen,
   openBoard,
   playExchange,
@@ -8,27 +10,6 @@ import {
   touchStroke,
   type Client,
 } from "./helpers";
-
-// Installed before the page loads so a test can hold one request to the
-// worker back; the worker then answers a newer request first.
-function holdOneWorkerMessage(): void {
-  const post = Worker.prototype.postMessage;
-  let hold: { method: string; ms: number } | null = null;
-  (window as unknown as { holdNext: typeof holdNext }).holdNext = holdNext;
-  function holdNext(method: string, ms: number): void {
-    hold = { method, ms };
-  }
-  Worker.prototype.postMessage = function (this: Worker, ...args: unknown[]) {
-    const envelope = args[0] as { method?: string } | undefined;
-    if (hold && envelope?.method === hold.method) {
-      const { ms } = hold;
-      hold = null;
-      setTimeout(() => Reflect.apply(post, this, args), ms);
-      return;
-    }
-    Reflect.apply(post, this, args);
-  };
-}
 
 async function alongFirstChord(page: Page, t: number): Promise<Client> {
   const a = await nodeOnScreen(page, 0, 4);
@@ -98,9 +79,7 @@ test("a late reply to an older mousemove cannot overwrite a newer placement dot"
   await drawBetween(page, 0, 1);
   const older = await alongFirstChord(page, 0.3);
   const newer = await alongFirstChord(page, 0.7);
-  await page.evaluate(() => {
-    (window as unknown as { holdNext: (m: string, ms: number) => void }).holdNext("placement", 400);
-  });
+  await holdNext(page, "placement", 400);
   await page.mouse.move(older.x, older.y);
   await page.mouse.move(newer.x, newer.y);
   await expect.poll(() => dotAt(page, newer)).toBe(true);
