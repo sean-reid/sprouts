@@ -85,6 +85,9 @@ jobs:
       - run: npx playwright test
         env:
           CI: 1
+      - run: cargo test --release --features bench exported_game_replays
+        env:
+          SPROUTS_FIXTURE: test-results/fixtures/desktop-game.json
       - uses: actions/upload-artifact@v7
         if: always()
         with:
