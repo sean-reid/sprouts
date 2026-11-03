@@ -29,9 +29,8 @@ const TENTHS = 10;
 // engine already accepts. A stroke point closer than STROKE_TOLERANCE to
 // the chord of its neighbours is left out of the link.
 const CURVE_TOLERANCE = 1.5;
-const STROKE_TOLERANCE = 3;
-// Per move shape in the link; 2 is reserved for the face-model move once
-// the router can draw one.
+const STROKE_TOLERANCE = 1.5;
+// Per move shape in the link; 2 is reserved for the face-model move.
 const SHAPE_STROKE = 0;
 const SHAPE_CUBICS = 1;
 // Points travel in whole units, which moves one by at most 0.71.
@@ -124,14 +123,19 @@ export class History {
 }
 
 function cloneMove(move: RecordedMove): RecordedMove {
-  const clone: RecordedMove = {
+  const clone: RecordedMove = toMove(move);
+  if (move.segments) clone.segments = move.segments;
+  return clone;
+}
+
+// The move as the engine takes it, without the segments the page keeps.
+export function toMove(move: RecordedMove): Move {
+  return {
     fromNode: move.fromNode,
     toNode: move.toNode,
     polyline: move.polyline.map((p) => ({ x: p.x, y: p.y })),
     newNodePos: { x: move.newNodePos.x, y: move.newNodePos.y },
   };
-  if (move.segments) clone.segments = move.segments;
-  return clone;
 }
 
 function toFixtureMove(move: Move): FixtureMove {
@@ -242,8 +246,8 @@ function scaleOf(boardSize: number): number {
 // shape's points and the new node, every point as zigzag varint deltas
 // from the previous point in link quanta, starting at the origin. A stroke
 // counts its points; cubics count segments and carry the first start then
-// the other three control points of each. A move travels as whichever is
-// shorter. A version 1 link has from, to and point count as u16, the first
+// the other three control points of each. A move travels as whichever
+// encodes shorter. A version 1 link has from, to and point count as u16, the first
 // point as two u16 tenths, later points as zigzag varint deltas in tenths,
 // and the new node as two u16 tenths.
 export function encodeRecord(history: History): string {
@@ -258,27 +262,39 @@ export function encodeRecord(history: History): string {
   for (const move of history.moves) {
     out.varint(move.fromNode);
     out.varint(move.toNode);
-    const point = deltaWriter(out, LINK_QUANTUM * scale);
-    const stroke = simplify(move.polyline, STROKE_TOLERANCE * scale);
-    const segments = move.segments ?? [];
-    const first = segments[0];
-    if (first && 3 * segments.length + 1 < stroke.length) {
-      out.u8(SHAPE_CUBICS);
-      out.varint(segments.length);
-      point(first.p0);
-      for (const cubic of segments) {
-        point(cubic.p1);
-        point(cubic.p2);
-        point(cubic.p3);
-      }
-    } else {
-      out.u8(SHAPE_STROKE);
-      out.varint(stroke.length);
-      for (const p of stroke) point(p);
-    }
-    point(move.newNodePos);
+    const stroke = encodeStroke(move, scale);
+    const cubics = encodeCubics(move, scale);
+    out.append(cubics && cubics.length < stroke.length ? cubics : stroke);
   }
   return base64url(out.bytes());
+}
+
+function encodeStroke(move: RecordedMove, scale: number): Uint8Array {
+  const out = new ByteWriter();
+  const point = deltaWriter(out, LINK_QUANTUM * scale);
+  const stroke = simplify(move.polyline, STROKE_TOLERANCE * scale);
+  out.u8(SHAPE_STROKE);
+  out.varint(stroke.length);
+  for (const p of stroke) point(p);
+  point(move.newNodePos);
+  return out.bytes();
+}
+
+function encodeCubics(move: RecordedMove, scale: number): Uint8Array | null {
+  const first = move.segments?.[0];
+  if (!move.segments || !first) return null;
+  const out = new ByteWriter();
+  const point = deltaWriter(out, LINK_QUANTUM * scale);
+  out.u8(SHAPE_CUBICS);
+  out.varint(move.segments.length);
+  point(first.p0);
+  for (const cubic of move.segments) {
+    point(cubic.p1);
+    point(cubic.p2);
+    point(cubic.p3);
+  }
+  point(move.newNodePos);
+  return out.bytes();
 }
 
 export function decodeRecord(payload: string): GameRecord | null {
@@ -463,22 +479,27 @@ function distanceToSegment(p: Point, a: Point, b: Point): number {
 
 // True when one game is the other played further, so a link to my own game
 // reopens the live game rather than a review of it. Endpoints and the new
-// node identify a move; the link carries the node rounded to its quantum.
+// node identify a move; a link of either version rounds the node by less
+// than one quantum.
 export function sameGame(a: GameRecord, b: GameRecord): boolean {
   if (a.initialNodes !== b.initialNodes || a.boardSize !== b.boardSize) return false;
   if (a.firstPlayer !== b.firstPlayer) return false;
   const quantum = LINK_QUANTUM * scaleOf(a.boardSize);
   const shared = Math.min(a.moves.length, b.moves.length);
   for (let i = 0; i < shared; i++) {
-    if (moveKey(a.moves[i], quantum) !== moveKey(b.moves[i], quantum)) return false;
+    if (!sameMove(a.moves[i], b.moves[i], quantum)) return false;
   }
   return true;
 }
 
-function moveKey(move: FixtureMove | undefined, quantum: number): string {
-  if (!move) return "";
-  const [x, y] = move.newNode;
-  return [move.from, move.to, Math.round(x / quantum), Math.round(y / quantum)].join(",");
+function sameMove(
+  a: FixtureMove | undefined,
+  b: FixtureMove | undefined,
+  quantum: number,
+): boolean {
+  if (!a || !b) return false;
+  if (a.from !== b.from || a.to !== b.to) return false;
+  return Math.hypot(a.newNode[0] - b.newNode[0], a.newNode[1] - b.newNode[1]) <= quantum;
 }
 
 function zigzag(n: number): number {
@@ -515,6 +536,10 @@ class ByteWriter {
       v = Math.floor(v / 0x80);
     }
     this.u8(v);
+  }
+
+  append(bytes: Uint8Array): void {
+    for (const byte of bytes) this.u8(byte);
   }
 
   bytes(): Uint8Array {

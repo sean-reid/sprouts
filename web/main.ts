@@ -10,6 +10,7 @@ import {
   sameGame,
   save,
   shareUrl,
+  toMove,
   type GameRecord,
 } from "./history";
 import { attachInput, type InputOptions, type PointerKind } from "./input";
@@ -467,7 +468,9 @@ function applySnapshot(snapshot: Snapshot): void {
 }
 
 async function refreshBoard(): Promise<void> {
-  applySnapshot(await engine.call("snapshot"));
+  const epoch = gameEpoch;
+  const snapshot = await engine.call("snapshot");
+  if (epoch === gameEpoch) applySnapshot(snapshot);
 }
 
 async function performAIMove(): Promise<void> {
@@ -541,7 +544,7 @@ async function seek(target: number): Promise<boolean> {
       if (!move) break;
       let outcome: Outcome;
       try {
-        outcome = await engine.call("applyMove", move);
+        outcome = await engine.call("applyMove", toMove(move));
       } catch (error) {
         if (epoch === gameEpoch) setStatus("Replay failed: " + describe(error), "lose");
         return false;
