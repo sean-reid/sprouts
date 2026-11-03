@@ -710,10 +710,8 @@ mod tests {
         assert_eq!(rejection.at, BoardLocation::Node { id: 2 });
     }
 
-    /// The crossing is found on the flattening of the fit, so the reported
-    /// segment has to be mapped back onto the path the player drew.
-    #[test]
-    fn crossing_names_the_segment_of_the_submitted_path() {
+    /// A diagonal line from node 0 to node 1 with its new node at the centre.
+    fn board_with_a_diagonal() -> GameState {
         let mut gs = GameState::with_board_size(4, 1000);
         gs.nodes[0].position = p(200.0, 200.0);
         gs.nodes[1].position = p(800.0, 800.0);
@@ -727,8 +725,22 @@ mod tests {
             Player::Human,
             1000,
         ));
+        gs
+    }
 
-        // Four segments; only the third crosses the diagonal, at (550, 550).
+    fn validate_at(tier: Tier, gs: &GameState, mov: &Move) -> Result<(), Rejection> {
+        match tier {
+            Tier::Human => validate_move(gs, mov),
+            Tier::Ai => validate_ai_move(gs, mov),
+            Tier::Tight => validate_ai_move_tight(gs, mov),
+        }
+    }
+
+    /// The crossing is found on the flattening of the fit, so the reported
+    /// segment has to be mapped back onto the path the player drew. Four
+    /// segments; only the third crosses the diagonal, at (550, 550).
+    fn crossing_without_a_shared_node(tier: Tier) {
+        let gs = board_with_a_diagonal();
         let polyline = vec![
             p(200.0, 800.0),
             p(350.0, 700.0),
@@ -736,10 +748,52 @@ mod tests {
             p(750.0, 350.0),
             p(800.0, 200.0),
         ];
-        let mov = Move::new(2, 3, polyline, p(350.0, 700.0), Player::Human, 1000);
-        let rejection = validate_move(&gs, &mov).unwrap_err();
+        let player = match tier {
+            Tier::Human => Player::Human,
+            Tier::Ai | Tier::Tight => Player::AI,
+        };
+        let mov = Move::new(2, 3, polyline, p(350.0, 700.0), player, 1000);
+        let rejection = validate_at(tier, &gs, &mov).unwrap_err();
         assert_eq!(rejection.kind, RejectionKind::PathCrossesLine);
         assert_eq!(rejection.at, BoardLocation::Segments { first: 2, last: 2 });
+    }
+
+    /// The move leaves node 0, which the diagonal also touches, and crosses
+    /// it on its second segment near (695, 695), far from any node.
+    fn crossing_with_a_shared_node(tier: Tier) {
+        let gs = board_with_a_diagonal();
+        let polyline = vec![
+            p(200.0, 200.0),
+            p(300.0, 620.0),
+            p(720.0, 700.0),
+            p(800.0, 200.0),
+        ];
+        let player = match tier {
+            Tier::Human => Player::Human,
+            Tier::Ai | Tier::Tight => Player::AI,
+        };
+        let mov = Move::new(0, 3, polyline, p(300.0, 620.0), player, 1000);
+        let rejection = validate_at(tier, &gs, &mov).unwrap_err();
+        assert_eq!(rejection.kind, RejectionKind::PathCrossesLine);
+        assert_eq!(rejection.at, BoardLocation::Segments { first: 1, last: 1 });
+    }
+
+    #[test]
+    fn crossing_names_the_segment_of_the_submitted_path() {
+        crossing_without_a_shared_node(Tier::Human);
+        crossing_without_a_shared_node(Tier::Ai);
+    }
+
+    #[test]
+    fn crossing_past_a_shared_node_names_the_segment_of_the_submitted_path() {
+        crossing_with_a_shared_node(Tier::Human);
+        crossing_with_a_shared_node(Tier::Ai);
+    }
+
+    #[test]
+    fn the_tight_tier_names_the_segment_of_the_submitted_path() {
+        crossing_without_a_shared_node(Tier::Tight);
+        crossing_with_a_shared_node(Tier::Tight);
     }
 
     #[test]
