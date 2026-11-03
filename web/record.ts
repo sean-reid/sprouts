@@ -39,7 +39,8 @@ function saveGame(state: GameState, boardSize: number): void {
   anchor.href = url;
   anchor.download = `sprouts-${fixture.initialNodes}n-${boardSize}.json`;
   anchor.click();
-  URL.revokeObjectURL(url);
+  // Revoking in the same task can cancel the download in Firefox and Safari.
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
 export function wireRecording(state: GameState, boardSize: number): void {
