@@ -8,6 +8,7 @@ import {
   nodeAt,
   openBoard,
   pinch,
+  pinchDrag,
   plainWheel,
   shot,
   touchDrag,
@@ -85,24 +86,7 @@ test("pinch zooms and a touch stroke still locks a line", async ({ page }) => {
       { ...from[1], id: 2 },
     ],
   });
-  for (let i = 1; i <= 10; i++) {
-    const s = i / 10;
-    await cdp.send("Input.dispatchTouchEvent", {
-      type: "touchMove",
-      touchPoints: [
-        {
-          x: from[0].x + (to[0].x - from[0].x) * s,
-          y: from[0].y + (to[0].y - from[0].y) * s,
-          id: 1,
-        },
-        {
-          x: from[1].x + (to[1].x - from[1].x) * s,
-          y: from[1].y + (to[1].y - from[1].y) * s,
-          id: 2,
-        },
-      ],
-    });
-  }
+  await pinchDrag(cdp, from, to);
   await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
 
   const t = pinch(frame, fit(frame), from, to);
@@ -189,16 +173,7 @@ test("a pinch mid-stroke pauses the stroke and it finishes after one finger lift
       { ...second, id: 2 },
     ],
   });
-  for (let i = 1; i <= 10; i++) {
-    const s = i / 10;
-    await cdp.send("Input.dispatchTouchEvent", {
-      type: "touchMove",
-      touchPoints: [
-        { ...rest, id: 1 },
-        { x: second.x, y: second.y + (secondTo.y - second.y) * s, id: 2 },
-      ],
-    });
-  }
+  await pinchDrag(cdp, [rest, second], [rest, secondTo]);
   await cdp.send("Input.dispatchTouchEvent", {
     type: "touchEnd",
     touchPoints: [{ ...secondTo, id: 2 }],

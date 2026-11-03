@@ -2,6 +2,7 @@ import "./style.css";
 import type { Move, Outcome, Snapshot } from "../pkg/sprouts";
 import { Engine, StaleRequest } from "./engine";
 import { attachInput, type PointerKind } from "./input";
+import { Loupe } from "./loupe";
 import { healPath } from "./path";
 import { wireRecording } from "./record";
 import { draw } from "./render";
@@ -48,6 +49,7 @@ function invalidate(): void {
 }
 
 const view = new View(BOARD_SIZE);
+const loupe = new Loupe();
 const state: GameState = watched({ ...freshBoard(), lastInputWasTouch: false }, invalidate);
 let lastNodeCount = DEFAULT_NODES;
 let thinkingInterval: ReturnType<typeof setInterval> | null = null;
@@ -95,7 +97,12 @@ function showGameOver(): void {
   modal.classList.add("visible");
 }
 
+function hideLoupe(): void {
+  if (loupe.release()) invalidate();
+}
+
 function clearStroke(): void {
+  hideLoupe();
   engine.cancel("placement");
   state.mode = "idle";
   state.dragPath = [];
@@ -171,7 +178,17 @@ async function handleMove(point: Point, kind: PointerKind): Promise<void> {
   }
 }
 
+function handleAfterMove(world: Point, kind: PointerKind): void {
+  if (kind !== "touch" || state.mode !== "dragging") {
+    hideLoupe();
+    return;
+  }
+  const start = state.dragPath[0];
+  if (start && loupe.update(world, start, state, view)) invalidate();
+}
+
 function handleEnd(world: Point, kind: PointerKind): void {
+  hideLoupe();
   if (state.mode !== "dragging") return;
   const touch = kind === "touch";
   let endNode = findNodeAt(world, touch ? 30 : 15);
@@ -218,12 +235,14 @@ async function autoPlaceMidpoint(): Promise<void> {
 }
 
 function abandonStroke(): void {
+  hideLoupe();
   if (state.mode !== "dragging") return;
   state.mode = "idle";
   state.dragPath = [];
 }
 
 async function handleTap(point: Point, kind: PointerKind): Promise<void> {
+  hideLoupe();
   if (state.mode === "dragging") {
     abandonStroke();
     return;
@@ -403,6 +422,7 @@ function wireInput(): void {
     {
       start: handleStart,
       move: (world, kind) => void handleMove(world, kind),
+      afterMove: handleAfterMove,
       end: handleEnd,
       tap: (world, kind) => void handleTap(world, kind),
       cancel: abandonStroke,
@@ -436,11 +456,15 @@ function frame(): void {
   if (dirty) {
     dirty = false;
     draw(ctx, state, view);
+    loupe.draw(ctx, state, view);
   }
   requestAnimationFrame(frame);
 }
 
-view.onChange(invalidate);
+view.onChange(() => {
+  loupe.hide();
+  invalidate();
+});
 trackCanvasSize(canvas, view, invalidate);
 wireInput();
 wireRecording(state, BOARD_SIZE);
