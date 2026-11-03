@@ -46,13 +46,14 @@ pub fn is_game_over(state: &GameState, classification: &NodeClassification) -> b
 
 fn drawable(state: &GameState, from_node: usize, to_node: usize, polyline: Vec<Point>) -> bool {
     let new_node_pos = ai::find_optimal_node_placement(&polyline, state);
-    let mov = Move {
+    let mov = Move::new(
         from_node,
         to_node,
         polyline,
         new_node_pos,
-        player: state.current_player,
-    };
+        state.current_player,
+        state.board_size,
+    );
     validation::validate_ai_move(state, &mov).is_ok()
         || validation::validate_ai_move_tight(state, &mov).is_ok()
 }

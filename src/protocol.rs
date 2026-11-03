@@ -1,11 +1,12 @@
 use serde::{Deserialize, Serialize};
 use tsify::Tsify;
 
+use crate::ai;
+use crate::curve::{self, Cubic};
 use crate::game_over;
 use crate::node_classifier;
 use crate::types::{self, GameState, Line, Node, Player, Point};
 use crate::validation::{self, Rejection};
-use crate::{ai, geometry};
 
 /// A move as proposed to the engine. The mover is whoever is to play, so a
 /// recorded game is the list of these in order plus the opening node count.
@@ -19,14 +20,15 @@ pub struct Move {
 }
 
 impl Move {
-    fn by(self, player: Player) -> types::Move {
-        types::Move {
-            from_node: self.from_node,
-            to_node: self.to_node,
-            polyline: self.polyline,
-            new_node_pos: self.new_node_pos,
+    fn by(self, player: Player, board_size: usize) -> types::Move {
+        types::Move::new(
+            self.from_node,
+            self.to_node,
+            self.polyline,
+            self.new_node_pos,
             player,
-        }
+            board_size,
+        )
     }
 }
 
@@ -60,9 +62,28 @@ pub enum Outcome {
     Rejected { rejection: Rejection },
 }
 
+/// The AI's move with the spline it commits as, so the page animates the
+/// curve the board will show.
+#[derive(Debug, Clone, Serialize, Tsify)]
+#[serde(rename_all = "camelCase")]
+pub struct AiMove {
+    pub mov: Move,
+    pub segments: Vec<Cubic>,
+}
+
+#[derive(Debug, Clone, Deserialize, Tsify)]
+pub struct FitQuery {
+    pub path: Vec<Point>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Tsify)]
+pub struct Curve {
+    pub segments: Vec<Cubic>,
+}
+
 #[derive(Debug, Clone, Deserialize, Tsify)]
 pub struct PlacementQuery {
-    pub path: Vec<Point>,
+    pub segments: Vec<Cubic>,
     pub at: Point,
 }
 
@@ -104,7 +125,7 @@ pub fn check(state: &GameState, mov: &types::Move) -> Result<(), Rejection> {
 }
 
 pub fn apply(state: &mut GameState, mov: Move) -> Outcome {
-    let mov = mov.by(state.current_player);
+    let mov = mov.by(state.current_player, state.board_size);
     match check(state, &mov) {
         Ok(()) => {
             state.apply_move(mov);
@@ -116,20 +137,35 @@ pub fn apply(state: &mut GameState, mov: Move) -> Outcome {
     }
 }
 
-pub fn ai_move(state: &mut GameState) -> Option<Move> {
-    ai::select_ai_move(state).map(Move::from)
+pub fn ai_move(state: &mut GameState) -> Option<AiMove> {
+    ai::select_ai_move(state).map(|mov| AiMove {
+        segments: mov.segments.clone(),
+        mov: Move::from(mov),
+    })
+}
+
+/// The spline a stroke commits as, so the page can show it before the move.
+pub fn fit(state: &GameState, query: FitQuery) -> Curve {
+    Curve {
+        segments: curve::fit(&query.path, curve::tolerance(state.board_size)),
+    }
 }
 
 pub fn placement(state: &GameState, query: PlacementQuery) -> Placement {
-    let (position, _) = geometry::closest_point_on_polyline(&query.path, &query.at);
-    let valid = validation::validate_new_node_placement(
-        &query.path,
-        &position,
-        &state.nodes,
-        state.board_size,
-    )
-    .is_ok();
-    Placement { position, valid }
+    let Some(hit) = curve::nearest(&query.segments, &query.at) else {
+        return Placement {
+            position: query.at,
+            valid: false,
+        };
+    };
+    let path = curve::flatten(&query.segments, curve::tolerance(state.board_size));
+    let valid =
+        validation::validate_new_node_placement(&path, &hit.point, &state.nodes, state.board_size)
+            .is_ok();
+    Placement {
+        position: hit.point,
+        valid,
+    }
 }
 
 #[cfg(test)]
@@ -207,8 +243,8 @@ mod tests {
     #[test]
     fn the_ai_opening_on_a_full_size_board_is_accepted() {
         let mut state = start(4, 1000, Player::AI);
-        let mov = ai_move(&mut state).expect("the AI has an opening move");
-        match apply(&mut state, mov) {
+        let reply = ai_move(&mut state).expect("the AI has an opening move");
+        match apply(&mut state, reply.mov) {
             Outcome::Applied { snapshot } => assert_eq!(snapshot.current_player, Player::Human),
             Outcome::Rejected { rejection } => panic!("opening rejected: {}", rejection.message),
         }
@@ -261,13 +297,17 @@ mod tests {
         assert_eq!(snap["nodes"].as_array().unwrap().len(), 5);
     }
 
+    fn fitted(state: &GameState, path: Vec<Point>) -> Vec<Cubic> {
+        fit(state, FitQuery { path }).segments
+    }
+
     #[test]
     fn placement_on_an_existing_node_is_invalid() {
         let state = GameState::new(4);
         let a = state.nodes[0].position;
         let b = state.nodes[1].position;
-        let path = straight(a, b, 10);
-        let placed = placement(&state, PlacementQuery { path, at: a });
+        let segments = fitted(&state, straight(a, b, 10));
+        let placed = placement(&state, PlacementQuery { segments, at: a });
         assert!(!placed.valid);
         assert_eq!(placed.position, a);
     }
@@ -291,6 +331,153 @@ mod tests {
             }
         }
         state
+    }
+
+    #[test]
+    fn placement_with_no_curve_is_invalid() {
+        let state = GameState::new(4);
+        let at = Point::new(10.0, 10.0);
+        let placed = placement(
+            &state,
+            PlacementQuery {
+                segments: vec![],
+                at,
+            },
+        );
+        assert!(!placed.valid);
+        assert_eq!(placed.position, at);
+    }
+
+    fn wavy(a: Point, b: Point) -> Vec<Point> {
+        (0..=40)
+            .map(|i| {
+                let t = i as f64 / 40.0;
+                let (dx, dy) = (b.x - a.x, b.y - a.y);
+                let len = (dx * dx + dy * dy).sqrt();
+                let bulge = 40.0 * (t * 3.0 * std::f64::consts::PI).sin();
+                Point::new(
+                    a.x + dx * t - dy / len * bulge,
+                    a.y + dy * t + dx / len * bulge,
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_fit_shown_before_a_move_is_the_curve_the_move_commits() {
+        let mut state = GameState::new(4);
+        let path = wavy(state.nodes[0].position, state.nodes[1].position);
+        let shown = fitted(&state, path.clone());
+        assert!(shown.len() > 1);
+        let placed = placement(
+            &state,
+            PlacementQuery {
+                segments: shown.clone(),
+                at: path[20],
+            },
+        );
+        assert!(placed.valid);
+        let mov = Move {
+            from_node: 0,
+            to_node: 1,
+            polyline: path,
+            new_node_pos: placed.position,
+        };
+        let Outcome::Applied { snapshot } = apply(&mut state, mov) else {
+            panic!("wavy chord rejected");
+        };
+        assert_eq!(snapshot.lines[0].segments, shown);
+        assert_eq!(snapshot.lines[0].new_node_pos, placed.position);
+        assert_eq!(snapshot.nodes[4].position, placed.position);
+        let line = &state.lines[0];
+        assert_eq!(line.flat, line.flatten(curve::tolerance(state.board_size)));
+    }
+
+    #[test]
+    fn the_ai_reply_carries_the_segments_its_move_commits() {
+        let mut state = GameState::with_board_size(4, 500);
+        let a = state.nodes[0].position;
+        let b = state.nodes[1].position;
+        let polyline = straight(a, b, 10);
+        let new_node_pos = polyline[5];
+        let opening = Move {
+            from_node: 0,
+            to_node: 1,
+            polyline,
+            new_node_pos,
+        };
+        assert!(matches!(
+            apply(&mut state, opening),
+            Outcome::Applied { .. }
+        ));
+        let reply = ai_move(&mut state).expect("the AI has a move on an open board");
+        let Outcome::Applied { snapshot } = apply(&mut state, reply.mov) else {
+            panic!("the AI's own move was rejected");
+        };
+        assert_eq!(snapshot.lines.last().unwrap().segments, reply.segments);
+    }
+
+    #[test]
+    fn a_line_on_the_wire_carries_its_stroke_and_segments_but_not_the_flattening() {
+        let mut state = GameState::new(4);
+        let path = wavy(state.nodes[0].position, state.nodes[1].position);
+        let new_node_pos = path[20];
+        let mov = Move {
+            from_node: 0,
+            to_node: 1,
+            polyline: path,
+            new_node_pos,
+        };
+        let wire = serde_json::to_value(apply(&mut state, mov)).unwrap();
+        let line = &wire["snapshot"]["lines"][0];
+        assert!(line.get("flat").is_none());
+        assert_eq!(line["polyline"].as_array().unwrap().len(), 41);
+        let segments = line["segments"].as_array().unwrap();
+        assert!(segments.len() > 1);
+        assert_eq!(
+            segments[0]["p0"],
+            serde_json::to_value(state.nodes[0].position).unwrap()
+        );
+        assert_eq!(
+            segments[segments.len() - 1]["p3"],
+            serde_json::to_value(state.nodes[1].position).unwrap()
+        );
+    }
+
+    #[test]
+    fn a_move_still_validates_after_a_round_trip_through_json() {
+        let state = GameState::new(4);
+        let path = wavy(state.nodes[0].position, state.nodes[1].position);
+        let new_node_pos = path[20];
+        let mov = Move {
+            from_node: 0,
+            to_node: 1,
+            polyline: path,
+            new_node_pos,
+        };
+        let text = serde_json::to_string(&mov).unwrap();
+        let back: Move = serde_json::from_str(&text).unwrap();
+        let mut direct = state.clone();
+        let mut replayed = state.clone();
+        let (Outcome::Applied { snapshot: a }, Outcome::Applied { snapshot: b }) =
+            (apply(&mut direct, mov), apply(&mut replayed, back))
+        else {
+            panic!("the chord was rejected");
+        };
+        // JSON parsing is only exact to the last bit with a serde_json
+        // feature the app does not use, so the splines match to a micron.
+        assert_eq!(a.lines[0].segments.len(), b.lines[0].segments.len());
+        for (x, y) in a.lines[0].segments.iter().zip(&b.lines[0].segments) {
+            for (px, py) in [(x.p0, y.p0), (x.p1, y.p1), (x.p2, y.p2), (x.p3, y.p3)] {
+                assert!(px.distance_to(&py) < 1e-6);
+            }
+        }
+        assert!(
+            a.lines[0]
+                .new_node_pos
+                .distance_to(&b.lines[0].new_node_pos)
+                < 1e-6
+        );
     }
 
     #[test]
@@ -326,7 +513,14 @@ mod tests {
         let b = state.nodes[1].position;
         let path = straight(a, b, 10);
         let off_path = Point::new(path[5].x + 7.0, path[5].y + 7.0);
-        let placed = placement(&state, PlacementQuery { path, at: off_path });
+        let segments = fitted(&state, path);
+        let placed = placement(
+            &state,
+            PlacementQuery {
+                segments,
+                at: off_path,
+            },
+        );
         assert!(placed.valid);
         assert!(placed.position.distance_to(&off_path) < 10.0);
         assert_ne!(placed.position, off_path);

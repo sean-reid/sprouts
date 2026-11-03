@@ -293,6 +293,33 @@ export function ringPixel(frame: Frame): Client {
   return { x: frame.left + 2, y: frame.top + frame.height / 2 };
 }
 
+// Ctrl+wheel notches at a client point until the view has zoomed in by the
+// factor, mirroring the page's clamp of the board to the viewport.
+export async function wheelZoomTo(
+  page: Page,
+  frame: Frame,
+  from: Transform,
+  at: Client,
+  factor: number,
+): Promise<Transform> {
+  let t = from;
+  let zoom = 1;
+  for (let notch = 0; notch < 10 && zoom < factor - 1e-6; notch++) {
+    const delta = await ctrlWheel(page, at, -100);
+    const step = Math.min(2, Math.max(0.5, 2 ** (-delta / 100)));
+    zoom *= step;
+    t = clampToViewport(frame, zoomAt(frame, t, at, step));
+  }
+  return t;
+}
+
+function clampToViewport(frame: Frame, t: Transform): Transform {
+  const board = frame.board * t.scale;
+  const axis = (offset: number, viewport: number): number =>
+    board <= viewport ? (viewport - board) / 2 : Math.min(0, Math.max(viewport - board, offset));
+  return { ...t, tx: axis(t.tx, frame.width), ty: axis(t.ty, frame.height) };
+}
+
 export function shot(page: Page, name: string) {
   return page.screenshot({
     path: `test-results/shots/${test.info().project.name}-${name}.png`,

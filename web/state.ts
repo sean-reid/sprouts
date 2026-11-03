@@ -1,6 +1,6 @@
-import type { BoardLocation, Line, Node, Player, Point } from "../pkg/sprouts";
+import type { BoardLocation, Cubic, Line, Node, Player, Point } from "../pkg/sprouts";
 
-export type { BoardLocation, Line, Node, Player, Point };
+export type { BoardLocation, Cubic, Line, Node, Player, Point };
 
 export type Mode = "idle" | "dragging" | "placing" | "animating_ai";
 
@@ -10,7 +10,7 @@ export interface PlacementDot {
 }
 
 export interface AnimatingLine {
-  path: Point[];
+  segments: Cubic[];
   newPos: Point;
 }
 
@@ -28,6 +28,8 @@ export interface Board {
   currentPlayer: Player;
   dragPath: Point[];
   lockedPath: Point[];
+  // The fit of lockedPath once the worker returns it; placement waits for it.
+  lockedSegments: Cubic[] | null;
   placementDot: PlacementDot | null;
   dragStartNode: number | null;
   dragEndNode: number | null;
@@ -55,6 +57,7 @@ export function freshBoard(): Board {
     currentPlayer: "human",
     dragPath: [],
     lockedPath: [],
+    lockedSegments: null,
     placementDot: null,
     dragStartNode: null,
     dragEndNode: null,

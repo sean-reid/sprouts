@@ -2,6 +2,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use tsify::Tsify;
 
+use crate::curve::{self, Cubic};
+
 pub const BOARD_SIZE: usize = 1000;
 
 // All spatial constants are tuned for a 1000px board.
@@ -86,8 +88,19 @@ pub struct Line {
     pub from_node: usize,
     pub to_node: usize,
     pub polyline: Vec<Point>,
+    pub segments: Vec<Cubic>,
+    // Flattening of segments at the board's curve tolerance, cached for the
+    // intersection tests against later moves.
+    #[serde(skip)]
+    pub flat: Vec<Point>,
     pub new_node_pos: Point,
     pub player: Player,
+}
+
+impl Line {
+    pub fn flatten(&self, tolerance: f64) -> Vec<Point> {
+        curve::flatten(&self.segments, tolerance)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -95,8 +108,37 @@ pub struct Move {
     pub from_node: usize,
     pub to_node: usize,
     pub polyline: Vec<Point>,
+    pub segments: Vec<Cubic>,
     pub new_node_pos: Point,
     pub player: Player,
+}
+
+impl Move {
+    /// Fits the spline to the drawn polyline and puts the new node on it.
+    pub fn new(
+        from_node: usize,
+        to_node: usize,
+        polyline: Vec<Point>,
+        new_node_pos: Point,
+        player: Player,
+        board_size: usize,
+    ) -> Self {
+        let segments = curve::fit(&polyline, curve::tolerance(board_size));
+        let new_node_pos =
+            curve::nearest(&segments, &new_node_pos).map_or(new_node_pos, |hit| hit.point);
+        Self {
+            from_node,
+            to_node,
+            polyline,
+            segments,
+            new_node_pos,
+            player,
+        }
+    }
+
+    pub fn flatten(&self, tolerance: f64) -> Vec<Point> {
+        curve::flatten(&self.segments, tolerance)
+    }
 }
 
 #[derive(Clone)]
@@ -191,6 +233,8 @@ impl GameState {
             from_node: mov.from_node,
             to_node: mov.to_node,
             polyline: mov.polyline.clone(),
+            segments: mov.segments.clone(),
+            flat: mov.flatten(curve::tolerance(self.board_size)),
             new_node_pos: mov.new_node_pos,
             player: mov.player,
         };
@@ -367,17 +411,18 @@ mod tests {
     use super::*;
 
     fn make_move(from: usize, to: usize) -> Move {
-        Move {
-            from_node: from,
-            to_node: to,
-            polyline: vec![
+        Move::new(
+            from,
+            to,
+            vec![
                 Point::new(100.0, 100.0),
                 Point::new(150.0, 150.0),
                 Point::new(200.0, 200.0),
             ],
-            new_node_pos: Point::new(150.0, 150.0),
-            player: Player::Human,
-        }
+            Point::new(150.0, 150.0),
+            Player::Human,
+            BOARD_SIZE,
+        )
     }
 
     // --- GameState::new ---
@@ -473,17 +518,18 @@ mod tests {
     #[test]
     fn apply_move_self_loop_adds_2() {
         let mut gs = GameState::new(2);
-        let mov = Move {
-            from_node: 0,
-            to_node: 0,
-            polyline: vec![
+        let mov = Move::new(
+            0,
+            0,
+            vec![
                 Point::new(100.0, 100.0),
                 Point::new(200.0, 200.0),
                 Point::new(100.0, 100.0),
             ],
-            new_node_pos: Point::new(150.0, 150.0),
-            player: Player::Human,
-        };
+            Point::new(150.0, 150.0),
+            Player::Human,
+            BOARD_SIZE,
+        );
         gs.apply_move(mov);
         assert_eq!(gs.find_node(0).unwrap().connection_count, 2);
     }

@@ -45,18 +45,18 @@ impl FixtureMove {
         }
     }
 
-    fn to_move(&self, player: Player) -> Move {
-        Move {
-            from_node: self.from,
-            to_node: self.to,
-            polyline: self
-                .polyline
+    fn to_move(&self, player: Player, board_size: usize) -> Move {
+        Move::new(
+            self.from,
+            self.to,
+            self.polyline
                 .iter()
                 .map(|p| Point::new(p[0], p[1]))
                 .collect(),
-            new_node_pos: Point::new(self.new_node[0], self.new_node[1]),
+            Point::new(self.new_node[0], self.new_node[1]),
             player,
-        }
+            board_size,
+        )
     }
 }
 
@@ -203,8 +203,8 @@ pub fn replay(fixture: &Fixture) -> Replay {
 
         let recorded = fixture.moves.get(index);
         let verdict = recorded.map(|recorded| {
-            let mov = recorded.to_move(state.current_player);
             let t = Instant::now();
+            let mov = recorded.to_move(state.current_player, state.board_size);
             let verdict = validate_for(&state, &mov);
             phases.validation = t.elapsed();
             (mov, verdict)

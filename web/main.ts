@@ -21,6 +21,7 @@ import {
   freshBoard,
   watched,
   type BoardLocation,
+  type Cubic,
   type GameState,
   type Node,
   type PlacementDot,
@@ -97,6 +98,8 @@ let gameEpoch = 0;
 let submitting = false;
 let seeking = false;
 let booted = false;
+// Settles once the locked stroke's fit has arrived or been abandoned.
+let fitting: Promise<void> = Promise.resolve();
 
 const engine = new Engine(() => setStatus("Failed to load game engine", "lose"));
 
@@ -194,10 +197,12 @@ function hideLoupe(): void {
 
 function clearStroke(): void {
   hideLoupe();
+  engine.cancel("fit");
   engine.cancel("placement");
   state.mode = "idle";
   state.dragPath = [];
   state.lockedPath = [];
+  state.lockedSegments = null;
   state.placementDot = null;
 }
 
@@ -219,11 +224,13 @@ function findNodeAt(at: Point, screenRadius: number): Node | null {
   return closest;
 }
 
-// Resolves null once the stroke it was asked about is no longer on screen.
+// Resolves null once the curve it was asked about is no longer on screen.
 async function closestValidSpot(at: Point): Promise<PlacementDot | null> {
-  const path = state.lockedPath;
-  const spot = await engine.call("placement", { path, at });
-  return state.mode === "placing" && state.lockedPath === path ? spot : null;
+  await fitting;
+  const segments = state.lockedSegments;
+  if (!segments) return null;
+  const spot = await engine.call("placement", { segments, at });
+  return state.mode === "placing" && state.lockedSegments === segments ? spot : null;
 }
 
 function handleStart(world: Point, kind: PointerKind): void {
@@ -254,15 +261,16 @@ async function handleMove(point: Point, kind: PointerKind): Promise<void> {
     }
   } else if (state.mode === "placing") {
     const snapDist = state.lastInputWasTouch ? 80 : 30;
-    const path = state.lockedPath;
+    const segments = state.lockedSegments;
+    if (!segments) return;
     let spot: PlacementDot;
     try {
-      spot = await engine.latest("placement", "placement", { path, at: point });
+      spot = await engine.latest("placement", "placement", { segments, at: point });
     } catch (error) {
       if (error instanceof StaleRequest) return;
       throw error;
     }
-    if (state.mode !== "placing" || state.lockedPath !== path) return;
+    if (state.mode !== "placing" || state.lockedSegments !== segments) return;
     const { x, y } = spot.position;
     state.placementDot = Math.hypot(point.x - x, point.y - y) < snapDist ? spot : null;
   }
@@ -305,6 +313,7 @@ function handleEnd(world: Point, kind: PointerKind): void {
   }
 
   state.lockedPath = [...state.dragPath.slice(0, -1), { ...endNode.position }];
+  state.lockedSegments = null;
   state.dragEndNode = endNode.id;
   state.mode = "placing";
   updateControls();
@@ -312,10 +321,28 @@ function handleEnd(world: Point, kind: PointerKind): void {
   if (touch) {
     overlay.classList.add("visible");
     setStatus("Tap Confirm to place node, or drag on curve to adjust");
-    void autoPlaceMidpoint();
   } else {
     setStatus("Click on the curve to place a new node (ESC to cancel)", "win");
   }
+  fitting = showFit();
+  if (touch) void fitting.then(autoPlaceMidpoint);
+}
+
+// Swaps the raw stroke for the curve it commits as; placement runs on that.
+async function showFit(): Promise<void> {
+  const path = state.lockedPath;
+  let segments: Cubic[];
+  try {
+    ({ segments } = await engine.latest("fit", "fit", { path }));
+  } catch (error) {
+    if (error instanceof StaleRequest) return;
+    setStatus("Could not fit the stroke: " + describe(error), "lose");
+    clearStroke();
+    overlay.classList.remove("visible");
+    return;
+  }
+  if (state.mode !== "placing" || state.lockedPath !== path) return;
+  state.lockedSegments = segments;
 }
 
 async function autoPlaceMidpoint(): Promise<void> {
@@ -433,9 +460,9 @@ async function refreshBoard(): Promise<void> {
 async function performAIMove(): Promise<void> {
   const epoch = gameEpoch;
   try {
-    const move = await engine.latest("turn", "aiMove");
+    const reply = await engine.latest("turn", "aiMove");
     stopThinking();
-    if (!move) {
+    if (!reply) {
       state.gameOver = true;
       showGameOver();
       return;
@@ -443,14 +470,14 @@ async function performAIMove(): Promise<void> {
 
     state.mode = "animating_ai";
     updateControls();
-    state.animatingLine = { path: move.polyline, newPos: move.newNodePos };
+    state.animatingLine = { segments: reply.segments, newPos: reply.mov.newNodePos };
     state.animationProgress = 0;
     const startTime = performance.now();
     const animate = (now: number): void => {
       if (epoch !== gameEpoch) return;
       state.animationProgress = Math.min((now - startTime) / AI_ANIMATION_MS, 1);
       if (state.animationProgress < 1) requestAnimationFrame(animate);
-      else void finishAIMove(move, epoch);
+      else void finishAIMove(reply.mov, epoch);
     };
     requestAnimationFrame(animate);
   } catch (error) {
