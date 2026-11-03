@@ -1,5 +1,10 @@
+import { readFile } from "node:fs/promises";
 import { expect, test, type Page } from "@playwright/test";
-import { openBoard, playExchange, shot } from "./helpers";
+import type { GameRecord } from "../../web/history";
+import type { Player } from "../../web/state";
+import { frameOf, near, openBoard, pixelAt, playExchange, ringPixel, shot } from "./helpers";
+
+const COLOURS: Record<Player, string> = { human: "#60A5FA", ai: "#EF4444" };
 
 interface Rect {
   left: number;
@@ -13,6 +18,10 @@ interface Layout {
   panel: Rect;
   controls: Rect;
   tops: number[];
+}
+
+function other(player: Player): Player {
+  return player === "human" ? "ai" : "human";
 }
 
 function layoutOf(page: Page): Promise<Layout> {
@@ -59,6 +68,18 @@ async function expectSideBySide(page: Page, label: string): Promise<void> {
   await shot(page, `layout-played-${label}`);
 }
 
+async function expectIndicator(page: Page, text: string, player: Player): Promise<void> {
+  await expect(page.locator("#turnText")).toHaveText(text);
+  const want = [1, 3, 5].map((i) => parseInt(COLOURS[player].slice(i, i + 2), 16));
+  await expect(page.locator("#turn .swatch")).toHaveCSS(
+    "background-color",
+    `rgb(${want.join(", ")})`,
+  );
+  await expect
+    .poll(async () => near(await pixelAt(page, ringPixel(await frameOf(page))), COLOURS[player]))
+    .toBe(true);
+}
+
 test("the board and move list sit centred under one row of controls", async ({ page }) => {
   test.skip(test.info().project.name !== "desktop", "the side-by-side layout starts at 1024 wide");
   await openBoard(page);
@@ -68,4 +89,53 @@ test("the board and move list sit centred under one row of controls", async ({ p
   await page.locator("button[data-nodes='4']").click();
   await expect(page.locator("#status")).toHaveText("Draw a line between two nodes");
   await expectSideBySide(page, "1600");
+});
+
+test("a finished game names the winner on the indicator and the ring", async ({ page }) => {
+  const record = await readFile("fixtures/saved/finished-4n-500.json", "utf8");
+  const { moves, firstPlayer } = JSON.parse(record) as GameRecord;
+  const total = moves.length;
+  const won = total % 2 === 1 ? firstPlayer : other(firstPlayer);
+  await page.addInitScript((saved) => localStorage.setItem("sprouts.game", saved), record);
+  await page.goto("/");
+  await expect(page.locator("#status")).toHaveText(`Reviewing: move ${total} of ${total}.`, {
+    timeout: 60_000,
+  });
+  await expectIndicator(page, won === "human" ? "You won" : "AI won", won);
+
+  const ring = ringPixel(await frameOf(page));
+  const samples = [await pixelAt(page, ring)];
+  for (let i = 0; i < 2; i++) {
+    await page.waitForTimeout(200);
+    samples.push(await pixelAt(page, ring));
+  }
+  expect(samples[1]).toEqual(samples[0]);
+  expect(samples[2]).toEqual(samples[0]);
+  await shot(page, "layout-finished");
+  if (test.info().project.name === "desktop") {
+    await page.setViewportSize({ width: 1600, height: 900 });
+    await expectIndicator(page, won === "human" ? "You won" : "AI won", won);
+    await shot(page, "layout-finished-1600");
+  }
+
+  // Two moves back puts the loser on move with the game still open.
+  await page.locator("#backBtn").click();
+  await page.locator("#backBtn").click();
+  await expect(page.locator("#status")).toHaveText(
+    new RegExp(`^Reviewing: move ${total - 2} of ${total}\\.`),
+  );
+  const toMove = other(won);
+  await expectIndicator(page, toMove === "human" ? "Your turn" : "AI's turn", toMove);
+  await page.locator("#forwardBtn").click();
+  await page.locator("#forwardBtn").click();
+  await expect(page.locator("#status")).toHaveText(`Reviewing: move ${total} of ${total}.`);
+  await expectIndicator(page, won === "human" ? "You won" : "AI won", won);
+
+  const frame = await frameOf(page);
+  await page.mouse.click(frame.left + frame.width / 2, frame.top + frame.height / 2);
+  await expect(page.locator("#gameOverModal")).toBeVisible();
+  await page.locator("#newGameBtn").click();
+  await expect(page.locator("#status")).toHaveText("Draw a line between two nodes");
+  await expectIndicator(page, "Your turn", "human");
+  await shot(page, "layout-idle");
 });

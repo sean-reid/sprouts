@@ -20,6 +20,7 @@ import { draw } from "./render";
 import {
   freshBoard,
   watched,
+  winner,
   type BoardLocation,
   type Cubic,
   type GameState,
@@ -117,9 +118,14 @@ function setStatus(message: string, kind: StatusKind = ""): void {
   statusEl.className = kind;
 }
 
+const TURN_TEXT: Record<Player, string> = { human: "Your turn", ai: "AI's turn" };
+const WON_TEXT: Record<Player, string> = { human: "You won", ai: "AI won" };
+
 function updateTurn(): void {
-  turnEl.dataset.player = state.currentPlayer;
-  turnText.textContent = state.currentPlayer === "human" ? "Your turn" : "AI's turn";
+  const won = winner(state);
+  const player = won ?? state.currentPlayer;
+  turnEl.dataset.player = player;
+  turnText.textContent = (won ? WON_TEXT : TURN_TEXT)[player];
 }
 
 function flash(at: BoardLocation, path: Point[]): void {
@@ -189,7 +195,8 @@ function closeModal(): void {
 
 function showGameOver(): void {
   stopThinking();
-  const humanWins = state.currentPlayer === "ai";
+  updateTurn();
+  const humanWins = winner(state) === "human";
   setStatus(humanWins ? "You win!" : "AI wins", humanWins ? "win" : "lose");
   winnerText.textContent = humanWins ? "YOU WIN" : "AI WINS";
   winnerText.style.color = humanWins ? "#10B981" : "#EF4444";
