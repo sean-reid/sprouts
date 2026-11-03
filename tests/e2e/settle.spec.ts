@@ -32,46 +32,39 @@ const SHIFT_UNITS = 2 * 20;
 interface SettleProbe {
   // When the worker reported the board with the expected node count.
   replyAt: number | null;
-  lastChangeAt: number | null;
-  // Painted frames after the reply that differed from the one before them.
-  changes: number;
-  // Painted frames in the first 300 ms after the reply; a slow runner
-  // paints too few of them to see the animation.
-  early: number;
+  // Centre of node 3's hit target at each painted frame after the reply,
+  // which follows the geometry the board draws.
+  frames: { at: number; x: number; y: number }[];
 }
 
 // Samples every painted frame from now on. Once the worker intercept has
-// recorded a board of `nodes` nodes, each later frame is compared with the
-// one before it and the time of the last frame that differed is kept.
+// recorded a board of `nodes` nodes, the centre of node 3's hit target is
+// kept per frame for the next 700 ms.
 function armSettleProbe(page: Page, nodes: number): Promise<void> {
   return page.evaluate((nodes) => {
-    const probe: SettleProbe = { replyAt: null, lastChangeAt: null, changes: 0, early: 0 };
+    const probe: SettleProbe = { replyAt: null, frames: [] };
     const hooks = window as unknown as {
       settleProbe: SettleProbe;
       latestNodes?: unknown[];
     };
     hooks.settleProbe = probe;
-    const canvas = document.getElementById("canvas") as HTMLCanvasElement;
-    const ctx = canvas.getContext("2d")!;
-    let last: Uint8ClampedArray | null = null;
     const sample = (): void => {
       const now = performance.now();
       if (probe.replyAt === null) {
-        if ((hooks.latestNodes?.length ?? 0) >= nodes) {
-          probe.replyAt = now;
-          last = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
-        }
+        if ((hooks.latestNodes?.length ?? 0) >= nodes) probe.replyAt = now;
         requestAnimationFrame(sample);
         return;
       }
-      const { data } = ctx.getImageData(0, 0, canvas.width, canvas.height);
-      if (now - probe.replyAt < 300) probe.early++;
-      if (last && last.some((v, i) => v !== data[i])) {
-        probe.lastChangeAt = now;
-        probe.changes++;
+      const target = document.querySelector('[data-node="3"]');
+      if (target) {
+        const rect = target.getBoundingClientRect();
+        probe.frames.push({
+          at: now,
+          x: rect.left + rect.width / 2,
+          y: rect.top + rect.height / 2,
+        });
       }
-      last = data;
-      if (now - probe.replyAt < 1200) requestAnimationFrame(sample);
+      if (now - probe.replyAt < 700) requestAnimationFrame(sample);
     };
     requestAnimationFrame(sample);
   }, nodes);
@@ -111,7 +104,7 @@ async function settleExchange(page: Page): Promise<{ drawn: Client; scale: numbe
   await expect.poll(() => findDot(page)).not.toBeNull();
   await expectDotAt(page, (await findDot(page))!);
   await shot(page, "settle-before");
-  await armSettleProbe(page, 6);
+  await armSettleProbe(page, 5);
   await clickAway(page);
   await expect(page.locator("#status")).toHaveText("Your turn!", { timeout: 60_000 });
   await page.waitForTimeout(1300);
@@ -143,18 +136,47 @@ test("a line drawn past a node settles the node away within the stated bound", a
     );
   }
 
+  // The human move's settle moves node 3's target from the drawn spot to
+  // its settled one through positions off both, and stops within the bound.
   const probe = await readSettleProbe(page);
   expect(probe.replyAt).not.toBeNull();
-  const took = probe.lastChangeAt === null ? 0 : probe.lastChangeAt - probe.replyAt!;
-  test.info().annotations.push({
-    type: "settle-animation-ms",
-    description: `${took.toFixed(0)} over ${probe.changes} frames, ${probe.early} early`,
-  });
-  expect(took).toBeLessThanOrEqual(SETTLE_BOUND_MS);
-  // With at least 6 frames in the first 300 ms the animation shows as
-  // changed frames; a slower runner cannot tell it from an instant jump.
-  if (probe.early >= 6) expect(probe.changes).toBeGreaterThanOrEqual(2);
+  const motion = describeMotion(probe, drawn);
+  test.info().annotations.push({ type: "settle-animation", description: motion.summary });
+  expect(motion.end).toBeGreaterThan(1);
+  expect(motion.between).toBeGreaterThan(0);
+  expect(motion.took).toBeLessThanOrEqual(SETTLE_BOUND_MS);
 });
+
+interface Motion {
+  // Frames whose target centre is more than half a pixel from both the
+  // drawn spot and the final spot.
+  between: number;
+  // Distance from the drawn spot to the final spot.
+  end: number;
+  // Time from the reply to the last frame that moved.
+  took: number;
+  summary: string;
+}
+
+function describeMotion(probe: SettleProbe, drawn: Client): Motion {
+  const last = probe.frames.at(-1);
+  if (!last) return { between: 0, end: 0, took: 0, summary: "no frames" };
+  let between = 0;
+  let took = 0;
+  let previous: Client | null = null;
+  for (const frame of probe.frames) {
+    if (distance(frame, drawn) > 0.5 && distance(frame, last) > 0.5) between++;
+    if (previous && distance(frame, previous) > 1e-3) took = frame.at - probe.replyAt!;
+    previous = frame;
+  }
+  const end = distance(last, drawn);
+  return {
+    between,
+    end,
+    took,
+    summary: `${took.toFixed(0)} ms, ${between} frames between, ${end.toFixed(2)} px, ${probe.frames.length} frames`,
+  };
+}
 
 test("with reduced motion the settled board lands in the first frame", async ({ page }) => {
   await page.emulateMedia({ reducedMotion: "reduce" });
@@ -167,10 +189,11 @@ test("with reduced motion the settled board lands in the first frame", async ({ 
   expect(moved).toBeLessThanOrEqual(SHIFT_UNITS * scale + 1);
   const probe = await readSettleProbe(page);
   expect(probe.replyAt).not.toBeNull();
-  const took = probe.lastChangeAt === null ? 0 : probe.lastChangeAt - probe.replyAt!;
-  test.info().annotations.push({ type: "settle-instant-ms", description: took.toFixed(0) });
-  expect(took).toBeLessThanOrEqual(INSTANT_BOUND_MS);
-  expect(probe.changes).toBeLessThanOrEqual(1);
+  const motion = describeMotion(probe, drawn);
+  test.info().annotations.push({ type: "settle-instant", description: motion.summary });
+  expect(motion.end).toBeGreaterThan(1);
+  expect(motion.between).toBe(0);
+  expect(motion.took).toBeLessThanOrEqual(INSTANT_BOUND_MS);
 });
 
 // The largest offset of a node between two boards, infinite when their
