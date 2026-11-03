@@ -1,6 +1,7 @@
 mod abstract_graph;
 mod ai;
 mod components;
+pub mod face;
 mod game_over;
 mod geometry;
 mod morphology;
