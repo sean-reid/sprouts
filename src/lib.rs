@@ -11,6 +11,8 @@ mod node_classifier;
 mod pathfinding;
 mod protocol;
 #[cfg(feature = "bench")]
+pub use abstract_graph::search_rate;
+#[cfg(feature = "bench")]
 pub mod replay;
 mod types;
 mod validation;
