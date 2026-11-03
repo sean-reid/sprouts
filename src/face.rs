@@ -23,7 +23,8 @@ pub enum Component {
 /// boundary component the face splits, and `enclosed` lists the lowest node
 /// of each other component that ends up on the left of the path `a`, `m`,
 /// `b`. A self-loop sets `at_b` equal to `at_a` and `enclosed` is what the
-/// loop surrounds.
+/// loop surrounds. A loop on an isolated node has two equivalent sides;
+/// `apply` takes either, `moves` lists one.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Move {
     pub a: NodeId,
@@ -197,12 +198,14 @@ impl FaceModel {
         }
     }
 
+    /// Builds the full move list, so it costs what `moves` costs.
     pub fn is_game_over(&self) -> bool {
         self.moves().is_empty()
     }
 
     /// Every legal move, each face-side choice listed separately, in a
-    /// fixed order.
+    /// fixed order. Walks every face, O(E), and allocates 2^k moves for a
+    /// split with k other pieces, so call it once per position.
     pub fn moves(&self) -> Vec<Move> {
         let bounds = self.boundaries();
         let mut out = Vec::new();
@@ -262,6 +265,7 @@ impl FaceModel {
         out
     }
 
+    /// O(E): walks every face to validate `enclosed` and to split.
     pub fn apply(&mut self, mv: &Move) -> Result<(), IllegalMove> {
         let (a, b) = (mv.a, mv.b);
         let face = self.corner_face(a, mv.at_a)?;
@@ -271,9 +275,6 @@ impl FaceModel {
         let need = if a == b { 2 } else { 1 };
         if self.nodes[a].degree + need > 3 || self.nodes[b].degree + need > 3 {
             return Err(IllegalMove::Degree);
-        }
-        if a == b && mv.at_a != mv.at_b {
-            return Err(IllegalMove::Corner);
         }
         let bounds = self.boundaries();
         let ca = bounds.component(a, mv.at_a);
