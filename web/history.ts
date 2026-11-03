@@ -20,7 +20,8 @@ const TENTHS = 10;
 // 1000 board, is left out of the link; the tightest clearance is 3 units.
 const LINK_TOLERANCE = 0.25;
 // Bounds for a record that arrived by link; a Sprouts game lasts at most
-// 3n - 1 moves from n nodes.
+// 3n - 1 moves from n nodes. Endpoints must name nodes that exist before
+// the move; points are unbounded since strokes may leave the board.
 const MAX_NODES = 500;
 const MIN_BOARD = 100;
 const MAX_BOARD = 6000;
@@ -135,8 +136,9 @@ function asRecord(value: unknown): GameRecord | null {
   if (v.firstPlayer !== "human" && v.firstPlayer !== "ai") return null;
   if (!Array.isArray(v.moves) || v.moves.length > 3 * v.initialNodes) return null;
   const nodes = v.initialNodes;
-  const board = v.boardSize;
-  if (!v.moves.every((m, i) => isMove(m) && movePlausible(m, nodes + i, board))) return null;
+  if (!v.moves.every((m, i) => isMove(m) && m.fromNode < nodes + i && m.toNode < nodes + i)) {
+    return null;
+  }
   if (v.cursor > v.moves.length) return null;
   return {
     version: 1,
@@ -156,17 +158,6 @@ function isPoint(value: unknown): value is Point {
   if (typeof value !== "object" || value === null) return false;
   const p = value as Record<string, unknown>;
   return Number.isFinite(p.x) && Number.isFinite(p.y);
-}
-
-// Endpoints name nodes that exist before the move; points lie on the board.
-function movePlausible(move: Move, nodeCount: number, board: number): boolean {
-  const onBoard = (p: Point): boolean => p.x >= 0 && p.x <= board && p.y >= 0 && p.y <= board;
-  return (
-    move.fromNode < nodeCount &&
-    move.toNode < nodeCount &&
-    move.polyline.every(onBoard) &&
-    onBoard(move.newNodePos)
-  );
 }
 
 function isMove(value: unknown): value is Move {

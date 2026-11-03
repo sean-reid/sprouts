@@ -1,5 +1,5 @@
 import { expect, test, type BrowserContextOptions, type Page } from "@playwright/test";
-import { openBoard, playExchange, shot, strokeCells } from "./helpers";
+import { frameOf, nodeOnScreen, openBoard, playExchange, shot, strokeCells } from "./helpers";
 
 const entries = (page: Page) => page.locator("#moveList li");
 
@@ -19,9 +19,27 @@ test.beforeEach(async ({ page }) => {
   await openBoard(page);
 });
 
+// A stroke that leaves the board on its way between two nodes: the engine
+// accepts it, so a saved game with one must load again.
+async function playDetourExchange(page: Page): Promise<void> {
+  const frame = await frameOf(page);
+  const a = await nodeOnScreen(page, 0, 4);
+  const b = await nodeOnScreen(page, 1, 4);
+  const via = { x: frame.left - 6, y: (a.y + b.y) / 2 };
+  await page.mouse.move(a.x, a.y);
+  await page.mouse.down();
+  await page.mouse.move(via.x, via.y, { steps: 15 });
+  await page.mouse.move(b.x, b.y, { steps: 15 });
+  await page.mouse.up();
+  await expect(page.locator("#status")).toHaveText(/place a new node/);
+  await page.waitForTimeout(350);
+  await page.mouse.click(a.x + (via.x - a.x) * 0.4, a.y + (via.y - a.y) * 0.4);
+  await expect(page.locator("#status")).toHaveText("Your turn!", { timeout: 60_000 });
+}
+
 test("a reload restores the game and New Game clears it", async ({ page }) => {
   await expect(page.locator("#history")).toBeHidden();
-  await playExchange(page);
+  await playDetourExchange(page);
   await expect(entries(page)).toHaveText(["1. You 0 to 1", /^2\. AI \d+ to \d+$/]);
   await expect(current(page)).toHaveText(/^2\. AI/);
 
@@ -49,11 +67,22 @@ test("a reload restores the game and New Game clears it", async ({ page }) => {
 test("jumping to a board where the AI is to move enters review and keeps the tail", async ({
   page,
 }) => {
-  await playFirstExchange(page);
+  await playExchange(page);
   await entries(page).nth(0).locator("button").click();
-  await expect(page.locator("#status")).toHaveText(/^Reviewing: move 1 of 2/);
+  await expect(page.locator("#status")).toHaveText("Reviewing: move 1 of 2.");
   await expect(entries(page)).toHaveCount(2);
   await expect(current(page)).toHaveText("1. You 0 to 1");
+
+  await page.locator("#forwardBtn").click();
+  await expect(page.locator("#status")).toHaveText("Your turn!");
+  await expect(current(page)).toHaveText(/^2\. AI/);
+  await page.locator("#backBtn").click();
+  await expect(page.locator("#status")).toHaveText("Your turn!");
+  await expect(current(page)).toHaveCount(0);
+  await page.locator("#forwardBtn").click();
+  await expect(current(page)).toHaveText(/^2\. AI/);
+  await entries(page).nth(0).locator("button").click();
+  await expect(page.locator("#status")).toHaveText("Reviewing: move 1 of 2.");
 
   await page.locator("#undoBtn").click();
   await expect(page.locator("#status")).toHaveText("Move undone: your turn");

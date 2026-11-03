@@ -388,7 +388,7 @@ function recordMove(move: Move, snapshot: Snapshot): void {
 }
 
 function failure(error: unknown): Outcome {
-  return { kind: "rejected", reason: error instanceof Error ? error.message : String(error) };
+  return { kind: "rejected", reason: messageOf(error) };
 }
 
 function applySnapshot(snapshot: Snapshot): void {
@@ -471,7 +471,13 @@ async function seek(target: number): Promise<boolean> {
     while (timeline.cursor < target) {
       const move = timeline.moves[timeline.cursor];
       if (!move) break;
-      const outcome = await engine.call("applyMove", move).catch(failure);
+      let outcome: Outcome;
+      try {
+        outcome = await engine.call("applyMove", move);
+      } catch (error) {
+        if (epoch === gameEpoch) setStatus("Replay failed: " + messageOf(error), "lose");
+        return false;
+      }
       if (epoch !== gameEpoch) return false;
       if (outcome.kind === "rejected") {
         timeline.truncate();
@@ -483,13 +489,30 @@ async function seek(target: number): Promise<boolean> {
     return true;
   } finally {
     if (epoch === gameEpoch) {
-      await refreshBoard().catch(() => setStatus("Lost contact with the engine", "lose"));
+      await resyncCursor(epoch).catch(() => setStatus("Lost contact with the engine", "lose"));
       if (epoch === gameEpoch) {
         seeking = false;
         persist();
       }
     }
   }
+}
+
+// The engine's line count is the truth after a seek; a move it holds that
+// the list no longer has is taken back.
+async function resyncCursor(epoch: number): Promise<void> {
+  let snapshot = await engine.call("snapshot");
+  while (epoch === gameEpoch && snapshot.lines.length > timeline.moves.length) {
+    if (!(await engine.call("undo"))) break;
+    snapshot = await engine.call("snapshot");
+  }
+  if (epoch !== gameEpoch) return;
+  timeline.cursor = Math.min(snapshot.lines.length, timeline.moves.length);
+  applySnapshot(snapshot);
+}
+
+function messageOf(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 // Review steps one move; a live game steps to the next board where it is
@@ -504,12 +527,13 @@ function stepTarget(direction: -1 | 1): number {
   return target;
 }
 
-// After a seek: review stays in review, a live game either hands the AI
-// its turn at the end of the list or, on an earlier AI-to-move board,
-// enters review rather than letting the AI replace the moves ahead.
+// After a seek: a shared or finished game stays in review. A live game
+// hands the AI its turn at the end of the list and, on an earlier
+// AI-to-move board, enters review rather than letting the AI replace the
+// moves ahead; reaching the end again makes it live.
 function settleAfterSeek(): void {
-  if (!state.reviewing && !state.gameOver && state.currentPlayer === "ai" && !timeline.atEnd) {
-    state.reviewing = true;
+  if (!shared && !state.gameOver) {
+    state.reviewing = state.currentPlayer === "ai" && !timeline.atEnd;
   }
   if (state.reviewing) {
     setStatus(reviewStatus());
@@ -536,7 +560,8 @@ async function jumpTo(target: number): Promise<void> {
 function reviewStatus(): string {
   const total = timeline.moves.length;
   const at = timeline.atStart ? "start" : `move ${timeline.cursor} of ${total}`;
-  const hint = timeline.atStart ? "" : "Undo to play on from here.";
+  const playable = !state.gameOver && state.currentPlayer === "human" && !timeline.atStart;
+  const hint = playable ? "Undo to play on from here." : "";
   return `Reviewing: ${at}. ${hint}`.trim();
 }
 
@@ -604,12 +629,16 @@ function resetTable(): void {
   closeModal();
 }
 
-async function newGame(nodeCount: number): Promise<void> {
+// A fresh game forgets the saved one and the link; the fallback after a
+// failed load keeps both so the next move, not the failure, replaces them.
+async function newGame(nodeCount: number, fresh = true): Promise<void> {
   lastNodeCount = nodeCount;
   resetTable();
   shared = false;
-  dropHash();
-  clearSaved();
+  if (fresh) {
+    dropHash();
+    clearSaved();
+  }
   timeline = new History(nodeCount, defaultBoardSize());
   setBoardSize(timeline.boardSize);
   renderMoveList();
@@ -673,11 +702,8 @@ async function boot(): Promise<void> {
   } catch (error) {
     // A New Game clicked during the load has already replaced the table.
     if (epoch + 1 !== gameEpoch) return;
-    await newGame(DEFAULT_NODES);
-    setStatus(
-      "Could not load the saved game: " + (error instanceof Error ? error.message : String(error)),
-      "lose",
-    );
+    await newGame(DEFAULT_NODES, false);
+    setStatus("Could not load the saved game: " + messageOf(error), "lose");
   } finally {
     booted = true;
     invalidate();
