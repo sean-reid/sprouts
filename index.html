@@ -30,7 +30,10 @@
       </div>
     </div>
 
-    <div id="status" role="status" aria-live="polite">Initializing...</div>
+    <div class="status-row">
+      <div id="status" role="status" aria-live="polite">Initializing...</div>
+      <button id="cancelBtn" hidden>Cancel</button>
+    </div>
 
     <div class="play-area">
       <div class="canvas-container">
@@ -46,11 +49,6 @@
         <ol id="moveList"></ol>
         <input id="shareUrl" type="text" readonly aria-label="Share link" hidden />
       </aside>
-    </div>
-
-    <div id="mobileOverlay">
-      <button id="cancelBtn">Cancel</button>
-      <button id="confirmBtn" class="confirm-btn">Confirm Move</button>
     </div>
 
     <div id="gameOverModal" class="modal">

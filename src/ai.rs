@@ -215,8 +215,6 @@ pub fn find_optimal_node_placement(
     path: &[crate::types::Point],
     state: &crate::types::GameState,
 ) -> crate::types::Point {
-    use crate::geometry::point_to_segment_distance;
-
     if path.len() < 3 {
         if path.len() == 2 {
             return crate::types::Point::new(
@@ -230,46 +228,52 @@ pub fn find_optimal_node_placement(
     if path.len() == 3 {
         return path[1];
     }
+    rank_node_placements(path, state)
+        .first()
+        .copied()
+        .unwrap_or(path[path.len() / 2])
+}
 
-    // Only consider the middle 80% of the path (skip endpoints where nodes cluster)
-    let start_idx = (path.len() as f64 * 0.1).ceil() as usize;
-    let end_idx = (path.len() as f64 * 0.9).floor() as usize;
-    let start_idx = start_idx.max(1);
-    let end_idx = end_idx.min(path.len() - 1).max(start_idx + 1);
+/// Points of the middle 80% of the path ordered by clearance, the farthest
+/// from every node and line first.
+pub fn rank_node_placements(
+    path: &[crate::types::Point],
+    state: &crate::types::GameState,
+) -> Vec<crate::types::Point> {
+    use crate::geometry::point_to_segment_distance;
 
-    let mut best_pos = path[path.len() / 2];
-    let mut max_min_distance = 0.0;
+    let start_idx = ((path.len() as f64 * 0.1).ceil() as usize).max(1);
+    let end_idx = ((path.len() as f64 * 0.9).floor() as usize)
+        .min(path.len().saturating_sub(1))
+        .max(start_idx + 1);
 
-    for candidate in path.iter().take(end_idx).skip(start_idx) {
-        let candidate = *candidate;
-        let mut min_dist = f64::INFINITY;
-
-        // Distance to existing nodes
-        for node in &state.nodes {
-            let dx = candidate.x - node.position.x;
-            let dy = candidate.y - node.position.y;
-            let dist = (dx * dx + dy * dy).sqrt();
-            min_dist = min_dist.min(dist);
-        }
-
-        // Distance to existing lines (prevents placing nodes right next to lines)
-        for line in &state.lines {
-            for seg_idx in 1..line.polyline.len() {
-                let p1 = &line.polyline[seg_idx - 1];
-                let p2 = &line.polyline[seg_idx];
-                let dist =
-                    point_to_segment_distance(candidate.x, candidate.y, p1.x, p1.y, p2.x, p2.y);
-                min_dist = min_dist.min(dist);
+    let mut scored: Vec<(f64, crate::types::Point)> = path
+        .iter()
+        .take(end_idx)
+        .skip(start_idx)
+        .map(|candidate| {
+            let mut min_dist = f64::INFINITY;
+            for node in &state.nodes {
+                min_dist = min_dist.min(candidate.distance_to(&node.position));
             }
-        }
-
-        if min_dist > max_min_distance {
-            max_min_distance = min_dist;
-            best_pos = candidate;
-        }
-    }
-
-    best_pos
+            for line in &state.lines {
+                for pair in line.polyline.windows(2) {
+                    let dist = point_to_segment_distance(
+                        candidate.x,
+                        candidate.y,
+                        pair[0].x,
+                        pair[0].y,
+                        pair[1].x,
+                        pair[1].y,
+                    );
+                    min_dist = min_dist.min(dist);
+                }
+            }
+            (min_dist, *candidate)
+        })
+        .collect();
+    scored.sort_by(|a, b| b.0.total_cmp(&a.0));
+    scored.into_iter().map(|(_, point)| point).collect()
 }
 
 pub fn select_ai_move(state: &mut GameState) -> Option<Move> {

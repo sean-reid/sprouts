@@ -10,7 +10,16 @@ import type { Fixture } from "../../web/record";
 // Every step here replays moves through the engine, which on the 1000
 // board takes several seconds per apply.
 const expect = baseExpect.configure({ timeout: 20_000 });
-import { frameOf, nodeOnScreen, openBoard, playExchange, shot, strokeCells } from "./helpers";
+import {
+  clickAway,
+  frameOf,
+  nodeOnScreen,
+  openBoard,
+  PLACING_HINT,
+  playExchange,
+  shot,
+  strokeCells,
+} from "./helpers";
 
 const entries = (page: Page) => page.locator("#moveList li");
 
@@ -38,9 +47,8 @@ async function playDetourExchange(page: Page): Promise<void> {
   await page.mouse.move(via.x, via.y, { steps: 15 });
   await page.mouse.move(b.x, b.y, { steps: 15 });
   await page.mouse.up();
-  await expect(page.locator("#status")).toHaveText(/place a new node/);
-  await page.waitForTimeout(350);
-  await page.mouse.click(a.x + (via.x - a.x) * 0.4, a.y + (via.y - a.y) * 0.4);
+  await expect(page.locator("#status")).toHaveText(PLACING_HINT);
+  await clickAway(page);
   await expect(page.locator("#status")).toHaveText("Your turn!", { timeout: 60_000 });
 }
 

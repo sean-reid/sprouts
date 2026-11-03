@@ -42,9 +42,6 @@ export interface Board {
 }
 
 export interface GameState extends Board {
-  // Tracked per gesture rather than as a device flag so hybrids (Surface,
-  // iPad with keyboard) can use touch and mouse in the same session.
-  lastInputWasTouch: boolean;
   reducedMotion: boolean;
 }
 

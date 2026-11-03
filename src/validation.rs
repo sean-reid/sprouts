@@ -31,7 +31,9 @@ pub enum RejectionKind {
     PathTooCloseToNode,
     PathCrossesLine,
     NodeOffPath,
+    NodeOffBoard,
     NodeNotInMiddle,
+    NoRoomForNode,
 }
 
 /// Segment i of the submitted path joins its points i and i+1; the range is
@@ -131,6 +133,14 @@ impl Rejection {
             RejectionKind::PathTooCloseToNode,
             id,
             "Path passes too close to an existing node",
+        )
+    }
+
+    pub fn no_room(at: Point) -> Self {
+        Self::point(
+            RejectionKind::NoRoomForNode,
+            at,
+            "No room for a new node on this line",
         )
     }
 }
@@ -519,6 +529,14 @@ pub fn validate_new_node_placement(
     board_size: usize,
 ) -> Result<(), Rejection> {
     let s = scale(board_size);
+    let edge = board_size as f64;
+    if !(0.0..=edge).contains(&new_node_pos.x) || !(0.0..=edge).contains(&new_node_pos.y) {
+        return Err(Rejection::point(
+            RejectionKind::NodeOffBoard,
+            *new_node_pos,
+            "New node must be on the board",
+        ));
+    }
     let (closest, dist_to_path) = closest_point_on_polyline(polyline, new_node_pos);
     if dist_to_path > 5.0 * s {
         debug_log!(
@@ -687,6 +705,34 @@ mod tests {
             BoardLocation::Point {
                 at: mov.new_node_pos
             }
+        );
+    }
+
+    #[test]
+    fn a_new_node_past_the_board_edge_is_rejected() {
+        let mut gs = GameState::with_board_size(2, 1000);
+        gs.nodes[0].position = p(200.0, 100.0);
+        gs.nodes[1].position = p(800.0, 100.0);
+        // An arc that leaves the board above the top edge between the nodes.
+        let polyline: Vec<Point> = (0..=40)
+            .map(|i| {
+                let t = i as f64 / 40.0;
+                p(
+                    200.0 + t * 600.0,
+                    100.0 - 140.0 * (t * std::f64::consts::PI).sin(),
+                )
+            })
+            .collect();
+        let outside = polyline[20];
+        let inside = polyline[3];
+        assert!(outside.y < 0.0);
+        let flat = Move::new(0, 1, polyline.clone(), outside, Player::Human, 1000).flatten(1.5);
+        let rejection = validate_new_node_placement(&flat, &outside, &gs.nodes, 1000).unwrap_err();
+        assert_eq!(rejection.kind, RejectionKind::NodeOffBoard);
+        assert_eq!(rejection.at, BoardLocation::Point { at: outside });
+        assert_eq!(
+            validate_new_node_placement(&flat, &inside, &gs.nodes, 1000).map_err(|r| r.kind),
+            Err(RejectionKind::NodeNotInMiddle)
         );
     }
 

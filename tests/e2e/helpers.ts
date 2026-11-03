@@ -114,12 +114,72 @@ export async function expectNodeDrawnAt(page: Page, at: Client): Promise<void> {
   await expect.poll(() => blueSamplesAround(page, at)).toBeGreaterThanOrEqual(6);
 }
 
+export const PLACING_HINT = /Drag the dot/;
+
+// Locks a straight stroke between two nodes and returns its midpoint, where
+// the dot lands on an empty board.
 export async function drawBetween(page: Page, from: number, to: number): Promise<Client> {
   const a = await nodeOnScreen(page, from, 4);
   const b = await nodeOnScreen(page, to, 4);
   await mouseStroke(page, a, b);
-  await expect(page.locator("#status")).toHaveText(/place a new node/);
+  await expect(page.locator("#status")).toHaveText(PLACING_HINT);
   return { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+}
+
+export type DotColour = "green" | "red";
+
+// Reads the canvas pixel under a client point and says which placement dot
+// colour it is, or null for anything else.
+export function dotColourAt(page: Page, at: Client): Promise<DotColour | null> {
+  return page.evaluate(({ x, y }) => {
+    const canvas = document.getElementById("canvas") as HTMLCanvasElement;
+    const rect = canvas.getBoundingClientRect();
+    const px = Math.round((x - rect.left) * (canvas.width / rect.width));
+    const py = Math.round((y - rect.top) * (canvas.height / rect.height));
+    const [r, g, b] = canvas.getContext("2d")!.getImageData(px, py, 1, 1).data;
+    const near = (cr: number, cg: number, cb: number) => Math.hypot(r! - cr, g! - cg, b! - cb) < 60;
+    if (near(0x10, 0xb9, 0x81)) return "green";
+    if (near(0xef, 0x44, 0x44)) return "red";
+    return null;
+  }, at);
+}
+
+export async function expectDotAt(page: Page, at: Client, colour: DotColour = "green") {
+  await expect.poll(() => dotColourAt(page, at)).toBe(colour);
+}
+
+// A spot in the canvas corner, clear of the nodes and of any dot on the
+// first chord, where a press commits the placement.
+export function awayFrom(frame: Frame): Client {
+  return { x: frame.left + 24, y: frame.top + 24 };
+}
+
+export async function clickAway(page: Page): Promise<void> {
+  const at = awayFrom(await frameOf(page));
+  await page.mouse.click(at.x, at.y);
+}
+
+export async function tapAway(page: Page): Promise<void> {
+  const at = awayFrom(await frameOf(page));
+  await page.touchscreen.tap(at.x, at.y);
+}
+
+// Counts loupe-ring amber pixels anywhere on the canvas.
+export function ringPixels(page: Page): Promise<number> {
+  return page.evaluate(() => {
+    const canvas = document.getElementById("canvas") as HTMLCanvasElement;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return 0;
+    const { data } = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    let hits = 0;
+    for (let i = 0; i < data.length; i += 4) {
+      const r = data[i] ?? 0;
+      const g = data[i + 1] ?? 0;
+      const b = data[i + 2] ?? 0;
+      if (r > 200 && g > 150 && g < 220 && b < 100) hits++;
+    }
+    return hits;
+  });
 }
 
 export async function mouseStroke(page: Page, a: Client, b: Client): Promise<void> {
@@ -200,16 +260,29 @@ export async function plainWheel(page: Page, deltaY: number): Promise<number> {
 }
 
 // Installed before the page loads so a test can hold one request to the
-// worker back; the worker then answers a newer request first.
-export function holdOneWorkerMessage(): void {
+// worker back, so the worker answers a newer request first, or fail one
+// with an error reply the worker never saw.
+export function interceptWorkerMessages(): void {
   const post = Worker.prototype.postMessage;
   let hold: { method: string; ms: number } | null = null;
-  (window as unknown as { holdNext: typeof holdNext }).holdNext = holdNext;
+  let fail: { method: string; error: string } | null = null;
+  const hooks = window as unknown as { holdNext: typeof holdNext; failNext: typeof failNext };
+  hooks.holdNext = holdNext;
+  hooks.failNext = failNext;
   function holdNext(method: string, ms: number): void {
     hold = { method, ms };
   }
+  function failNext(method: string, error: string): void {
+    fail = { method, error };
+  }
   Worker.prototype.postMessage = function (this: Worker, ...args: unknown[]) {
-    const envelope = args[0] as { method?: string } | undefined;
+    const envelope = args[0] as { id?: number; method?: string } | undefined;
+    if (fail && envelope?.method === fail.method) {
+      const data = { id: envelope.id, ok: false, error: fail.error };
+      fail = null;
+      setTimeout(() => this.dispatchEvent(new MessageEvent("message", { data })));
+      return;
+    }
     if (hold && envelope?.method === hold.method) {
       const { ms } = hold;
       hold = null;
@@ -227,6 +300,40 @@ export function holdNext(page: Page, method: string, ms: number): Promise<void> 
     },
     [method, ms] as const,
   );
+}
+
+export function failNext(page: Page, method: string, error: string): Promise<void> {
+  return page.evaluate(
+    ([m, e]) => {
+      (window as unknown as { failNext: (m: string, e: string) => void }).failNext(m, e);
+    },
+    [method, error] as const,
+  );
+}
+
+// Client position of the placement dot, from the centroid of its green
+// pixels, or null when none is drawn.
+export function findDot(page: Page): Promise<Client | null> {
+  return page.evaluate(() => {
+    const canvas = document.getElementById("canvas") as HTMLCanvasElement;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return null;
+    const rect = canvas.getBoundingClientRect();
+    const dpr = canvas.width / rect.width;
+    const { data, width } = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    let count = 0;
+    let sx = 0;
+    let sy = 0;
+    for (let i = 0; i < data.length; i += 4) {
+      const [r, g, b] = [data[i] ?? 0, data[i + 1] ?? 0, data[i + 2] ?? 0];
+      if (Math.hypot(r - 0x10, g - 0xb9, b - 0x81) >= 40) continue;
+      count++;
+      sx += (i / 4) % width;
+      sy += Math.floor(i / 4 / width);
+    }
+    if (count === 0) return null;
+    return { x: rect.left + sx / count / dpr, y: rect.top + sy / count / dpr };
+  });
 }
 
 export type Rgb = [number, number, number];
@@ -313,7 +420,7 @@ export async function wheelZoomTo(
   return t;
 }
 
-function clampToViewport(frame: Frame, t: Transform): Transform {
+export function clampToViewport(frame: Frame, t: Transform): Transform {
   const board = frame.board * t.scale;
   const axis = (offset: number, viewport: number): number =>
     board <= viewport ? (viewport - board) / 2 : Math.min(0, Math.max(viewport - board, offset));
@@ -338,8 +445,8 @@ export async function openBoard(page: Page, path = "/"): Promise<void> {
 // One human move and the AI's reply, with the mouse.
 export async function playExchange(page: Page): Promise<void> {
   const mid = await drawBetween(page, 0, 1);
-  await page.waitForTimeout(350);
-  await page.mouse.click(mid.x, mid.y);
+  await expectDotAt(page, mid);
+  await clickAway(page);
   await expect(page.locator("#status")).toHaveText("Your turn!", { timeout: 60_000 });
 }
 

@@ -9,6 +9,7 @@ import {
   openBoard,
   pinch,
   pinchDrag,
+  PLACING_HINT,
   plainWheel,
   shot,
   touchDrag,
@@ -35,7 +36,7 @@ test("ctrl+wheel zooms at a node and a stroke from it still locks a line", async
   await shot(page, "zoom-wheel");
 
   await mouseStroke(page, a, b);
-  await expect(status(page)).toHaveText(/place a new node/);
+  await expect(status(page)).toHaveText(PLACING_HINT);
   await shot(page, "zoom-wheel-locked");
 
   await page.keyboard.press("Escape");
@@ -98,8 +99,8 @@ test("pinch zooms and a touch stroke still locks a line", async ({ page }) => {
   await shot(page, "zoom-pinch");
 
   await touchStroke(cdp, a, b);
-  await expect(status(page)).toHaveText(/Tap Confirm/);
-  await expect(page.locator("#mobileOverlay")).toBeVisible();
+  await expect(status(page)).toHaveText(PLACING_HINT);
+  await expect(page.locator("#cancelBtn")).toBeVisible();
   await shot(page, "zoom-pinch-locked");
 });
 
@@ -120,7 +121,7 @@ test("double tap zooms in at a node and double tap again fits", async ({ page })
   await page.touchscreen.tap(a.x, a.y);
   await page.touchscreen.tap(a.x, a.y);
   await expectNodeDrawnAt(page, nodeAt(frame, fitted, 1));
-  await expect(page.locator("#mobileOverlay")).toBeHidden();
+  await expect(page.locator("#cancelBtn")).toBeHidden();
 });
 
 test("the backing store follows devicePixelRatio", async ({ page }) => {
@@ -141,11 +142,11 @@ test("a click on a node without movement changes nothing", async ({ page }) => {
   await page.mouse.up();
   await page.waitForTimeout(300);
   await expect(status(page)).toHaveText("Draw a line between two nodes");
-  await expect(page.locator("#mobileOverlay")).toBeHidden();
+  await expect(page.locator("#cancelBtn")).toBeHidden();
   await shot(page, "click-no-move");
 
   await mouseStroke(page, a, nodeAt(frame, fit(frame), 1));
-  await expect(status(page)).toHaveText(/place a new node/);
+  await expect(status(page)).toHaveText(PLACING_HINT);
 });
 
 test("a pinch mid-stroke pauses the stroke and it finishes after one finger lifts", async ({
@@ -186,6 +187,6 @@ test("a pinch mid-stroke pauses the stroke and it finishes after one finger lift
 
   await touchDrag(cdp, rest, bZoomed, 1);
   await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
-  await expect(status(page)).toHaveText(/Tap Confirm/);
+  await expect(status(page)).toHaveText(PLACING_HINT);
   await shot(page, "zoom-mid-stroke-locked");
 });

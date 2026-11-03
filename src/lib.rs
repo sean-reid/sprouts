@@ -15,7 +15,10 @@ pub mod replay;
 mod types;
 mod validation;
 
-use protocol::{AiMove, Curve, FitQuery, Move, Outcome, Placement, PlacementQuery, Snapshot};
+use protocol::{
+    AiMove, AutoPlacement, AutoPlacementQuery, Curve, FitQuery, Move, Outcome, Placement,
+    PlacementQuery, Snapshot,
+};
 use tsify::{Ts, Tsify};
 use types::{GameState, Player};
 use wasm_bindgen::prelude::*;
@@ -64,5 +67,13 @@ impl SproutsGame {
 
     pub fn placement(&self, query: Ts<PlacementQuery>) -> Result<Ts<Placement>, JsError> {
         Ok(protocol::placement(&self.state, query.to_rust()?).into_ts()?)
+    }
+
+    #[wasm_bindgen(js_name = autoPlacement)]
+    pub fn auto_placement(
+        &self,
+        query: Ts<AutoPlacementQuery>,
+    ) -> Result<Ts<AutoPlacement>, JsError> {
+        Ok(protocol::auto_placement(&self.state, query.to_rust()?).into_ts()?)
     }
 }

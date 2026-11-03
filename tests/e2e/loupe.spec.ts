@@ -1,6 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
 import {
-  drawBetween,
   expectNodeDrawnAt,
   fit,
   frameOf,
@@ -8,6 +7,8 @@ import {
   openBoard,
   pinch,
   pinchDrag,
+  playExchange,
+  ringPixels,
   shot,
   touchDrag,
   zoomAt,
@@ -60,24 +61,6 @@ function ringSamplesAround(page: Page, centre: Client): Promise<number> {
     },
     [centre.x, centre.y, RADIUS] as const,
   );
-}
-
-// Counts ring-amber pixels anywhere on the canvas.
-function ringPixels(page: Page): Promise<number> {
-  return page.evaluate(() => {
-    const canvas = document.getElementById("canvas") as HTMLCanvasElement;
-    const ctx = canvas.getContext("2d");
-    if (!ctx) return 0;
-    const { data } = ctx.getImageData(0, 0, canvas.width, canvas.height);
-    let hits = 0;
-    for (let i = 0; i < data.length; i += 4) {
-      const r = data[i] ?? 0;
-      const g = data[i + 1] ?? 0;
-      const b = data[i + 2] ?? 0;
-      if (r > 200 && g > 150 && g < 220 && b < 100) hits++;
-    }
-    return hits;
-  });
 }
 
 // True when every canvas pixel within the radius of a client point is board
@@ -138,16 +121,9 @@ function besideFirstChord(frame: Frame): Client {
   return { x: along.x + inward.x * 10, y: along.y + inward.y * 10 };
 }
 
-async function oneExchange(page: Page): Promise<void> {
-  const mid = await drawBetween(page, 0, 1);
-  await page.waitForTimeout(350);
-  await page.mouse.click(mid.x, mid.y);
-  await expect(page.locator("#status")).toHaveText("Your turn!", { timeout: 60_000 });
-}
-
 test.beforeEach(async ({ page }) => {
   await openBoard(page);
-  await oneExchange(page);
+  await playExchange(page);
 });
 
 test("a touch stroke near an existing line shows the loupe and clears away from it", async ({

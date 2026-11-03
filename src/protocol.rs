@@ -4,6 +4,7 @@ use tsify::Tsify;
 use crate::ai;
 use crate::curve::{self, Cubic};
 use crate::game_over;
+use crate::geometry;
 use crate::node_classifier;
 use crate::types::{self, GameState, Line, Node, Player, Point};
 use crate::validation::{self, Rejection};
@@ -93,6 +94,19 @@ pub struct Placement {
     pub valid: bool,
 }
 
+#[derive(Debug, Clone, Deserialize, Tsify)]
+pub struct AutoPlacementQuery {
+    pub segments: Vec<Cubic>,
+}
+
+/// The best spot on a locked curve for its new node, or why there is none.
+#[derive(Debug, Clone, PartialEq, Serialize, Tsify)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum AutoPlacement {
+    Placed { placement: Placement },
+    Rejected { rejection: Rejection },
+}
+
 pub fn start(initial_nodes: usize, board_size: usize, first_player: Player) -> GameState {
     let mut state = GameState::with_board_size(initial_nodes, board_size);
     state.current_player = first_player;
@@ -165,6 +179,40 @@ pub fn placement(state: &GameState, query: PlacementQuery) -> Placement {
     Placement {
         position: hit.point,
         valid,
+    }
+}
+
+/// Candidates are spaced two curve tolerances apart along the flattening,
+/// ranked by clearance, and the first that validates wins.
+pub fn auto_placement(state: &GameState, query: AutoPlacementQuery) -> AutoPlacement {
+    let tolerance = curve::tolerance(state.board_size);
+    let flat = curve::flatten(&query.segments, tolerance);
+    let path = geometry::resample_polyline(&flat, tolerance * 2.0);
+    let valid = |at: &Point| {
+        validation::validate_new_node_placement(&flat, at, &state.nodes, state.board_size).is_ok()
+    };
+    let chosen = ai::rank_node_placements(&path, state)
+        .into_iter()
+        .filter_map(|at| curve::nearest(&query.segments, &at))
+        .map(|hit| hit.point)
+        .find(valid);
+    match chosen {
+        Some(position) => AutoPlacement::Placed {
+            placement: Placement {
+                position,
+                valid: true,
+            },
+        },
+        None => {
+            let centre = state.board_size as f64 / 2.0;
+            let midpoint = path
+                .get(path.len() / 2)
+                .copied()
+                .unwrap_or(Point::new(centre, centre));
+            AutoPlacement::Rejected {
+                rejection: Rejection::no_room(midpoint),
+            }
+        }
     }
 }
 
@@ -524,5 +572,92 @@ mod tests {
         assert!(placed.valid);
         assert!(placed.position.distance_to(&off_path) < 10.0);
         assert_ne!(placed.position, off_path);
+    }
+
+    fn suggested(state: &GameState, segments: Vec<Cubic>) -> AutoPlacement {
+        auto_placement(state, AutoPlacementQuery { segments })
+    }
+
+    #[test]
+    fn the_suggested_spot_on_an_open_chord_is_its_middle_and_valid() {
+        let state = GameState::new(4);
+        let a = state.nodes[0].position;
+        let b = state.nodes[1].position;
+        let segments = fitted(&state, straight(a, b, 10));
+        let AutoPlacement::Placed { placement } = suggested(&state, segments.clone()) else {
+            panic!("an open chord has room for a node");
+        };
+        assert!(placement.valid);
+        let mid = Point::new((a.x + b.x) / 2.0, (a.y + b.y) / 2.0);
+        assert!(placement.position.distance_to(&mid) < 2.0);
+        let wire = serde_json::to_value(suggested(&state, segments)).unwrap();
+        assert_eq!(wire["kind"], json!("placed"));
+        assert_eq!(wire["placement"]["valid"], json!(true));
+    }
+
+    #[test]
+    fn the_suggested_spot_stays_on_the_board_when_the_curve_leaves_it() {
+        let mut state = GameState::new(4);
+        state.nodes[0].position = Point::new(300.0, 60.0);
+        state.nodes[1].position = Point::new(700.0, 60.0);
+        let arc: Vec<Point> = (0..=40)
+            .map(|i| {
+                let t = i as f64 / 40.0;
+                Point::new(
+                    300.0 + t * 400.0,
+                    60.0 - 100.0 * (t * std::f64::consts::PI).sin(),
+                )
+            })
+            .collect();
+        let segments = fitted(&state, arc);
+        let AutoPlacement::Placed { placement } = suggested(&state, segments.clone()) else {
+            panic!("the arc has room for a node inside the board");
+        };
+        assert!(placement.position.y >= 0.0);
+        assert!(placement.valid);
+        let check = placement_at(&state, segments, placement.position);
+        assert!(check.valid);
+    }
+
+    fn placement_at(state: &GameState, segments: Vec<Cubic>, at: Point) -> Placement {
+        placement(state, PlacementQuery { segments, at })
+    }
+
+    #[test]
+    fn a_loop_hugging_its_node_has_no_room_and_is_rejected_at_its_midpoint() {
+        let state = GameState::new(4);
+        let a = state.nodes[0].position;
+        let radius = 8.0;
+        let loop_path: Vec<Point> = (0..=32)
+            .map(|i| {
+                let angle = std::f64::consts::PI + 2.0 * std::f64::consts::PI * i as f64 / 32.0;
+                Point::new(
+                    a.x + radius + radius * angle.cos(),
+                    a.y + radius * angle.sin(),
+                )
+            })
+            .collect();
+        let segments = fitted(&state, loop_path);
+        let AutoPlacement::Rejected { rejection } = suggested(&state, segments) else {
+            panic!("every point of the loop is within node spacing of its node");
+        };
+        assert_eq!(rejection.kind, validation::RejectionKind::NoRoomForNode);
+        let validation::BoardLocation::Point { at } = rejection.at else {
+            panic!("the rejection points at the curve");
+        };
+        let far_side = Point::new(a.x + 2.0 * radius, a.y);
+        assert!(at.distance_to(&far_side) < 4.0);
+        let wire = serde_json::to_value(AutoPlacement::Rejected { rejection }).unwrap();
+        assert_eq!(wire["kind"], json!("rejected"));
+        assert_eq!(wire["rejection"]["kind"], json!("noRoomForNode"));
+    }
+
+    #[test]
+    fn no_curve_has_no_room() {
+        let state = GameState::new(4);
+        assert!(matches!(
+            suggested(&state, vec![]),
+            AutoPlacement::Rejected { .. }
+        ));
     }
 }

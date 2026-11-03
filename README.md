@@ -43,7 +43,7 @@ Rust/WASM (logic, AI, validation)
 ## How to Play
 
 1. Click-drag-click between nodes (or tap-drag-tap on mobile)
-2. Click path to place new node (tap "Confirm" on mobile)
+2. Press away from the dot to place the new node
 3. Lines can't cross, nodes max out at 3 connections
 4. Last valid move wins
 

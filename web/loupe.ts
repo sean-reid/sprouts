@@ -69,6 +69,11 @@ export class Loupe {
     const distance = nearestFeature(world, state, view);
     const show = this.world ? distance <= LOUPE_HIDE_BEYOND : distance <= LOUPE_SHOW_WITHIN;
     if (!show) return this.hide();
+    return this.follow(world);
+  }
+
+  // Keeps the lens on the finger wherever it is; returns whether it moved.
+  follow(world: Point): boolean {
     const moved = !this.world || this.world.x !== world.x || this.world.y !== world.y;
     this.world = { x: world.x, y: world.y };
     return moved;
