@@ -9,7 +9,7 @@
 //! clearance by construction, and the free triangles disconnecting the two
 //! ends is what "no room" means.
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use spade::handles::{FixedFaceHandle, FixedVertexHandle, InnerTag};
 use spade::{ConstrainedDelaunayTriangulation, Point2, PositionInTriangulation, Triangulation};
@@ -19,7 +19,7 @@ use super::Unroutable;
 use crate::curve;
 use crate::embedding::{half_edge_path, leaving_angle, turn};
 use crate::face::{Component, FaceId, HalfEdgeId, Move as FaceMove, NodeId};
-use crate::geometry::closest_point_on_segment;
+use crate::geometry::{closest_point_on_polyline, closest_point_on_segment};
 use crate::types::{scale, GameState, Point, AI_INTERSECTION_TOLERANCE, MIN_PATH_CLEARANCE};
 
 type Cdt = ConstrainedDelaunayTriangulation<Point2<f64>>;
@@ -35,7 +35,7 @@ const MITRE_LIMIT: f64 = 4.0;
 const RIM_STEP: f64 = 8.0;
 /// How far from an end node, in clearances, its leg may reach into the
 /// free region.
-const LEG_REACH: f64 = 8.0;
+const LEG_REACH: f64 = 20.0;
 /// Entries kept per end, nearest first.
 const LEGS: usize = 4;
 /// Least angle, in radians, between a leg and either spoke of its corner,
@@ -87,6 +87,9 @@ pub(super) struct Arena {
     /// The move's end nodes, which only the legs may come near.
     ends: Vec<Point>,
     end_clearance: f64,
+    /// The wall clearance the face was eroded by.
+    #[cfg(test)]
+    clearance: f64,
     rim: Vec<FixedVertexHandle>,
 }
 
@@ -150,6 +153,9 @@ const SAME_POINT: f64 = 1e-7;
 /// clearance curve unmarked.
 struct Arrangement {
     segments: Vec<(Point, Point, bool)>,
+    /// Endpoint bits of every segment, lower endpoint first, so a leaf
+    /// spoke walked out and back goes in once.
+    seen: BTreeSet<[u64; 4]>,
     cells: Vec<Vec<usize>>,
     cell: f64,
 }
@@ -158,6 +164,7 @@ impl Arrangement {
     fn new(board: f64) -> Self {
         Self {
             segments: Vec::new(),
+            seen: BTreeSet::new(),
             cells: vec![Vec::new(); GRID * GRID],
             cell: board / GRID as f64,
         }
@@ -171,6 +178,13 @@ impl Arrangement {
         for i in 0..pts.len() {
             let (p, q) = (pts[i], pts[(i + 1) % pts.len()]);
             if p.distance_to(&q) < SAME_POINT {
+                continue;
+            }
+            let mut key = [p.x.to_bits(), p.y.to_bits(), q.x.to_bits(), q.y.to_bits()];
+            if (q.x, q.y) < (p.x, p.y) {
+                key.rotate_left(2);
+            }
+            if !self.seen.insert(key) {
                 continue;
             }
             let index = self.segments.len();
@@ -220,8 +234,12 @@ impl Arrangement {
                         }
                     }
                     if let Some(x) = crate::geometry::segment_intersection(&a, &b, &c, &d) {
+                        // A crossing at an endpoint is the endpoint's own cut
+                        // above, placed exactly; the computed one would sit a
+                        // rounding error off it.
+                        let at_end = [a, b, c, d].iter().any(|e| e.distance_to(&x) < SAME_POINT);
                         let (ta, tb) = (along((a, b), x), along((c, d), x));
-                        if ta > 0.0 && ta < 1.0 && tb > 0.0 && tb < 1.0 {
+                        if !at_end && ta > 0.0 && ta < 1.0 && tb > 0.0 && tb < 1.0 {
                             cuts[i].push((ta, x));
                             cuts[j].push((tb, x));
                         }
@@ -237,6 +255,7 @@ impl Arrangement {
     fn triangulate(self) -> Result<(Cdt, Vec<bool>), Unroutable> {
         let cuts = self.cuts();
         let mut cdt = Cdt::new();
+        let mut snap = Snap::default();
         let bug = |_| Unroutable::Bug("triangulation");
         let mut pieces: Vec<(FixedVertexHandle, FixedVertexHandle, bool)> = Vec::new();
         for (s, &(p, q, wall)) in self.segments.iter().enumerate() {
@@ -251,11 +270,11 @@ impl Arrangement {
             ts.sort_by(|x, y| x.0.total_cmp(&y.0));
             ts.dedup_by(|x, y| (x.0 - y.0).abs() * len < SAME_POINT);
             let mut handles = Vec::with_capacity(ts.len() + 2);
-            handles.push(cdt.insert(point2(p)).map_err(bug)?);
+            handles.push(cdt.insert(point2(snap.at(p))).map_err(bug)?);
             for (_, x) in ts {
-                handles.push(cdt.insert(point2(x)).map_err(bug)?);
+                handles.push(cdt.insert(point2(snap.at(x))).map_err(bug)?);
             }
-            handles.push(cdt.insert(point2(q)).map_err(bug)?);
+            handles.push(cdt.insert(point2(snap.at(q))).map_err(bug)?);
             for w in handles.windows(2) {
                 if w[0] != w[1] {
                     pieces.push((w[0], w[1], wall));
@@ -269,6 +288,24 @@ impl Arrangement {
                 // A crossing the arrangement missed, at an angle too shallow
                 // for its intersection test; the triangulation splits it.
                 cdt.add_constraint_and_split(u, v, |p| p);
+            }
+        }
+        // A wall piece the triangulation left uncovered would let the free
+        // region leak through it.
+        for &(u, v, wall) in &pieces {
+            let covered = spade::LineIntersectionIterator::new_from_handles(&cdt, u, v).all(
+                |hit| match hit {
+                    spade::Intersection::EdgeOverlap(e) => e.is_constraint_edge(),
+                    spade::Intersection::VertexIntersection(_) => true,
+                    spade::Intersection::EdgeIntersection(_) => false,
+                },
+            );
+            if !covered {
+                return Err(Unroutable::Bug(if wall {
+                    "wall gap"
+                } else {
+                    "clearance gap"
+                }));
             }
         }
         // Wall pieces may have been split further, so the wall edges are
@@ -286,6 +323,34 @@ impl Arrangement {
             }
         }
         Ok((cdt, wall_edge))
+    }
+}
+
+/// Points already in the triangulation, so a point computed a rounding
+/// error off one of them becomes that vertex and not a second one beside
+/// it, which the constraint splitting cannot tell apart.
+#[derive(Default)]
+struct Snap {
+    cells: BTreeMap<(i64, i64), Vec<Point>>,
+}
+
+impl Snap {
+    fn at(&mut self, p: Point) -> Point {
+        let (cx, cy) = (
+            (p.x / SAME_POINT).floor() as i64,
+            (p.y / SAME_POINT).floor() as i64,
+        );
+        for dx in -1..=1 {
+            for dy in -1..=1 {
+                if let Some(near) = self.cells.get(&(cx + dx, cy + dy)) {
+                    if let Some(q) = near.iter().find(|q| q.distance_to(&p) < SAME_POINT) {
+                        return *q;
+                    }
+                }
+            }
+        }
+        self.cells.entry((cx, cy)).or_default().push(p);
+        p
     }
 }
 
@@ -515,6 +580,8 @@ impl Arena {
             node_clearance,
             ends,
             end_clearance,
+            #[cfg(test)]
+            clearance: c,
             rim,
         };
         arena.classify(c);
@@ -579,6 +646,72 @@ impl Arena {
 
     pub(super) fn walls(&self) -> &[(Point, Point)] {
         &self.walls.segments
+    }
+
+    /// The arena as an SVG: free triangles filled, constraints grey, walls
+    /// black, for diagnosis.
+    #[cfg(test)]
+    pub(super) fn svg(&self, board: f64) -> String {
+        let mut out = format!(
+            "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"1000\" height=\"1000\" viewBox=\"0 0 {board} {board}\"><rect width=\"100%\" height=\"100%\" fill=\"white\"/>"
+        );
+        for t in self.cdt.inner_faces() {
+            if self.free[t.fix().index()] {
+                let [p, q, r] = t.positions();
+                let wrong = self.walls.distance(self.centroid(t.fix()), self.clearance)
+                    < self.clearance - 1e-7;
+                let fill = if wrong { "#f66" } else { "#cfc" };
+                out.push_str(&format!(
+                    "<polygon points=\"{:.2},{:.2} {:.2},{:.2} {:.2},{:.2}\" fill=\"{fill}\" stroke=\"#9c9\" stroke-width=\"0.3\"/>",
+                    p.x, p.y, q.x, q.y, r.x, r.y
+                ));
+            }
+        }
+        for e in self.cdt.undirected_edges() {
+            if !e.is_constraint_edge() {
+                continue;
+            }
+            let [p, q] = e.positions();
+            let colour = if self.wall_edge[e.fix().index()] {
+                "black"
+            } else {
+                "#999"
+            };
+            out.push_str(&format!(
+                "<line x1=\"{:.2}\" y1=\"{:.2}\" x2=\"{:.2}\" y2=\"{:.2}\" stroke=\"{colour}\" stroke-width=\"0.8\"/>",
+                p.x, p.y, q.x, q.y
+            ));
+        }
+        out.push_str("</svg>");
+        out
+    }
+
+    /// Free and total triangle counts, and any free triangle touching a
+    /// wall, for diagnosis.
+    #[cfg(test)]
+    pub(super) fn describe(&self) -> String {
+        let mut touching = Vec::new();
+        for t in self.cdt.inner_faces() {
+            if !self.free[t.fix().index()] {
+                continue;
+            }
+            for p in t.positions().map(point) {
+                if self.walls.distance(p, 1.0) < 1e-6 {
+                    let c = self.centroid(t.fix());
+                    touching.push(format!(
+                        "{p:?} (centroid {c:?} at {:.2} from a wall)",
+                        self.walls.distance(c, 100.0)
+                    ));
+                }
+            }
+        }
+        format!(
+            "{} of {} triangles free, {} walls, {} nodes kept clear; free triangles on wall vertices: {touching:?}",
+            self.free.iter().filter(|f| **f).count(),
+            self.cdt.num_inner_faces(),
+            self.walls.segments.len(),
+            self.nodes.len()
+        )
     }
 
     pub(super) fn vertex_point(&self, v: FixedVertexHandle) -> Point {
@@ -659,10 +792,23 @@ impl Arena {
     }
 
     /// Whether the segment from `a` to `p` crosses no wall, keeps the node
-    /// clearance from every node it must, and past the stretch where the
-    /// validator forgives a crossing at the node keeps two fit tolerances
-    /// from every wall, so the fitted curve cannot cross a spoke.
-    fn leg_clear(&self, a: Point, p: Point, forgiven: f64, tolerance: f64) -> bool {
+    /// clearance from every node it must, ends two fit tolerances from
+    /// every wall, and past the stretch where the validator forgives a
+    /// crossing at the node keeps two fit tolerances from every wall but
+    /// the node's own spokes, so the fitted curve cannot cross one. The
+    /// spokes diverge from the leg's start, and a straight leg's fit stays
+    /// straight, so they need no margin along the leg.
+    fn leg_clear(
+        &self,
+        a: Point,
+        p: Point,
+        spokes: &[Vec<Point>],
+        forgiven: f64,
+        tolerance: f64,
+    ) -> bool {
+        if self.walls.distance(p, 2.0 * tolerance) < 2.0 * tolerance {
+            return false;
+        }
         if self
             .walls
             .segments
@@ -684,12 +830,19 @@ impl Arena {
         }
         let t = forgiven / len;
         let from = Point::new(a.x + (p.x - a.x) * t, a.y + (p.y - a.y) * t);
-        self.walls.segments.iter().all(|(u, v)| {
-            [from, p]
+        let on_spoke = |u: &Point, v: &Point| {
+            let mid = Point::new((u.x + v.x) / 2.0, (u.y + v.y) / 2.0);
+            spokes
                 .iter()
-                .all(|q| closest_point_on_segment(u, v, q).1 >= 2.0 * tolerance)
-                && closest_point_on_segment(&from, &p, u).1 >= 2.0 * tolerance
-                && closest_point_on_segment(&from, &p, v).1 >= 2.0 * tolerance
+                .any(|spoke| closest_point_on_polyline(spoke, &mid).1 < SAME_POINT * 1e3)
+        };
+        self.walls.segments.iter().all(|(u, v)| {
+            on_spoke(u, v)
+                || ([from, p]
+                    .iter()
+                    .all(|q| closest_point_on_segment(u, v, q).1 >= 2.0 * tolerance)
+                    && closest_point_on_segment(&from, &p, u).1 >= 2.0 * tolerance
+                    && closest_point_on_segment(&from, &p, v).1 >= 2.0 * tolerance)
         })
     }
 
@@ -716,6 +869,14 @@ impl Arena {
             }
         }
         let radius = MIN_PATH_CLEARANCE * scale(state.board_size);
+        let spokes: Vec<Vec<Point>> = state
+            .face
+            .rotation(v)
+            .iter()
+            .map(|&h| half_edge_path(state, h))
+            .collect();
+        // A narrow corner gets a narrower margin; the leg is straight, so
+        // the embedding reads its heading exactly.
         let wedge = at.map(|h| {
             let rotation = state.face.rotation(v);
             let k = rotation.iter().position(|&x| x == h).expect("own spoke");
@@ -727,7 +888,7 @@ impl Arena {
             } else {
                 turn(from, angle(next))
             };
-            (from, span)
+            (from, span, LEG_MARGIN.min(span / 4.0))
         });
         let reach = LEG_REACH * c;
         // Half the distance from a node within which the validator lets a
@@ -751,14 +912,14 @@ impl Arena {
             if tris.is_empty() {
                 continue;
             }
-            if let Some((from, span)) = wedge {
+            if let Some((from, span, margin)) = wedge {
                 let heading = (a.y - p.y).atan2(p.x - a.x);
                 let into = turn(from, heading);
-                if into < LEG_MARGIN || into > span - LEG_MARGIN {
+                if into < margin || into > span - margin {
                     continue;
                 }
             }
-            if !self.leg_clear(a, p, forgiven, tolerance) {
+            if !self.leg_clear(a, p, &spokes, forgiven, tolerance) {
                 continue;
             }
             out.push(Entry {

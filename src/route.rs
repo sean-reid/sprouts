@@ -112,23 +112,39 @@ pub fn route_cheap(state: &GameState, mv: &FaceMove) -> Result<Move, Unroutable>
 }
 
 fn route_at(state: &GameState, mv: &FaceMove, want: &Rules) -> Result<Move, Unroutable> {
-    let Rules {
-        clearance,
-        node_clearance,
-        spacing,
-        ..
-    } = *want;
     if mv.a == mv.b && mv.enclosed.is_empty() {
-        return small_loop::route(state, mv, clearance, node_clearance);
+        return small_loop::route(state, mv, want.clearance, want.node_clearance);
     }
-    // The fit may move the curve a tolerance off the path, and the walls
-    // are flattenings a tolerance off their curves.
-    let c = clearance + curve::tolerance(state.board_size);
+    let (arena, path) = plan(state, mv, want)?;
+    // The relaxed path is the one wanted; the taut path already keeps
+    // every clearance when the relaxation ends up somewhere it cannot be
+    // used.
+    match relax(state, mv, want, &arena, &path) {
+        Some(relaxed) => finish(state, mv, relaxed).or_else(|_| finish(state, mv, path)),
+        None => finish(state, mv, path),
+    }
+}
+
+/// The wall clearance the face is eroded by: the fit may move the curve a
+/// tolerance off the path, and the walls are flattenings a tolerance off
+/// their curves.
+fn eroded_by(state: &GameState, want: &Rules) -> f64 {
+    want.clearance + curve::tolerance(state.board_size)
+}
+
+/// The taut path for `mv` through the eroded face, legs included, in the
+/// homotopy class the move names.
+fn plan(
+    state: &GameState,
+    mv: &FaceMove,
+    want: &Rules,
+) -> Result<(erode::Arena, Vec<Point>), Unroutable> {
+    let c = eroded_by(state, want);
     let face = state
         .face
         .corner_face(mv.a, mv.at_a)
         .map_err(|_| Unroutable::Bug("corner"))?;
-    let arena = erode::Arena::build(state, face, mv.a, mv.b, c, node_clearance)?;
+    let arena = erode::Arena::build(state, face, mv.a, mv.b, c, want.node_clearance)?;
     let entries = arena.entries(state, mv.a, mv.at_a, c);
     let exits = arena.entries(state, mv.b, mv.at_b, c);
     if entries.is_empty() || exits.is_empty() {
@@ -149,8 +165,7 @@ fn route_at(state: &GameState, mv: &FaceMove, want: &Rules) -> Result<Move, Unro
         &exits,
         corridor::Want::Any,
         is_loop,
-    );
-    let first = first?;
+    )?;
     let mut path = corridor::draw(&first, &entries, &exits);
     if cuts.all != 0 {
         let wrong = wrong_sides(state, mv, own, &cuts, &path);
@@ -158,13 +173,23 @@ fn route_at(state: &GameState, mv: &FaceMove, want: &Rules) -> Result<Move, Unro
             // Flipping every bit at once is the same move drawn round the
             // other side of its own piece, and a bare node has no sides.
             let want = corridor::Want::Parity(first.parity ^ wrong);
-            let second = corridor::search(&arena, &cuts, &entries, &exits, want, is_loop);
-            path = corridor::draw(&second?, &entries, &exits);
+            let second = corridor::search(&arena, &cuts, &entries, &exits, want, is_loop)?;
+            path = corridor::draw(&second, &entries, &exits);
         }
     }
-    let Some(path) = uncross(untwist_legs(path)) else {
-        return Err(Unroutable::Room);
-    };
+    let path = uncross(untwist_legs(path)).ok_or(Unroutable::Room)?;
+    Ok((arena, path))
+}
+
+/// The path moved off the walls and nodes as far as the room allows.
+fn relax(
+    state: &GameState,
+    mv: &FaceMove,
+    want: &Rules,
+    arena: &erode::Arena,
+    path: &[Point],
+) -> Option<Vec<Point>> {
+    let ends = [state.nodes[mv.a].position, state.nodes[mv.b].position];
     let nodes: Vec<Point> = state
         .nodes
         .iter()
@@ -173,19 +198,190 @@ fn route_at(state: &GameState, mv: &FaceMove, want: &Rules) -> Result<Move, Unro
         .collect();
     // The relaxation settles a little short of its room, so the room sits a
     // line clearance above what the validator demands.
-    let room = (NODE_ROOM * spacing).max(node_clearance + clearance);
-    let obstacles =
-        clearance::Obstacles::new(arena.walls(), nodes, ends, c, node_clearance, room, spacing);
-    // The relaxed path is the one wanted; the taut path already keeps
-    // every clearance when the relaxation ends up somewhere it cannot be
-    // used.
-    match clearance::push(path.clone(), &obstacles) {
-        Some(relaxed) => {
-            let drawn = finish(state, mv, relaxed);
-            drawn.or_else(|_| finish(state, mv, path))
+    let room = (NODE_ROOM * want.spacing).max(want.node_clearance + want.clearance);
+    let obstacles = clearance::Obstacles::new(
+        arena.walls(),
+        nodes,
+        ends,
+        eroded_by(state, want),
+        want.node_clearance,
+        room,
+        want.spacing,
+    );
+    clearance::push(path.to_vec(), &obstacles)
+}
+
+/// Writes the arena and the taut path as an SVG under the directory in
+/// SPROUTS_ARENA_SVG, when set.
+#[cfg(test)]
+fn dump_arena(
+    out: &mut String,
+    state: &GameState,
+    mv: &FaceMove,
+    want: &Rules,
+    arena: &erode::Arena,
+    path: &[Point],
+) {
+    use std::fmt::Write;
+    let Ok(dir) = std::env::var("SPROUTS_ARENA_SVG") else {
+        return;
+    };
+    let file = format!(
+        "{dir}/arena-{}-{}-{}-{}.svg",
+        mv.a,
+        mv.b,
+        mv.at_a.map_or(0, |h| h + 1),
+        want.node_clearance as u32
+    );
+    let mut svg = arena.svg(state.board_size as f64);
+    let points: Vec<String> = path
+        .iter()
+        .map(|p| format!("{:.2},{:.2}", p.x, p.y))
+        .collect();
+    svg = svg.replace(
+        "</svg>",
+        &format!(
+            "<polyline points=\"{}\" fill=\"none\" stroke=\"red\" stroke-width=\"1\"/></svg>",
+            points.join(" ")
+        ),
+    );
+    std::fs::write(&file, svg).ok();
+    let _ = writeln!(out, "  arena written to {file}");
+}
+
+/// How a route of `mv` goes, step by step, for working a failure down by
+/// hand.
+#[cfg(test)]
+pub(crate) fn explain(state: &GameState, mv: &FaceMove) -> String {
+    use std::fmt::Write;
+    let mut out = String::new();
+    let base = rules(state);
+    for want in [
+        base,
+        Rules {
+            node_clearance: base.fallback,
+            ..base
+        },
+    ] {
+        let _ = writeln!(out, "node clearance {}", want.node_clearance);
+        let (arena, path) = match plan(state, mv, &want) {
+            Ok(planned) => planned,
+            Err(e) => {
+                let _ = writeln!(out, "  no plan: {e:?}");
+                let c = eroded_by(state, &want);
+                let face = state.face.corner_face(mv.a, mv.at_a).unwrap();
+                if let Ok(arena) =
+                    erode::Arena::build(state, face, mv.a, mv.b, c, want.node_clearance)
+                {
+                    let entries = arena.entries(state, mv.a, mv.at_a, c);
+                    let exits = arena.entries(state, mv.b, mv.at_b, c);
+                    let _ = writeln!(
+                        out,
+                        "  {} entries {:?}, {} exits {:?}",
+                        entries.len(),
+                        entries.iter().map(|e| e.at).collect::<Vec<_>>(),
+                        exits.len(),
+                        exits.iter().map(|e| e.at).collect::<Vec<_>>()
+                    );
+                    let _ = writeln!(out, "  {}", arena.describe());
+                    dump_arena(&mut out, state, mv, &want, &arena, &[]);
+                }
+                continue;
+            }
+        };
+        dump_arena(&mut out, state, mv, &want, &arena, &path);
+        let _ = writeln!(out, "  {}", arena.describe());
+        let _ = writeln!(
+            out,
+            "  taut path of {} points: {:?}",
+            path.len(),
+            &path[..path.len().min(4)]
+        );
+        let relaxed = relax(state, mv, &want, &arena, &path);
+        let _ = writeln!(
+            out,
+            "  relaxation {}",
+            if relaxed.is_some() {
+                "held"
+            } else {
+                "crossed a wall"
+            }
+        );
+        for (name, candidate) in [("relaxed", relaxed), ("taut", Some(path))] {
+            let Some(candidate) = candidate else { continue };
+            let _ = writeln!(
+                out,
+                "  {name}: {:?}",
+                finish(state, mv, candidate.clone()).map(|_| ())
+            );
+            let tolerance = curve::tolerance(state.board_size);
+            let dense = densify(&decimate_polyline(&candidate, tolerance), want.clearance);
+            let segments = curve::fit(&dense, tolerance);
+            let flat = curve::flatten(&segments, tolerance);
+            if let Some(node) = place_node(state, &flat, want.spacing) {
+                let mov =
+                    Move::from_segments(mv.a, mv.b, dense, segments, node, state.current_player);
+                let _ = writeln!(
+                    out,
+                    "    validation {:?}",
+                    validate_ai_move(state, &mov).map_err(|r| (r.kind, r.at))
+                );
+                for w in flat.windows(2) {
+                    for line in &state.lines {
+                        for l in line.flat.windows(2) {
+                            if clearance::proper_crossing(w[0], w[1], l[0], l[1]) {
+                                let _ = writeln!(
+                                    out,
+                                    "    curve {:?}-{:?} crosses line {} at {:?}-{:?}",
+                                    w[0], w[1], line.id, l[0], l[1]
+                                );
+                            }
+                        }
+                    }
+                }
+                let _ = writeln!(
+                    out,
+                    "    path end {:?}",
+                    &candidate[candidate.len().saturating_sub(3)..]
+                );
+                let _ = writeln!(
+                    out,
+                    "    embedding {:?}",
+                    embedding::embed(state, &mov).map_err(|r| (r.kind, r.at))
+                );
+                let radius = MIN_PATH_CLEARANCE * scale(state.board_size);
+                for (name, v) in [("a", mv.a), ("b", mv.b)] {
+                    let centre = state.nodes[v].position;
+                    let outward: Vec<Point> = if name == "a" {
+                        flat.clone()
+                    } else {
+                        flat.iter().rev().copied().collect()
+                    };
+                    let spokes: Vec<(usize, f64)> = state
+                        .face
+                        .rotation(v)
+                        .iter()
+                        .map(|&h| {
+                            (
+                                h,
+                                embedding::leaving_angle(
+                                    centre,
+                                    &embedding::half_edge_path(state, h),
+                                    radius,
+                                ),
+                            )
+                        })
+                        .collect();
+                    let _ = writeln!(
+                        out,
+                        "    leaves {name} at {:.3}, spokes {spokes:?}",
+                        embedding::leaving_angle(centre, &outward, radius)
+                    );
+                }
+            }
         }
-        None => finish(state, mv, path),
     }
+    out
 }
 
 /// Bits of the pieces the path puts on the wrong side of the move.

@@ -154,9 +154,9 @@ pub fn game(nodes: usize, picks: &[u32]) -> Result<Tally, String> {
     Ok(tally)
 }
 
-/// `games` games of 4 to 12 nodes and up to 36 picks each from a fixed
-/// seed, tallied together; a game that fails is counted as one bug.
-pub fn sweep(seed: u64, games: usize) -> Tally {
+/// The node counts and picks of `games` games of 4 to 12 nodes and up to
+/// 36 picks each, from a fixed seed.
+pub fn games(seed: u64, games: usize) -> Vec<(usize, Vec<u32>)> {
     let mut x = seed.wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1;
     let mut next = move || {
         x ^= x << 13;
@@ -164,10 +164,20 @@ pub fn sweep(seed: u64, games: usize) -> Tally {
         x ^= x << 17;
         x
     };
+    (0..games)
+        .map(|_| {
+            let nodes = 4 + (next() % 9) as usize;
+            let picks = (0..36).map(|_| next() as u32).collect();
+            (nodes, picks)
+        })
+        .collect()
+}
+
+/// The seeded games tallied together; a game that fails is counted as
+/// one bug.
+pub fn sweep(seed: u64, count: usize) -> Tally {
     let mut total = Tally::default();
-    for _ in 0..games {
-        let nodes = 4 + (next() % 9) as usize;
-        let picks: Vec<u32> = (0..36).map(|_| next() as u32).collect();
+    for (nodes, picks) in games(seed, count) {
         match game(nodes, &picks) {
             Ok(tally) => total.add(&tally),
             Err(_) => {

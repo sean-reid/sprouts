@@ -115,6 +115,35 @@ fn a_loop_enclosing_one_node_walls_it_off() {
     assert_eq!(listed(&state, 1, 2), Vec::new());
 }
 
+/// After node 0 loops round node 1, a chord from 0 to 2 has to go round
+/// the loop and keeps the line clearance from it the whole way.
+#[test]
+fn a_chord_keeps_its_clearance_from_a_loop_it_rounds() {
+    let mut state = row();
+    let around_one = listed(&state, 0, 0)
+        .into_iter()
+        .find(|m| m.enclosed.len() == 1)
+        .expect("a loop around one node");
+    let other = if around_one.enclosed == vec![1] { 2 } else { 1 };
+    let loop_move = route(&state, &around_one).unwrap();
+    state.apply_move(loop_move).unwrap();
+    state.current_player = Player::AI;
+    let loop_flat = state.lines[0].flat.clone();
+    let moves = listed(&state, 0, other);
+    assert!(!moves.is_empty());
+    let mov = route(&state, &moves[0])
+        .unwrap_or_else(|e| panic!("{e:?}: {:?}\n{}", moves[0], explain(&state, &moves[0])));
+    assert_eq!(protocol::check(&state, &mov), Ok(()));
+    let a = state.nodes[0].position;
+    let nearest = mov
+        .flatten(0.5)
+        .iter()
+        .filter(|q| q.distance_to(&a) > 3.0 * MIN_PATH_CLEARANCE_AI)
+        .map(|q| closest_point_on_polyline(&loop_flat, q).1)
+        .fold(f64::INFINITY, f64::min);
+    assert!(nearest >= MIN_PATH_CLEARANCE_AI, "{nearest}");
+}
+
 #[test]
 fn a_loop_enclosing_nothing_is_a_small_circle_clear_of_everything() {
     let mut state = row();
@@ -445,6 +474,19 @@ fn routing_gives_the_same_curves_in_another_process() {
     }
 }
 
+/// Prints every failing game of the bench's seeded sweep with its
+/// reasons: `cargo test --release bench_sweep_failures -- --ignored
+/// --nocapture`.
+#[test]
+#[ignore]
+fn bench_sweep_failures() {
+    for (i, (nodes, picks)) in sweep::games(7, 24).into_iter().enumerate() {
+        if let Err(e) = sweep::game(nodes, &picks) {
+            eprintln!("game {i} ({nodes} nodes): {e}");
+        }
+    }
+}
+
 /// Replays one random game of the sweep from SPROUTS_NODES and the
 /// comma-separated SPROUTS_PICKS, for working a failure down by hand.
 #[test]
@@ -502,7 +544,7 @@ fn diagnose_fixture() {
         for mv in std::iter::once(mv).chain(members) {
             match route(&state, &mv) {
                 Ok(mov) => eprintln!("{mv:?}: drawn, {} points", mov.polyline.len()),
-                Err(why) => eprintln!("{mv:?}: {why:?}"),
+                Err(why) => eprintln!("{mv:?}: {why:?}\n{}", explain(&state, &mv)),
             }
         }
     }
