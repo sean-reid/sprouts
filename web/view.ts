@@ -40,11 +40,14 @@ export class View {
   }
 
   resize(width: number, height: number): void {
-    const zoom = this.width && this.height ? this.zoom : 1;
-    const centre = this.toWorld({ x: this.width / 2, y: this.height / 2 });
+    const hadSize = this.width > 0 && this.height > 0;
+    const zoom = hadSize ? this.zoom : 1;
+    const centre = hadSize ? this.toWorld({ x: this.width / 2, y: this.height / 2 }) : null;
     this.width = width;
     this.height = height;
-    this.anchor(centre, { x: width / 2, y: height / 2 }, this.fitScale * zoom);
+    if (width <= 0 || height <= 0) return;
+    const half = { x: this.boardSize / 2, y: this.boardSize / 2 };
+    this.anchor(centre ?? half, { x: width / 2, y: height / 2 }, this.fitScale * zoom);
   }
 
   fit(): void {

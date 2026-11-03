@@ -61,8 +61,9 @@ export function freshBoard(): Board {
 export function watched<T extends object>(target: T, onChange: () => void): T {
   return new Proxy(target, {
     set(object, key, value) {
+      const changed = !Object.is(Reflect.get(object, key), value);
       Reflect.set(object, key, value);
-      onChange();
+      if (changed) onChange();
       return true;
     },
   });

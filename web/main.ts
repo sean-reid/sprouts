@@ -135,7 +135,7 @@ function handleStart(world: Point, kind: PointerKind): void {
     return;
   }
   if (state.mode === "placing") {
-    void handleMove(world, kind);
+    if (state.lastInputWasTouch) void handleMove(world, kind);
     return;
   }
   if (state.mode !== "idle" || state.gameOver) return;
