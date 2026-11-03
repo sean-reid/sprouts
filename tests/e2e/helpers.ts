@@ -199,6 +199,100 @@ export async function plainWheel(page: Page, deltaY: number): Promise<number> {
   return delivered;
 }
 
+// Installed before the page loads so a test can hold one request to the
+// worker back; the worker then answers a newer request first.
+export function holdOneWorkerMessage(): void {
+  const post = Worker.prototype.postMessage;
+  let hold: { method: string; ms: number } | null = null;
+  (window as unknown as { holdNext: typeof holdNext }).holdNext = holdNext;
+  function holdNext(method: string, ms: number): void {
+    hold = { method, ms };
+  }
+  Worker.prototype.postMessage = function (this: Worker, ...args: unknown[]) {
+    const envelope = args[0] as { method?: string } | undefined;
+    if (hold && envelope?.method === hold.method) {
+      const { ms } = hold;
+      hold = null;
+      setTimeout(() => Reflect.apply(post, this, args), ms);
+      return;
+    }
+    Reflect.apply(post, this, args);
+  };
+}
+
+export function holdNext(page: Page, method: string, ms: number): Promise<void> {
+  return page.evaluate(
+    ([m, delay]) => {
+      (window as unknown as { holdNext: (m: string, ms: number) => void }).holdNext(m, delay);
+    },
+    [method, ms] as const,
+  );
+}
+
+export type Rgb = [number, number, number];
+
+export function pixelAt(page: Page, at: Client): Promise<Rgb> {
+  return page.evaluate(({ x, y }) => {
+    const canvas = document.getElementById("canvas") as HTMLCanvasElement;
+    const rect = canvas.getBoundingClientRect();
+    const px = Math.round((x - rect.left) * (canvas.width / rect.width));
+    const py = Math.round((y - rect.top) * (canvas.height / rect.height));
+    const [r, g, b] = canvas.getContext("2d")!.getImageData(px, py, 1, 1).data;
+    return [r!, g!, b!];
+  }, at);
+}
+
+export function near(pixel: Rgb, hex: string, tolerance = 40): boolean {
+  const want = [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16));
+  return Math.hypot(pixel[0] - want[0]!, pixel[1] - want[1]!, pixel[2] - want[2]!) < tolerance;
+}
+
+export interface FlashProbe {
+  statusAt: number | null;
+  flashAt: number | null;
+}
+
+// Watches for the status to change to the message, then samples the pixel
+// every frame until it turns the colour, timing both in the page's clock.
+export function armFlashProbe(page: Page, at: Client, message: string, hex: string): Promise<void> {
+  return page.evaluate(
+    ({ x, y, message, hex }) => {
+      const probe: FlashProbe = { statusAt: null, flashAt: null };
+      (window as unknown as { flashProbe: FlashProbe }).flashProbe = probe;
+      const status = document.getElementById("status")!;
+      const canvas = document.getElementById("canvas") as HTMLCanvasElement;
+      const ctx = canvas.getContext("2d")!;
+      const want = [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16));
+      const sample = (): void => {
+        const rect = canvas.getBoundingClientRect();
+        const px = Math.round((x - rect.left) * (canvas.width / rect.width));
+        const py = Math.round((y - rect.top) * (canvas.height / rect.height));
+        const [r, g, b] = ctx.getImageData(px, py, 1, 1).data;
+        if (Math.hypot(r! - want[0]!, g! - want[1]!, b! - want[2]!) < 40) {
+          probe.flashAt = performance.now();
+        } else if (performance.now() - probe.statusAt! < 1000) {
+          requestAnimationFrame(sample);
+        }
+      };
+      new MutationObserver(() => {
+        if (probe.statusAt !== null || status.textContent !== message) return;
+        probe.statusAt = performance.now();
+        sample();
+      }).observe(status, { childList: true, characterData: true, subtree: true });
+    },
+    { x: at.x, y: at.y, message, hex },
+  );
+}
+
+export function readFlashProbe(page: Page): Promise<FlashProbe> {
+  return page.evaluate(() => (window as unknown as { flashProbe: FlashProbe }).flashProbe);
+}
+
+// The 4 px turn ring starts at the canvas edge; 2 px in is its centre line.
+export function ringPixel(frame: Frame): Client {
+  return { x: frame.left + 2, y: frame.top + frame.height / 2 };
+}
+
 export function shot(page: Page, name: string) {
   return page.screenshot({
     path: `test-results/shots/${test.info().project.name}-${name}.png`,

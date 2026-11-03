@@ -1,12 +1,12 @@
-//! Opening book for the AI, which always plays second.
+//! Opening book for the AI's first reply when the human opens.
 //!
 //! Sprouts solved results:
 //!   n=4: First player wins (max 11 moves)
 //!   n=5: First player wins (max 14 moves)
 //!   n=6: Second player wins (max 17 moves)
 //!
-//! The AI (player 2) is theoretically losing for n=4,5 but wins for n=6.
-//! The book provides the AI's first response to common human openings.
+//! As second player the AI loses with perfect play at 4 and 5 nodes and
+//! wins at 6. The book gives its first reply to the common human openings.
 
 use crate::types::GameState;
 

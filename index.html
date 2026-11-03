@@ -19,7 +19,18 @@
       <button id="undoBtn" disabled>Undo</button>
     </div>
 
-    <div id="status">Initializing...</div>
+    <div class="controls setup">
+      <div class="toggle" role="group" aria-label="Who moves first">
+        <button data-first="human" aria-pressed="true">You start</button>
+        <button data-first="ai" aria-pressed="false">AI starts</button>
+      </div>
+      <div id="turn" data-player="human">
+        <span class="swatch" aria-hidden="true"></span>
+        <span id="turnText">Your turn</span>
+      </div>
+    </div>
+
+    <div id="status" role="status" aria-live="polite">Initializing...</div>
 
     <div class="canvas-container">
       <canvas id="canvas"></canvas>

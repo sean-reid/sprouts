@@ -16,7 +16,7 @@ mod validation;
 
 use protocol::{Move, Outcome, Placement, PlacementQuery, Snapshot};
 use tsify::{Ts, Tsify};
-use types::GameState;
+use types::{GameState, Player};
 use wasm_bindgen::prelude::*;
 
 #[wasm_bindgen]
@@ -27,10 +27,14 @@ pub struct SproutsGame {
 #[wasm_bindgen]
 impl SproutsGame {
     #[wasm_bindgen(constructor)]
-    pub fn new(initial_nodes: usize, board_size: usize) -> Self {
-        Self {
-            state: GameState::with_board_size(initial_nodes, board_size),
-        }
+    pub fn new(
+        initial_nodes: usize,
+        board_size: usize,
+        first_player: Ts<Player>,
+    ) -> Result<SproutsGame, JsError> {
+        Ok(Self {
+            state: protocol::start(initial_nodes, board_size, first_player.to_rust()?),
+        })
     }
 
     pub fn snapshot(&mut self) -> Result<Ts<Snapshot>, JsError> {

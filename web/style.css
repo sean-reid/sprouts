@@ -80,6 +80,57 @@ button:disabled {
   cursor: default;
 }
 
+.setup {
+  align-items: center;
+}
+
+.toggle {
+  display: inline-flex;
+  border: 1px solid #2a2a2a;
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.toggle button {
+  border: 0;
+  border-radius: 0;
+  min-height: 44px;
+  min-width: 44px;
+}
+
+.toggle button + button {
+  border-left: 1px solid #2a2a2a;
+}
+
+.toggle button[aria-pressed="true"] {
+  background: #2a2a2a;
+  color: #ffffff;
+}
+
+#turn {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 44px;
+  padding: 0 12px;
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  color: #a0a0a0;
+}
+
+#turn .swatch {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: #60a5fa;
+}
+
+#turn[data-player="ai"] .swatch {
+  background: #ef4444;
+}
+
 button.confirm-btn {
   background: #10b981;
   color: white;

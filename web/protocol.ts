@@ -1,4 +1,4 @@
-import type { SproutsGame } from "../pkg/sprouts";
+import type { Player, SproutsGame } from "../pkg/sprouts";
 
 type GameMethods = {
   [
@@ -14,7 +14,7 @@ type GameMethods = {
 
 // Every public method of the wasm class is a request; init builds the game.
 export interface Api extends GameMethods {
-  init(nodeCount: number, boardSize: number): void;
+  init(nodeCount: number, boardSize: number, firstPlayer: Player): void;
 }
 
 export type Method = keyof Api;

@@ -1,5 +1,5 @@
 import "./style.css";
-import type { Move, Outcome, Snapshot } from "../pkg/sprouts";
+import type { Move, Player, Snapshot } from "../pkg/sprouts";
 import { Engine, StaleRequest } from "./engine";
 import { attachInput, type PointerKind } from "./input";
 import { Loupe } from "./loupe";
@@ -9,6 +9,7 @@ import { draw } from "./render";
 import {
   freshBoard,
   watched,
+  type BoardLocation,
   type GameState,
   type Node,
   type PlacementDot,
@@ -22,6 +23,7 @@ const BOARD_SIZE = window.innerWidth <= 768 || window.innerHeight <= 768 ? 500 :
 // Matches MIN_PATH_LENGTH in src/types.rs under the engine's board scale.
 const MIN_STROKE_LENGTH = 20 * (BOARD_SIZE / 1000);
 const AI_ANIMATION_MS = 500;
+const FLASH_MS = 600;
 const DEFAULT_NODES = 4;
 
 type StatusKind = "" | "win" | "lose";
@@ -35,6 +37,9 @@ function byId<T extends HTMLElement>(id: string): T {
 const canvas = byId<HTMLCanvasElement>("canvas");
 const statusEl = byId<HTMLElement>("status");
 const undoBtn = byId<HTMLButtonElement>("undoBtn");
+const turnEl = byId<HTMLElement>("turn");
+const turnText = byId<HTMLElement>("turnText");
+const firstPlayerButtons = document.querySelectorAll<HTMLButtonElement>("button[data-first]");
 const overlay = byId<HTMLElement>("mobileOverlay");
 const modal = byId<HTMLElement>("gameOverModal");
 const winnerText = byId<HTMLElement>("winnerText");
@@ -50,34 +55,52 @@ function invalidate(): void {
 
 const view = new View(BOARD_SIZE);
 const loupe = new Loupe();
-const state: GameState = watched({ ...freshBoard(), lastInputWasTouch: false }, invalidate);
+const motionQuery = window.matchMedia("(prefers-reduced-motion: reduce)");
+const state: GameState = watched(
+  { ...freshBoard(), lastInputWasTouch: false, reducedMotion: motionQuery.matches },
+  invalidate,
+);
 let lastNodeCount = DEFAULT_NODES;
-let thinkingInterval: ReturnType<typeof setInterval> | null = null;
+let firstPlayer: Player = "human";
+let flashTimer: ReturnType<typeof setTimeout> | null = null;
 // Bumped by newGame so replies and animations from the previous game stop.
 let gameEpoch = 0;
 let submitting = false;
+let undoing = false;
 
 const engine = new Engine(() => setStatus("Failed to load game engine", "lose"));
+
+function describe(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
 
 function setStatus(message: string, kind: StatusKind = ""): void {
   statusEl.textContent = message;
   statusEl.className = kind;
 }
 
-function startThinking(): void {
-  let dots = 0;
+function updateTurn(): void {
+  turnEl.dataset.player = state.currentPlayer;
+  turnText.textContent = state.currentPlayer === "human" ? "Your turn" : "AI's turn";
+}
+
+function flash(at: BoardLocation, path: Point[]): void {
+  if (flashTimer !== null) clearTimeout(flashTimer);
+  state.flash = { at, path };
+  flashTimer = setTimeout(() => {
+    state.flash = null;
+    flashTimer = null;
+  }, FLASH_MS);
+}
+
+function startAITurn(): void {
+  state.thinking = true;
   setStatus("AI is thinking");
-  thinkingInterval = setInterval(() => {
-    dots = (dots + 1) % 4;
-    setStatus("AI is thinking" + ".".repeat(dots));
-  }, 400);
+  void performAIMove();
 }
 
 function stopThinking(): void {
-  if (thinkingInterval !== null) {
-    clearInterval(thinkingInterval);
-    thinkingInterval = null;
-  }
+  state.thinking = false;
 }
 
 function updateUndoButton(): void {
@@ -146,7 +169,7 @@ function handleStart(world: Point, kind: PointerKind): void {
     if (state.lastInputWasTouch) void handleMove(world, kind);
     return;
   }
-  if (state.mode !== "idle" || state.gameOver) return;
+  if (state.mode !== "idle" || state.thinking || undoing || state.gameOver) return;
   const node = findNodeAt(world, state.lastInputWasTouch ? 30 : 15);
   if (node && state.activeNodes.has(node.id)) {
     state.mode = "dragging";
@@ -294,11 +317,18 @@ async function executeMove(): Promise<void> {
 
   const epoch = gameEpoch;
   submitting = true;
-  const outcome = await engine.call("applyMove", move).catch(failure);
+  const outcome = await engine.call("applyMove", move).catch(describe);
   submitting = false;
   if (epoch !== gameEpoch) return;
+  if (typeof outcome === "string") {
+    setStatus("Engine error: " + outcome, "lose");
+    clearStroke();
+    return;
+  }
   if (outcome.kind === "rejected") {
-    setStatus(outcome.reason, "lose");
+    const { message, at } = outcome.rejection;
+    setStatus(message, "lose");
+    flash(at, move.polyline);
     clearStroke();
     return;
   }
@@ -306,14 +336,7 @@ async function executeMove(): Promise<void> {
   applySnapshot(outcome.snapshot);
   clearStroke();
   updateUndoButton();
-  if (!state.gameOver) {
-    startThinking();
-    void performAIMove();
-  }
-}
-
-function failure(error: unknown): Outcome {
-  return { kind: "rejected", reason: error instanceof Error ? error.message : String(error) };
+  if (!state.gameOver) startAITurn();
 }
 
 function applySnapshot(snapshot: Snapshot): void {
@@ -321,6 +344,7 @@ function applySnapshot(snapshot: Snapshot): void {
   state.lines = snapshot.lines;
   state.currentPlayer = snapshot.currentPlayer;
   state.activeNodes = new Set(snapshot.activeNodes);
+  updateTurn();
   if (snapshot.gameOver) {
     state.gameOver = true;
     showGameOver();
@@ -357,19 +381,21 @@ async function performAIMove(): Promise<void> {
   } catch (error) {
     if (error instanceof StaleRequest) return;
     stopThinking();
-    setStatus("AI error: " + (error instanceof Error ? error.message : String(error)), "lose");
+    setStatus("AI error: " + describe(error), "lose");
     state.mode = "idle";
   }
 }
 
 async function finishAIMove(move: Move, epoch: number): Promise<void> {
-  const outcome = await engine.call("applyMove", move).catch(failure);
+  const outcome = await engine.call("applyMove", move).catch(describe);
   if (epoch !== gameEpoch) return;
-  if (outcome.kind === "applied") {
+  if (typeof outcome === "string") {
+    setStatus("AI error: " + outcome, "lose");
+  } else if (outcome.kind === "rejected") {
+    setStatus("AI error: " + outcome.rejection.message, "lose");
+  } else {
     applySnapshot(outcome.snapshot);
     if (!state.gameOver) setStatus("Your turn!");
-  } else {
-    setStatus("AI error: " + outcome.reason, "lose");
   }
   state.mode = "idle";
   state.animatingLine = null;
@@ -377,41 +403,60 @@ async function finishAIMove(move: Move, epoch: number): Promise<void> {
 }
 
 async function undoMove(): Promise<void> {
-  if (state.mode !== "idle" || thinkingInterval !== null) return;
-  let undone = false;
-  for (let i = 0; i < 2; i++) {
-    if (!(await engine.call("undo"))) break;
-    undone = true;
-  }
-  if (undone) {
+  if (state.mode !== "idle" || state.thinking || undoing) return;
+  const epoch = gameEpoch;
+  undoing = true;
+  try {
+    let undone = false;
+    for (let i = 0; i < 2; i++) {
+      if (!(await engine.call("undo"))) break;
+      undone = true;
+    }
+    if (!undone || epoch !== gameEpoch) return;
     state.gameOver = false;
     state.reviewing = false;
     closeModal();
     await refreshBoard();
-    setStatus("Move undone: your turn");
+    if (epoch !== gameEpoch) return;
+    if (state.currentPlayer === "ai" && !state.gameOver) {
+      startAITurn();
+    } else {
+      setStatus("Move undone: your turn");
+    }
+  } finally {
+    undoing = false;
   }
 }
 
 async function newGame(nodeCount: number): Promise<void> {
   lastNodeCount = nodeCount;
-  Object.assign(state, freshBoard());
+  Object.assign(state, freshBoard(), { currentPlayer: firstPlayer });
   view.fit();
   clearStroke();
   overlay.classList.remove("visible");
   stopThinking();
-  gameEpoch++;
+  updateTurn();
+  updateUndoButton();
+  const epoch = ++gameEpoch;
   engine.cancel("turn");
   setStatus("Initializing...");
   closeModal();
   try {
-    await engine.call("init", nodeCount, BOARD_SIZE);
+    await engine.call("init", nodeCount, BOARD_SIZE, firstPlayer);
+    if (epoch !== gameEpoch) return;
     await refreshBoard();
-    setStatus("Draw a line between two nodes");
+    if (epoch !== gameEpoch) return;
+    if (state.currentPlayer === "ai") startAITurn();
+    else setStatus("Draw a line between two nodes");
   } catch (error) {
-    setStatus(
-      "Failed to start game: " + (error instanceof Error ? error.message : String(error)),
-      "lose",
-    );
+    if (epoch === gameEpoch) setStatus("Failed to start game: " + describe(error), "lose");
+  }
+}
+
+function chooseFirstPlayer(player: Player): void {
+  firstPlayer = player;
+  for (const button of firstPlayerButtons) {
+    button.setAttribute("aria-pressed", String(button.dataset.first === player));
   }
 }
 
@@ -443,6 +488,9 @@ function wireInput(): void {
     button.addEventListener("click", () => void newGame(Number(button.dataset.nodes)));
   }
   undoBtn.addEventListener("click", () => void undoMove());
+  for (const button of firstPlayerButtons) {
+    button.addEventListener("click", () => chooseFirstPlayer(button.dataset.first as Player));
+  }
   byId("cancelBtn").addEventListener("click", cancelPlacement);
   byId("confirmBtn").addEventListener("click", () => void confirmMove());
   byId("reviewBtn").addEventListener("click", () => {
@@ -452,8 +500,9 @@ function wireInput(): void {
   byId("newGameBtn").addEventListener("click", () => void newGame(lastNodeCount));
 }
 
+// The pulse on the ring is the one thing that animates without a state change.
 function frame(): void {
-  if (dirty) {
+  if (dirty || (state.thinking && !state.reducedMotion)) {
     dirty = false;
     draw(ctx, state, view);
     loupe.draw(ctx, state, view);
@@ -461,6 +510,9 @@ function frame(): void {
   requestAnimationFrame(frame);
 }
 
+motionQuery.addEventListener("change", () => {
+  state.reducedMotion = motionQuery.matches;
+});
 view.onChange(() => {
   loupe.hide();
   invalidate();

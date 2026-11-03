@@ -4,7 +4,7 @@ use tsify::Tsify;
 use crate::game_over;
 use crate::node_classifier;
 use crate::types::{self, GameState, Line, Node, Player, Point};
-use crate::validation;
+use crate::validation::{self, Rejection};
 use crate::{ai, geometry};
 
 /// A move as proposed to the engine. The mover is whoever is to play, so a
@@ -57,7 +57,7 @@ pub struct Snapshot {
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum Outcome {
     Applied { snapshot: Snapshot },
-    Rejected { reason: String },
+    Rejected { rejection: Rejection },
 }
 
 #[derive(Debug, Clone, Deserialize, Tsify)]
@@ -70,6 +70,12 @@ pub struct PlacementQuery {
 pub struct Placement {
     pub position: Point,
     pub valid: bool,
+}
+
+pub fn start(initial_nodes: usize, board_size: usize, first_player: Player) -> GameState {
+    let mut state = GameState::with_board_size(initial_nodes, board_size);
+    state.current_player = first_player;
+    state
 }
 
 pub fn snapshot(state: &mut GameState) -> Snapshot {
@@ -88,20 +94,25 @@ pub fn snapshot(state: &mut GameState) -> Snapshot {
     }
 }
 
+// The AI generator keeps a move that passes either check, so apply must too.
+pub fn check(state: &GameState, mov: &types::Move) -> Result<(), Rejection> {
+    match state.current_player {
+        Player::AI => validation::validate_ai_move(state, mov)
+            .or_else(|_| validation::validate_ai_move_tight(state, mov)),
+        Player::Human => validation::validate_move(state, mov),
+    }
+}
+
 pub fn apply(state: &mut GameState, mov: Move) -> Outcome {
     let mov = mov.by(state.current_player);
-    let checked = match state.current_player {
-        Player::AI => validation::validate_ai_move(state, &mov),
-        Player::Human => validation::validate_move(state, &mov),
-    };
-    match checked {
+    match check(state, &mov) {
         Ok(()) => {
             state.apply_move(mov);
             Outcome::Applied {
                 snapshot: snapshot(state),
             }
         }
-        Err(reason) => Outcome::Rejected { reason },
+        Err(rejection) => Outcome::Rejected { rejection },
     }
 }
 
@@ -173,7 +184,7 @@ mod tests {
     }
 
     #[test]
-    fn apply_reports_the_rejection_reason() {
+    fn apply_reports_the_rejection_with_its_location() {
         let mut state = GameState::new(4);
         let a = state.nodes[0].position;
         let mov = Move {
@@ -182,11 +193,50 @@ mod tests {
             polyline: vec![a, a],
             new_node_pos: a,
         };
-        match apply(&mut state, mov) {
-            Outcome::Rejected { reason } => assert!(!reason.is_empty()),
-            Outcome::Applied { .. } => panic!("degenerate self-loop accepted"),
-        }
+        let wire = serde_json::to_value(apply(&mut state, mov)).unwrap();
+        assert_eq!(wire["kind"], json!("rejected"));
+        assert_eq!(wire["rejection"]["kind"], json!("pathTooShort"));
+        assert_eq!(
+            wire["rejection"]["at"],
+            json!({ "kind": "segments", "first": 0, "last": 0 })
+        );
+        assert!(!wire["rejection"]["message"].as_str().unwrap().is_empty());
         assert!(state.lines.is_empty());
+    }
+
+    #[test]
+    fn the_ai_opening_on_a_full_size_board_is_accepted() {
+        let mut state = start(4, 1000, Player::AI);
+        let mov = ai_move(&mut state).expect("the AI has an opening move");
+        match apply(&mut state, mov) {
+            Outcome::Applied { snapshot } => assert_eq!(snapshot.current_player, Player::Human),
+            Outcome::Rejected { rejection } => panic!("opening rejected: {}", rejection.message),
+        }
+    }
+
+    #[test]
+    fn the_ai_can_open_and_the_turn_passes_to_the_human() {
+        let mut state = start(4, 1000, Player::AI);
+        assert_eq!(snapshot(&mut state).current_player, Player::AI);
+        let a = state.nodes[0].position;
+        let b = state.nodes[1].position;
+        let polyline = straight(a, b, 10);
+        let new_node_pos = polyline[5];
+        let mov = Move {
+            from_node: 0,
+            to_node: 1,
+            polyline,
+            new_node_pos,
+        };
+        match apply(&mut state, mov) {
+            Outcome::Applied { snapshot } => {
+                assert_eq!(snapshot.current_player, Player::Human);
+                assert_eq!(snapshot.lines[0].player, Player::AI);
+            }
+            Outcome::Rejected { rejection } => panic!("opening rejected: {}", rejection.message),
+        }
+        assert!(state.undo_move());
+        assert_eq!(state.current_player, Player::AI);
     }
 
     #[test]
@@ -255,7 +305,9 @@ mod tests {
         for mov in recorded.moves {
             match apply(&mut state, mov) {
                 Outcome::Applied { .. } => {}
-                Outcome::Rejected { reason } => panic!("replay rejected: {reason}"),
+                Outcome::Rejected { rejection } => {
+                    panic!("replay rejected: {}", rejection.message)
+                }
             }
         }
         assert_eq!(state.lines.len(), 2);
