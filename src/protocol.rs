@@ -174,6 +174,8 @@ pub struct MovesFrom {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Tsify)]
 #[serde(rename_all = "camelCase")]
 pub enum UnroutableKind {
+    /// The model does not list the move.
+    Illegal,
     Room,
     Topology,
     Bug,
@@ -561,7 +563,13 @@ pub fn moves_from(state: &GameState, node: usize) -> MovesFrom {
 
 /// Draws `mv` for the player to move without applying it.
 pub fn route_move(state: &GameState, mv: FaceMove) -> RouteReply {
-    match route::route(state, &ModelMove::from(mv)) {
+    let listed = ModelMove::from(mv);
+    if state.face.check(&listed).is_err() {
+        return RouteReply::Unroutable {
+            reason: UnroutableKind::Illegal,
+        };
+    }
+    match route::route(state, &listed) {
         Ok(mov) => RouteReply::Routed {
             segments: mov.segments.clone(),
             mov: Move::from(mov),
@@ -1609,7 +1617,7 @@ mod tests {
         };
         let wire = serde_json::to_value(route_move(&state, off_corner)).unwrap();
         assert_eq!(wire["kind"], json!("unroutable"));
-        assert_eq!(wire["reason"], json!("corner"));
+        assert_eq!(wire["reason"], json!("illegal"));
     }
 
     fn listed(state: &GameState, want: impl Fn(&FaceMove) -> bool) -> FaceMove {
