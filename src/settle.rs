@@ -281,9 +281,7 @@ impl Chain {
     }
 }
 
-fn boxes_apart(a: &Chain, b: &Chain, gap: f64) -> bool {
-    let (alo, ahi) = a.bounds();
-    let (blo, bhi) = b.bounds();
+fn boxes_apart((alo, ahi): (Point, Point), (blo, bhi): (Point, Point), gap: f64) -> bool {
     alo.x > bhi.x + gap || blo.x > ahi.x + gap || alo.y > bhi.y + gap || blo.y > ahi.y + gap
 }
 
@@ -413,12 +411,22 @@ impl Layout {
             }
         }
 
+        // Samples and nodes outside a line's box, grown by the target, are
+        // clear of it without a distance test; the work per round is then
+        // bounded by the pairs that can be short.
+        let boxes: Vec<(Point, Point)> = self.lines.iter().map(Chain::bounds).collect();
+        let outside = |p: &Point, (lo, hi): (Point, Point), gap: f64| {
+            p.x < lo.x - gap || p.x > hi.x + gap || p.y < lo.y - gap || p.y > hi.y + gap
+        };
         for (k, chain) in self.lines.iter().enumerate() {
             for i in 0..n {
                 if i == chain.from || i == chain.to || i == self.mid(k) {
                     continue;
                 }
                 let p = self.nodes[i];
+                if outside(&p, boxes[k], targets.line_node) {
+                    continue;
+                }
                 let (q, d, seg, t) = chain.nearest(&p);
                 if let (Some(f), Some(push)) = (
                     short(d, targets.line_node, Tightest::LineNode(k, i)),
@@ -469,13 +477,15 @@ impl Layout {
         let reach = SHARED * targets.line;
         for k in 0..self.lines.len() {
             for l in k + 1..self.lines.len() {
-                if boxes_apart(&self.lines[k], &self.lines[l], targets.line) {
+                if boxes_apart(boxes[k], boxes[l], targets.line) {
                     continue;
                 }
                 let shared = self.shared(k, l);
                 for (a, b) in [(k, l), (l, k)] {
                     for s in &self.lines[a].samples {
-                        if self.near_any(&s.at, &shared, reach) {
+                        if outside(&s.at, boxes[b], targets.line)
+                            || self.near_any(&s.at, &shared, reach)
+                        {
                             continue;
                         }
                         let (q, d, seg, t) = self.lines[b].nearest(&s.at);
@@ -654,8 +664,16 @@ impl Layout {
                     continue;
                 }
                 let dir = mul(dir, 1.0 / len);
-                chain.pts[3 * j - 1] = sub(joint, mul(dir, joint.distance_to(&a)));
-                chain.pts[3 * j + 1] = add(joint, mul(dir, joint.distance_to(&b)));
+                chain.pts[3 * j - 1] = within(
+                    sub(joint, mul(dir, joint.distance_to(&a))),
+                    origin.lines[k].pts[3 * j - 1],
+                    shift,
+                );
+                chain.pts[3 * j + 1] = within(
+                    add(joint, mul(dir, joint.distance_to(&b))),
+                    origin.lines[k].pts[3 * j + 1],
+                    shift,
+                );
             }
             let mid = if chain.pts == origin.lines[k].pts {
                 origin.nodes[id]
@@ -716,6 +734,9 @@ pub fn least_clearance(state: &GameState) -> (f64, Tightest) {
 /// before the move it settled.
 #[derive(Clone, Debug, Default)]
 pub struct Undo {
+    /// Lines on the board when the settle ran; an undo of that move
+    /// leaves one fewer.
+    pub board: usize,
     nodes: Vec<(usize, Point)>,
     lines: Vec<(usize, Line)>,
 }
@@ -748,16 +769,20 @@ pub fn settle(state: &mut GameState) {
 }
 
 fn relax(state: &mut GameState) -> Undo {
+    let mut undo = Undo {
+        board: state.lines.len(),
+        ..Undo::default()
+    };
     if state.lines.is_empty() {
-        return Undo::default();
+        return undo;
     }
     let targets = Targets::for_board(state.board_size);
     let Some(origin) = Layout::from_state(state, &targets) else {
-        return Undo::default();
+        return undo;
     };
     let original = journal(state);
     if original.len() != state.lines.len() {
-        return Undo::default();
+        return undo;
     }
     let tolerance = curve::tolerance(state.board_size);
     let mut layout = origin.clone();
@@ -767,7 +792,7 @@ fn relax(state: &mut GameState) -> Undo {
         ..
     } = layout.survey(&targets, None);
     if least >= 1.0 {
-        return Undo::default();
+        return undo;
     }
     let mut crossings = layout.crossings(tolerance);
     let mut stride = STRIDE * targets.line;
@@ -815,7 +840,6 @@ fn relax(state: &mut GameState) -> Undo {
         .zip(&origin.lines)
         .map(|(now, was)| now.pts != was.pts)
         .collect();
-    let mut undo = Undo::default();
     for (k, chain) in layout.lines.iter().enumerate() {
         if !changed[k] {
             continue;

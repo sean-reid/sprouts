@@ -5,7 +5,18 @@ use proptest::prelude::*;
 use std::path::Path;
 
 fn fixtures() -> Vec<replay::Fixture> {
-    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/games");
+    fixtures_under("fixtures/games")
+}
+
+/// The games under fixtures/games plus the large ones under fixtures/settle.
+fn all_fixtures() -> Vec<replay::Fixture> {
+    let mut out = fixtures();
+    out.extend(fixtures_under("fixtures/settle"));
+    out
+}
+
+fn fixtures_under(dir: &str) -> Vec<replay::Fixture> {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join(dir);
     let mut paths: Vec<_> = std::fs::read_dir(dir)
         .unwrap()
         .map(|e| e.unwrap().path())
@@ -325,11 +336,11 @@ fn fixture_move(state: &GameState, recorded: &replay::FixtureMove) -> crate::typ
     )
 }
 
-/// No node moves more than MAX_SHIFT node spacings in one settle; the
-/// drift over a whole game is printed for the record.
+/// No node or control point moves more than MAX_SHIFT node spacings in
+/// one settle; the drift over a whole game is printed for the record.
 #[test]
-fn no_node_moves_more_than_the_shift_in_one_settle() {
-    for fixture in fixtures() {
+fn nothing_moves_more_than_the_shift_in_one_settle() {
+    for fixture in all_fixtures() {
         let mut state = fixture.start();
         let bound = MAX_SHIFT * MIN_NODE_SPACING * scale(state.board_size);
         let mut drift: f64 = 0.0;
@@ -338,10 +349,25 @@ fn no_node_moves_more_than_the_shift_in_one_settle() {
             let mov = fixture_move(&state, recorded);
             state.apply_move(mov).unwrap();
             let before: Vec<Point> = state.nodes.iter().map(|n| n.position).collect();
+            let controls: Vec<Vec<Cubic>> =
+                state.lines.iter().map(|l| l.segments.clone()).collect();
             if first_seen.len() < before.len() {
                 first_seen.extend_from_slice(&before[first_seen.len()..]);
             }
             settle(&mut state);
+            for (line, was) in state.lines.iter().zip(&controls) {
+                for (c, w) in line.segments.iter().zip(was) {
+                    for (p, q) in [(c.p0, w.p0), (c.p1, w.p1), (c.p2, w.p2), (c.p3, w.p3)] {
+                        let moved = p.distance_to(&q);
+                        assert!(
+                            moved <= bound + 1e-6,
+                            "{} nodes: a control point of line {} moved {moved:.2} in one settle",
+                            fixture.initial_nodes,
+                            line.id
+                        );
+                    }
+                }
+            }
             for (node, was) in state.nodes.iter().zip(&before) {
                 let moved = node.position.distance_to(was);
                 assert!(
@@ -366,7 +392,7 @@ fn no_node_moves_more_than_the_shift_in_one_settle() {
 /// stroke that followed re-applies as it did.
 #[test]
 fn undo_restores_the_board_the_next_move_was_drawn_on() {
-    for fixture in fixtures() {
+    for fixture in all_fixtures() {
         let mut state = fixture.start();
         let mut boards = vec![bits(&state)];
         for recorded in &fixture.moves {

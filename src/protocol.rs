@@ -578,8 +578,17 @@ fn unroutable(mv: &face::Move, why: Unroutable) -> Rejection {
 pub fn undo(state: &mut GameState) -> bool {
     let undone = state.undo_move();
     if undone {
-        if let Some(settled) = state.settles.pop() {
-            settled.restore(state);
+        // Every applied move settles once, so the record on top belongs to
+        // the move just taken back.
+        let paired = state
+            .settles
+            .last()
+            .is_some_and(|settled| settled.board == state.lines.len() + 1);
+        debug_assert!(paired, "undo of a move that was not settled once");
+        if paired {
+            if let Some(settled) = state.settles.pop() {
+                settled.restore(state);
+            }
         }
     }
     undone
