@@ -10,7 +10,7 @@ pub type HalfEdgeId = usize;
 pub type FaceId = usize;
 
 /// One boundary piece of a face: a closed walk, or a node without edges.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Component {
     Cycle(HalfEdgeId),
     Node(NodeId),
@@ -43,7 +43,7 @@ pub enum IllegalMove {
     Enclosed,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 struct Node {
     spokes: [HalfEdgeId; 3],
     degree: u8,
@@ -93,13 +93,13 @@ impl Node {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 struct HalfEdge {
     origin: NodeId,
     face: FaceId,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct Face {
     components: Vec<Component>,
 }
@@ -129,12 +129,32 @@ impl Boundaries {
     }
 }
 
+/// Where a checked move goes: its face, the component index of each
+/// corner, and whether the two corners share a component.
+struct Placement {
+    face: FaceId,
+    bounds: Boundaries,
+    ca: usize,
+    cb: usize,
+    split: bool,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FaceModel {
     nodes: Vec<Node>,
     half_edges: Vec<HalfEdge>,
     faces: Vec<Face>,
     journal: Vec<Undo>,
+}
+
+/// Hashes the position and not the journal, so two models that agree on
+/// every node, half-edge and face hash alike however they were reached.
+impl std::hash::Hash for FaceModel {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.nodes.hash(state);
+        self.half_edges.hash(state);
+        self.faces.hash(state);
+    }
 }
 
 impl FaceModel {
@@ -188,6 +208,48 @@ impl FaceModel {
         &self.faces[f].components
     }
 
+    /// The boundary piece holding the corner at `v` that follows `at`.
+    pub fn component_of(
+        &self,
+        v: NodeId,
+        at: Option<HalfEdgeId>,
+    ) -> Result<Component, IllegalMove> {
+        let face = self.corner_face(v, at)?;
+        let Some(h) = at else {
+            return Ok(Component::Node(v));
+        };
+        self.faces[face]
+            .components
+            .iter()
+            .copied()
+            .find(|comp| matches!(comp, Component::Cycle(start) if self.cycle(*start).contains(&h)))
+            .ok_or(IllegalMove::Corner)
+    }
+
+    /// Lowest node on a piece, which is how `Move::enclosed` names it.
+    pub fn lowest_node(&self, comp: Component) -> NodeId {
+        match comp {
+            Component::Node(v) => v,
+            Component::Cycle(start) => self
+                .cycle(start)
+                .into_iter()
+                .map(|h| self.half_edges[h].origin)
+                .min()
+                .expect("a cycle has a half-edge"),
+        }
+    }
+
+    /// Half-edges of the closed boundary walk through `start`, in walk order.
+    pub fn cycle(&self, start: HalfEdgeId) -> Vec<HalfEdgeId> {
+        let mut out = vec![start];
+        let mut h = self.next(start);
+        while h != start {
+            out.push(h);
+            h = self.next(h);
+        }
+        out
+    }
+
     /// Face of the corner at `v` that follows `at` counterclockwise.
     pub fn corner_face(&self, v: NodeId, at: Option<HalfEdgeId>) -> Result<FaceId, IllegalMove> {
         let node = self.nodes.get(v).ok_or(IllegalMove::Node)?;
@@ -203,70 +265,8 @@ impl FaceModel {
         self.moves().is_empty()
     }
 
-    /// Every legal move, each face-side choice listed separately, in a
-    /// fixed order. Walks every face, O(E), and allocates 2^k moves for a
-    /// split with k other pieces, so call it once per position.
-    pub fn moves(&self) -> Vec<Move> {
-        let bounds = self.boundaries();
-        let mut out = Vec::new();
-        for a in 0..self.nodes.len() {
-            let da = self.nodes[a].degree;
-            if da == 3 {
-                continue;
-            }
-            if da <= 1 {
-                let at = self.nodes[a].rotation().first().copied();
-                let face = self.corner_face(a, at).expect("own corner");
-                let own = bounds.component(a, at);
-                let mut others = other_reps(&bounds.reps[face], own, own);
-                if da == 0 && !others.is_empty() {
-                    others.remove(0);
-                }
-                for enclosed in subsets(&others) {
-                    out.push(Move {
-                        a,
-                        at_a: at,
-                        b: a,
-                        at_b: at,
-                        enclosed,
-                    });
-                }
-            }
-            for b in a + 1..self.nodes.len() {
-                if self.nodes[b].degree == 3 {
-                    continue;
-                }
-                for at_a in self.corners(a) {
-                    let face = self.corner_face(a, at_a).expect("own corner");
-                    for at_b in self.corners(b) {
-                        if self.corner_face(b, at_b) != Ok(face) {
-                            continue;
-                        }
-                        let ca = bounds.component(a, at_a);
-                        let cb = bounds.component(b, at_b);
-                        let choices = if ca == cb {
-                            subsets(&other_reps(&bounds.reps[face], ca, cb))
-                        } else {
-                            vec![Vec::new()]
-                        };
-                        for enclosed in choices {
-                            out.push(Move {
-                                a,
-                                at_a,
-                                b,
-                                at_b,
-                                enclosed,
-                            });
-                        }
-                    }
-                }
-            }
-        }
-        out
-    }
-
-    /// O(E): walks every face to validate `enclosed` and to split.
-    pub fn apply(&mut self, mv: &Move) -> Result<(), IllegalMove> {
+    /// O(E): walks every face to validate `enclosed`.
+    fn place(&self, mv: &Move) -> Result<Placement, IllegalMove> {
         let (a, b) = (mv.a, mv.b);
         let face = self.corner_face(a, mv.at_a)?;
         if self.corner_face(b, mv.at_b)? != face {
@@ -290,6 +290,31 @@ impl FaceModel {
                 return Err(IllegalMove::Enclosed);
             }
         }
+        Ok(Placement {
+            face,
+            bounds,
+            ca,
+            cb,
+            split,
+        })
+    }
+
+    /// Whether `apply` would accept `mv`, at the same cost.
+    pub fn check(&self, mv: &Move) -> Result<(), IllegalMove> {
+        self.place(mv).map(drop)
+    }
+
+    /// O(E): walks every face to validate `enclosed` and to split.
+    pub fn apply(&mut self, mv: &Move) -> Result<(), IllegalMove> {
+        let (a, b) = (mv.a, mv.b);
+        let Placement {
+            face,
+            bounds,
+            ca,
+            cb,
+            split,
+        } = self.place(mv)?;
+        let reps = &bounds.reps[face];
 
         let m = self.nodes.len();
         let h_am = self.half_edges.len();
@@ -368,25 +393,6 @@ impl FaceModel {
         self.nodes[self.head(h)].pred(h ^ 1)
     }
 
-    fn cycle(&self, start: HalfEdgeId) -> Vec<HalfEdgeId> {
-        let mut out = vec![start];
-        let mut h = self.next(start);
-        while h != start {
-            out.push(h);
-            h = self.next(h);
-        }
-        out
-    }
-
-    fn corners(&self, v: NodeId) -> Vec<Option<HalfEdgeId>> {
-        let node = &self.nodes[v];
-        if node.degree == 0 {
-            vec![None]
-        } else {
-            node.rotation().iter().map(|&h| Some(h)).collect()
-        }
-    }
-
     fn move_component(&mut self, comp: Component, to: FaceId) {
         match comp {
             Component::Node(v) => self.nodes[v].home = to,
@@ -430,26 +436,7 @@ impl FaceModel {
     }
 }
 
-fn other_reps(reps: &[NodeId], ca: usize, cb: usize) -> Vec<NodeId> {
-    reps.iter()
-        .enumerate()
-        .filter(|&(i, _)| i != ca && i != cb)
-        .map(|(_, &r)| r)
-        .collect()
-}
-
-fn subsets(items: &[NodeId]) -> Vec<Vec<NodeId>> {
-    (0..1u64 << items.len())
-        .map(|mask| {
-            items
-                .iter()
-                .enumerate()
-                .filter(|&(i, _)| mask >> i & 1 == 1)
-                .map(|(_, &r)| r)
-                .collect()
-        })
-        .collect()
-}
+mod moves;
 
 #[cfg(test)]
 mod tests;

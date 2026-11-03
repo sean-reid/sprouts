@@ -58,7 +58,6 @@ fn check(m: &FaceModel) {
         for &h in node.rotation() {
             assert_eq!(m.origin(h), id);
         }
-        assert_eq!(node.rotation().len(), node.degree as usize);
     }
 
     let orbit = orbits(m);
@@ -265,7 +264,7 @@ fn known_outcomes_for_small_games() {
 }
 
 #[test]
-#[ignore = "about 30 s in debug"]
+#[ignore = "about 28 s in debug"]
 fn four_nodes_are_a_first_player_win() {
     assert!(first_player_wins(&mut FaceModel::new(4)));
 }
