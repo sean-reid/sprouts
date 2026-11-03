@@ -1,5 +1,5 @@
 import type { Cubic, Line, Move, Player, Point } from "../pkg/sprouts";
-import { circleLayout, sameLayout, type Position } from "./layout";
+import { circleLayout, openingLayout, sameLayout, type Position } from "./layout";
 import type { Fixture, FixtureMove } from "./record";
 
 // A replay fixture plus the fields a resumed session needs, so a saved
@@ -19,8 +19,11 @@ export interface RecordedMove extends Move {
 export const STORAGE_KEY = "sprouts.game";
 const HASH_PREFIX = "#game=";
 const RECORD_VERSION = 1;
-// Link version 1 carries thinned strokes, version 2 the fitted cubics.
-const LINK_VERSION = 2;
+// Link version 1 carries thinned strokes, version 2 the fitted cubics, and
+// version 3 the starting layout when it is not the default; a version 1 or
+// 2 link was drawn on the circle layout.
+const LINK_VERSION = 3;
+const CUBIC_LINK_VERSION = 2;
 const STROKE_LINK_VERSION = 1;
 const FLAG_AI_FIRST = 1;
 const FLAG_LAYOUT = 2;
@@ -208,7 +211,8 @@ function asRecord(value: unknown): GameRecord | null {
     version: 1,
     initialNodes: v.initialNodes,
     boardSize: v.boardSize,
-    ...(v.nodes ? { nodes: v.nodes } : {}),
+    // A record saved without positions was played on the circle layout.
+    nodes: v.nodes ?? circleLayout(nodes, v.boardSize),
     firstPlayer: v.firstPlayer,
     moves: v.moves,
     cursor: v.cursor,
@@ -332,28 +336,30 @@ export function decodeRecord(payload: string): GameRecord | null {
   const reader = new ByteReader(bytes);
   try {
     const version = reader.u8();
-    if (version !== LINK_VERSION && version !== STROKE_LINK_VERSION) return null;
+    if (![LINK_VERSION, CUBIC_LINK_VERSION, STROKE_LINK_VERSION].includes(version)) return null;
     const flags = reader.u8();
     const initialNodes = reader.u16();
     const boardSize = reader.u16();
     if (!isBoard(boardSize)) return null;
     const count = reader.u16();
     const cursor = reader.u16();
-    let nodes: Position[] | undefined;
-    if (version === STROKE_LINK_VERSION) {
+    if (initialNodes > MAX_NODES) return null;
+    let nodes: Position[];
+    if (version !== LINK_VERSION) {
       nodes = circleLayout(initialNodes, boardSize);
     } else if (flags & FLAG_LAYOUT) {
-      if (initialNodes > MAX_NODES) return null;
       const point = deltaReader(reader, LINK_QUANTUM * scaleOf(boardSize));
       nodes = Array.from({ length: initialNodes }, () => {
         const p = point();
         return [p.x, p.y];
       });
+    } else {
+      nodes = openingLayout(initialNodes, boardSize);
     }
     const moves: Move[] = [];
     for (let m = 0; m < count; m++) {
       const move =
-        version === LINK_VERSION ? readCurveMove(reader, boardSize) : readStrokeMove(reader);
+        version === STROKE_LINK_VERSION ? readStrokeMove(reader) : readCurveMove(reader, boardSize);
       if (!move) return null;
       moves.push(move);
     }
@@ -362,7 +368,7 @@ export function decodeRecord(payload: string): GameRecord | null {
       version: 1,
       initialNodes,
       boardSize,
-      ...(nodes ? { nodes } : {}),
+      nodes,
       firstPlayer: flags & FLAG_AI_FIRST ? "ai" : "human",
       moves: moves.map(toFixtureMove),
       cursor,

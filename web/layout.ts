@@ -15,8 +15,8 @@ export function openingLayout(count: number, boardSize: number): Position[] {
   });
 }
 
-// The circle every game was laid out on before the sunflower, which is
-// where a version 1 share link's moves were drawn.
+// The layout of a record or link that carries no positions: a circle of
+// radius 120 for up to four nodes, 160 beyond.
 export function circleLayout(count: number, boardSize: number): Position[] {
   const radius = ((count <= 4 ? 120 : 160) * boardSize) / 1000;
   return Array.from({ length: count }, (_, i) => {

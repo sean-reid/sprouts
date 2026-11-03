@@ -13,11 +13,13 @@ import type { Fixture } from "../../web/record";
 const expect = baseExpect.configure({ timeout: 20_000 });
 import {
   clickAway,
+  expectNodeDrawnAt,
   frameOf,
   nodeOnScreen,
   openBoard,
   PLACING_HINT,
   playExchange,
+  recordedNodeOnScreen,
   shot,
   startGame,
   strokeCells,
@@ -48,6 +50,8 @@ const NINE_MOVES = "fixtures/saved/nine-moves-4n-1000.json";
 // A version 1 link: one exchange on the 500 board.
 const VERSION_1_LINK =
   "#game=AQAEAPQBAgACAAAAAQACABwMxAmvCbAJ8ArwCgIAAAAFAGwHxAn4A88BpgpR3gIe5AGEAvsKMwk";
+// A version 2 link of the saved first exchange, made when links carried no layout.
+const VERSION_2_LINK = "#game=AgAEAOgDAgACAAABAALYCegH7wHwAXh3AgAAA_gF6AeaAyVGJkUl";
 
 // Two renderings of one board agree when under a tenth of the stroke
 // cells differ.
@@ -278,6 +282,33 @@ test("a version 1 link of the saved game reopens the live game", async ({ page }
   await page.goto("/" + VERSION_1_LINK);
   await expect(page.locator("#status")).toHaveText("Your turn!", { timeout: 20_000 });
   expect(page.url()).not.toContain("#");
+  await expect(entries(page)).toHaveText(["1. You 0 to 1", "2. AI 2 to 0"]);
+  await expect(page.locator("#undoBtn")).toBeEnabled();
+});
+
+test("a version 2 link opens on the circle with both moves replayed", async ({ page }) => {
+  await page.goto("/" + VERSION_2_LINK);
+  await expect(page.locator("#status")).toHaveText(/^Reviewing: move 2 of 2/, {
+    timeout: 20_000,
+  });
+  await expect(entries(page)).toHaveText(["1. You 0 to 1", "2. AI 2 to 0"]);
+  const record = JSON.parse(await readFile("fixtures/saved/first-exchange.json", "utf8")) as {
+    boardSize: number;
+    nodes: [number, number][];
+  };
+  for (let i = 0; i < 4; i++) {
+    await expectNodeDrawnAt(page, await recordedNodeOnScreen(page, record, i));
+  }
+});
+
+test("a saved game without positions restores onto the circle", async ({ page }) => {
+  const saved = JSON.parse(await readFile("fixtures/saved/first-exchange.json", "utf8")) as {
+    nodes?: unknown;
+  };
+  delete saved.nodes;
+  await page.addInitScript((s) => localStorage.setItem("sprouts.game", s), JSON.stringify(saved));
+  await page.goto("/");
+  await expect(page.locator("#status")).toHaveText("Your turn!", { timeout: 20_000 });
   await expect(entries(page)).toHaveText(["1. You 0 to 1", "2. AI 2 to 0"]);
   await expect(page.locator("#undoBtn")).toBeEnabled();
 });
