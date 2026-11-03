@@ -4,7 +4,9 @@ use tsify::Tsify;
 use crate::ai;
 use crate::curve::{self, Cubic};
 use crate::embedding;
+use crate::face::Move as ModelMove;
 use crate::geometry;
+use crate::route::{self, Unroutable};
 use crate::types::{self, scale, GameState, Line, Node, Player, Point, MIN_NODE_SPACING};
 use crate::validation::{self, Rejection};
 
@@ -115,6 +117,81 @@ pub struct Layout {
     pub nodes: Vec<Point>,
 }
 
+/// A move named on the face model, as the page sees it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Tsify)]
+#[serde(rename_all = "camelCase")]
+pub struct FaceMove {
+    pub a: usize,
+    pub at_a: Option<usize>,
+    pub b: usize,
+    pub at_b: Option<usize>,
+    pub enclosed: Vec<usize>,
+}
+
+impl From<ModelMove> for FaceMove {
+    fn from(mv: ModelMove) -> Self {
+        Self {
+            a: mv.a,
+            at_a: mv.at_a,
+            b: mv.b,
+            at_b: mv.at_b,
+            enclosed: mv.enclosed,
+        }
+    }
+}
+
+impl From<FaceMove> for ModelMove {
+    fn from(mv: FaceMove) -> Self {
+        Self {
+            a: mv.a,
+            at_a: mv.at_a,
+            b: mv.b,
+            at_b: mv.at_b,
+            enclosed: mv.enclosed,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Tsify)]
+#[serde(rename_all = "camelCase")]
+pub struct MovesFrom {
+    pub node: usize,
+    pub moves: Vec<FaceMove>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Tsify)]
+#[serde(rename_all = "camelCase")]
+pub enum UnroutableKind {
+    Corner,
+    Corridor,
+    Room,
+    Crossing,
+    Topology,
+    Rejected,
+}
+
+impl From<&Unroutable> for UnroutableKind {
+    fn from(why: &Unroutable) -> Self {
+        match why {
+            Unroutable::Corner => Self::Corner,
+            Unroutable::Corridor => Self::Corridor,
+            Unroutable::Room => Self::Room,
+            Unroutable::Crossing => Self::Crossing,
+            Unroutable::Topology => Self::Topology,
+            Unroutable::Rejected(_) => Self::Rejected,
+        }
+    }
+}
+
+/// A listed move drawn for the player to move, with the spline it commits
+/// as, or why the router could not draw it.
+#[derive(Debug, Clone, Serialize, Tsify)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum RouteReply {
+    Routed { mov: Move, segments: Vec<Cubic> },
+    Unroutable { reason: UnroutableKind },
+}
+
 /// A fresh board on the recorded positions, or on the default layout when
 /// none are given. Positions that do not match the count are an error.
 pub fn start(
@@ -177,6 +254,81 @@ pub fn ai_move(state: &mut GameState) -> AiReply {
         },
         ai::Reply::GameOver => AiReply::GameOver,
         ai::Reply::Undrawn => AiReply::Undrawn,
+    }
+}
+
+/// Every legal move with `node` at one end. The search lists one move per
+/// class of interchangeable bare nodes, so a listed move from another bare
+/// node of the same face is relabelled onto `node`; a chord between two
+/// different boundary pieces is listed with its lower node first.
+pub fn moves_from(state: &GameState, node: usize) -> MovesFrom {
+    let face = &state.face;
+    let mut moves: Vec<ModelMove> = Vec::new();
+    if node < face.node_count() {
+        let bare = |v: usize| face.degree(v) == 0;
+        let home = |v: usize| face.corner_face(v, None).ok();
+        for listed in face.search_moves() {
+            let mut variants = vec![listed.clone()];
+            if bare(node) {
+                for end in [listed.a, listed.b] {
+                    if end != node && bare(end) && home(end) == home(node) {
+                        variants.push(relabel(&listed, end, node));
+                    }
+                }
+            }
+            for mut mv in variants {
+                if mv.a != node && mv.b != node {
+                    continue;
+                }
+                let split = face.component_of(mv.a, mv.at_a) == face.component_of(mv.b, mv.at_b);
+                if !split && mv.a > mv.b {
+                    std::mem::swap(&mut mv.a, &mut mv.b);
+                    std::mem::swap(&mut mv.at_a, &mut mv.at_b);
+                }
+                if face.check(&mv).is_ok() && !moves.contains(&mv) {
+                    moves.push(mv);
+                }
+            }
+        }
+    }
+    MovesFrom {
+        node,
+        moves: moves.into_iter().map(FaceMove::from).collect(),
+    }
+}
+
+/// `mv` with the bare nodes `from` and `to` swapped.
+fn relabel(mv: &ModelMove, from: usize, to: usize) -> ModelMove {
+    let swap = |v: usize| {
+        if v == from {
+            to
+        } else if v == to {
+            from
+        } else {
+            v
+        }
+    };
+    let mut enclosed: Vec<usize> = mv.enclosed.iter().map(|&v| swap(v)).collect();
+    enclosed.sort_unstable();
+    ModelMove {
+        a: swap(mv.a),
+        at_a: mv.at_a,
+        b: swap(mv.b),
+        at_b: mv.at_b,
+        enclosed,
+    }
+}
+
+/// Draws `mv` for the player to move without applying it.
+pub fn route_move(state: &GameState, mv: FaceMove) -> RouteReply {
+    match route::route(state, &ModelMove::from(mv)) {
+        Ok(mov) => RouteReply::Routed {
+            segments: mov.segments.clone(),
+            mov: Move::from(mov),
+        },
+        Err(why) => RouteReply::Unroutable {
+            reason: UnroutableKind::from(&why),
+        },
     }
 }
 
@@ -840,5 +992,115 @@ mod tests {
         assert!(!state.face.search_moves().is_empty());
         assert!(matches!(ai_move(&mut state), AiReply::Undrawn));
         assert!(!snapshot(&state).game_over);
+    }
+
+    fn face_move(a: usize, b: usize, enclosed: Vec<usize>) -> FaceMove {
+        FaceMove {
+            a,
+            at_a: None,
+            b,
+            at_b: None,
+            enclosed,
+        }
+    }
+
+    /// Four bare nodes: the search lists a loop at 0 round nothing, a loop
+    /// at 0 round node 1, and the chord 0 to 1. Node 0 gets exactly those;
+    /// node 2 gets them relabelled, so both chords 2 can make are there.
+    #[test]
+    fn moves_from_lists_the_search_moves_at_the_node_and_relabels_them_for_its_peers() {
+        let state = GameState::new(4);
+        let listed: Vec<FaceMove> = state
+            .face
+            .search_moves()
+            .into_iter()
+            .map(FaceMove::from)
+            .collect();
+        assert_eq!(
+            listed,
+            vec![
+                face_move(0, 0, vec![]),
+                face_move(0, 0, vec![1]),
+                face_move(0, 1, vec![]),
+            ]
+        );
+        assert_eq!(moves_from(&state, 0).moves, listed);
+        assert_eq!(
+            moves_from(&state, 2).moves,
+            vec![
+                face_move(2, 2, vec![]),
+                face_move(2, 2, vec![1]),
+                face_move(1, 2, vec![]),
+                face_move(0, 2, vec![]),
+            ]
+        );
+        for node in 0..4 {
+            for mv in moves_from(&state, node).moves {
+                assert!(state.face.check(&ModelMove::from(mv)).is_ok());
+            }
+        }
+        assert!(moves_from(&state, 4).moves.is_empty());
+        let wire = serde_json::to_value(moves_from(&state, 1)).unwrap();
+        assert_eq!(wire["node"], json!(1));
+        assert_eq!(wire["moves"][0]["atA"], json!(null));
+        assert_eq!(wire["moves"][0]["enclosed"], json!([]));
+    }
+
+    /// The pieces of the face other than the loop's node that `mv` leaves
+    /// outside; a bare loop may read back as either side.
+    fn other_side(state: &GameState, mv: &FaceMove) -> Vec<usize> {
+        let face = state.face.corner_face(mv.a, None).unwrap();
+        let mut out: Vec<usize> = state
+            .face
+            .components(face)
+            .iter()
+            .map(|&c| state.face.lowest_node(c))
+            .filter(|&v| v != mv.a && !mv.enclosed.contains(&v))
+            .collect();
+        out.sort_unstable();
+        out
+    }
+
+    #[test]
+    fn route_move_draws_a_listed_move_that_embeds_as_itself_and_applies() {
+        let state = GameState::new(4);
+        for listed in moves_from(&state, 0).moves {
+            let reply = route_move(&state, listed.clone());
+            let RouteReply::Routed { mov, segments } = reply else {
+                panic!("{listed:?} did not route: {reply:?}");
+            };
+            let read = embedding::embed(&state, &mov.clone().by(Player::Human, 1000)).unwrap();
+            assert_eq!(
+                (read.a, read.at_a, read.b, read.at_b),
+                (listed.a, None, listed.b, None)
+            );
+            let mut got = read.enclosed.clone();
+            got.sort_unstable();
+            let bare_loop = listed.a == listed.b;
+            assert!(
+                got == listed.enclosed || (bare_loop && got == other_side(&state, &listed)),
+                "{listed:?} read back as {read:?}"
+            );
+            let mut played = state.clone();
+            let Outcome::Applied { snapshot } = apply(&mut played, mov) else {
+                panic!("the routed move for {listed:?} was rejected");
+            };
+            assert_eq!(snapshot.lines[0].segments, segments);
+        }
+        let wire = serde_json::to_value(route_move(&state, face_move(0, 1, vec![]))).unwrap();
+        assert_eq!(wire["kind"], json!("routed"));
+        assert!(!wire["segments"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn route_move_names_why_a_move_cannot_be_drawn() {
+        let state = GameState::new(4);
+        let off_corner = FaceMove {
+            at_a: Some(7),
+            ..face_move(0, 1, vec![])
+        };
+        let wire = serde_json::to_value(route_move(&state, off_corner)).unwrap();
+        assert_eq!(wire["kind"], json!("unroutable"));
+        assert_eq!(wire["reason"], json!("corner"));
     }
 }
