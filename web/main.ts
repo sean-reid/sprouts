@@ -15,7 +15,7 @@ import {
   type GameRecord,
 } from "./history";
 import { attachInput, type InputOptions, type PointerKind } from "./input";
-import { KeyboardPlay, type Routed } from "./keyboard";
+import { blockedReason, KeyboardPlay, type Routed } from "./keyboard";
 import { Loupe } from "./loupe";
 import { healPath } from "./path";
 import { startingNodes, wireRecording } from "./record";
@@ -130,6 +130,7 @@ const keys = new KeyboardPlay(
   {
     canPick: () => canPlay() && state.mode === "idle",
     canPlay,
+    whyNot: () => blockedReason(state, seeking || submitting),
     movesFrom: async (node) => (await engine.call("movesFrom", node)).moves,
     route: (mv) => engine.latest("route", "routeMove", mv),
     lock: lockRouted,

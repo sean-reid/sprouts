@@ -13,6 +13,8 @@ import {
   expectDotAt,
   findDot,
   frameOf,
+  holdNext,
+  interceptWorkerMessages,
   nodeOnScreen,
   openBoard,
   ringSamplesAround,
@@ -178,6 +180,69 @@ test("Escape at each step returns to idle and keeps focus where it was", async (
   await expect(page.locator("#cancelBtn")).toBeHidden();
   expect(await findDot(page)).toBeNull();
   await expect(page.locator("#undoBtn")).toBeDisabled();
+});
+
+// The finished game opened at a cursor with that many moves played; an
+// even cursor has the human to move, an odd one opens in review.
+async function loadAtCursor(page: Page, cursor: number): Promise<void> {
+  const record = JSON.parse(await readFile("fixtures/saved/finished-4n-500.json", "utf8"));
+  record.cursor = cursor;
+  await page.addInitScript(interceptWorkerMessages);
+  await page.addInitScript(
+    (saved) => localStorage.setItem("sprouts.game", saved),
+    JSON.stringify(record),
+  );
+  await page.goto("/");
+}
+
+// After 8 moves nodes 4, 10 and 11 are alive and node 4 can only reach 10.
+test("Tab skips the nodes a picked node cannot reach, and a seek drops the pick", async ({
+  page,
+}) => {
+  await loadAtCursor(page, 8);
+  await expect(status(page)).toHaveText("Your turn!", { timeout: 60_000 });
+  await expect(page.locator("#nodeTargets button")).toHaveCount(3);
+  await nodeButton(page, 4).focus();
+  await page.keyboard.press("Enter");
+  await expect(status(page)).toHaveText("Node 4 picked. Tab to a partner and press Enter");
+  await expect(nodeButton(page, 11)).toHaveAttribute("tabindex", "-1");
+  await expect(nodeButton(page, 10)).toHaveAttribute("tabindex", "0");
+  await page.keyboard.press(tabKey());
+  await expect(nodeButton(page, 10)).toBeFocused();
+  await page.keyboard.press(tabKey());
+  await expect(nodeButton(page, 10)).toBeFocused();
+
+  await holdNext(page, "undo", 1500);
+  await page.locator("#undoBtn").focus();
+  await page.keyboard.press("Enter");
+  await nodeButton(page, 10).focus();
+  await page.keyboard.press("Enter");
+  await expect(status(page)).toHaveText("Wait for your turn");
+  await expect(page.locator("#cancelBtn")).toBeHidden();
+  expect(await findDot(page)).toBeNull();
+  await expect(status(page)).toHaveText("Move undone: your turn", { timeout: 20_000 });
+  await expect(page.locator("#cancelBtn")).toBeHidden();
+  expect(await findDot(page)).toBeNull();
+  for (const button of await page.locator("#nodeTargets button").all()) {
+    await expect(button).toHaveAttribute("tabindex", "0");
+  }
+});
+
+test("Enter on a node says why the board is not taking a move", async ({ page }) => {
+  await openBoard(page);
+  await drawBetween(page, 0, 1);
+  await nodeButton(page, 2).focus();
+  await page.keyboard.press("Enter");
+  await expect(status(page)).toHaveText("Finish or cancel the move in progress");
+  await expect(page.locator("#cancelBtn")).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(status(page)).toHaveText("Move cancelled");
+
+  await loadAtCursor(page, 7);
+  await expect(status(page)).toHaveText("Reviewing: move 7 of 9.", { timeout: 60_000 });
+  await page.locator("#nodeTargets button").first().focus();
+  await page.keyboard.press("Enter");
+  await expect(status(page)).toHaveText("Undo to play on from here.");
 });
 
 test("the game over dialog takes focus, keeps Tab inside and gives focus back", async ({

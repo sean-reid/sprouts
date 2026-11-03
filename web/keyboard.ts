@@ -14,6 +14,8 @@ export interface Table {
   // Whether a keyboard move in progress may go on: the human's turn on an
   // idle board or with a routed candidate up, nothing else pending.
   canPlay(): boolean;
+  // Why neither holds, for the status line.
+  whyNot(): string;
   movesFrom(node: number): Promise<FaceMove[]>;
   route(mv: FaceMove): Promise<RouteReply>;
   // Shows the routed curve as the locked stroke with its node dot.
@@ -63,7 +65,7 @@ export class KeyboardPlay {
     const phase = this.phase;
     if (phase.kind === "idle") {
       if (!this.table.canPick()) {
-        this.table.status(this.whyNot());
+        this.table.status(this.table.whyNot());
         return;
       }
       const ticket = ++this.ticket;
@@ -87,18 +89,16 @@ export class KeyboardPlay {
       this.table.status(`Node ${id} picked. Tab to a partner and press Enter${loop}`);
       return;
     }
-    if (!phase.partners.has(id) || this.routing || !this.table.canPlay()) return;
+    if (!phase.partners.has(id) || this.routing) return;
+    if (!this.table.canPlay()) {
+      this.table.status(this.table.whyNot());
+      return;
+    }
     if (phase.kind === "shown" && phase.partner === id) {
       this.table.commit();
       return;
     }
     await this.show(phase, id, touching(phase.moves, phase.start, id), 0, 1);
-  }
-
-  private whyNot(): string {
-    if (this.state.mode !== "idle") return "Finish or cancel the move in progress";
-    if (this.state.reviewing) return "Undo to play on from here.";
-    return "Wait for your turn";
   }
 
   // Left and Right step through the moves between the pair; both keys are
@@ -187,6 +187,16 @@ export class KeyboardPlay {
     if (count === 1) return `${capital(shape)}. Enter places the node, Escape cancels`;
     return `Move ${index + 1} of ${count}, ${shape}. Enter places the node, Left and Right show another`;
   }
+}
+
+// Why the board takes no keyboard move right now; `waiting` is a seek or
+// a submission in flight.
+export function blockedReason(state: GameState, waiting: boolean): string {
+  if (state.thinking || state.mode === "animating_ai" || waiting) return "Wait for your turn";
+  if (state.gameOver) return "The game is over. Undo or start a new game";
+  if (state.reviewing) return "Undo to play on from here.";
+  if (state.mode !== "idle") return "Finish or cancel the move in progress";
+  return "Wait for your turn";
 }
 
 function capital(text: string): string {
