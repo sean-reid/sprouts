@@ -1,5 +1,4 @@
 import { expect, test } from "@playwright/test";
-import { DOUBLE_TAP_ZOOM, wheelZoomFactor } from "../../web/view";
 import {
   ctrlWheel,
   expectNodeDrawnAt,
@@ -28,7 +27,7 @@ test("ctrl+wheel zooms at a node and a stroke from it still locks a line", async
   const fitted = fit(frame);
   const a = nodeAt(frame, fitted, 0);
   const delta = await ctrlWheel(page, a, -100);
-  const zoomed = zoomAt(frame, fitted, a, wheelZoomFactor(delta));
+  const zoomed = zoomAt(frame, fitted, a, 2 ** (-delta / 100));
   const b = nodeAt(frame, zoomed, 1);
   await expectNodeDrawnAt(page, a);
   await expectNodeDrawnAt(page, b);
@@ -47,7 +46,7 @@ test("plain wheel and space drag pan the zoomed board", async ({ page }) => {
   const frame = await frameOf(page);
   const centre = { x: frame.left + frame.width / 2, y: frame.top + frame.height / 2 };
   const delta = await ctrlWheel(page, centre, -100);
-  let t = zoomAt(frame, fit(frame), centre, wheelZoomFactor(delta));
+  let t = zoomAt(frame, fit(frame), centre, 2 ** (-delta / 100));
   await expectNodeDrawnAt(page, nodeAt(frame, t, 2));
 
   const panned = await plainWheel(page, 40);
@@ -127,7 +126,7 @@ test("double tap zooms in at a node and double tap again fits", async ({ page })
   const a = nodeAt(frame, fitted, 0);
   await page.touchscreen.tap(a.x, a.y);
   await page.touchscreen.tap(a.x, a.y);
-  const zoomed = zoomAt(frame, fitted, a, DOUBLE_TAP_ZOOM);
+  const zoomed = zoomAt(frame, fitted, a, 2.5);
   await expectNodeDrawnAt(page, a);
   await expectNodeDrawnAt(page, nodeAt(frame, zoomed, 1));
   await expect(status(page)).toHaveText("Draw a line between two nodes");
@@ -138,6 +137,16 @@ test("double tap zooms in at a node and double tap again fits", async ({ page })
   await page.touchscreen.tap(a.x, a.y);
   await expectNodeDrawnAt(page, nodeAt(frame, fitted, 1));
   await expect(page.locator("#mobileOverlay")).toBeHidden();
+});
+
+test("the backing store follows devicePixelRatio", async ({ page }) => {
+  const backing = await page.evaluate(() => {
+    const canvas = document.getElementById("canvas") as HTMLCanvasElement;
+    const rect = canvas.getBoundingClientRect();
+    return { width: canvas.width, css: rect.width, dpr: window.devicePixelRatio };
+  });
+  expect(backing.width).toBe(Math.round(backing.css * backing.dpr));
+  if (test.info().project.name === "mobile") expect(backing.dpr).toBe(2);
 });
 
 test("a click on a node without movement changes nothing", async ({ page }) => {
