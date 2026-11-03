@@ -15,7 +15,9 @@ use std::f64::consts::TAU;
 
 use crate::curve;
 use crate::face::{Component, HalfEdgeId, IllegalMove, Move as FaceMove, NodeId};
-use crate::geometry::{closest_point_on_segment, point_in_polygon, signed_area};
+use crate::geometry::{
+    closest_point_on_segment, point_in_polygon, segment_intersection, signed_area,
+};
 use crate::types::{scale, GameState, Move, Point, MIN_PATH_CLEARANCE};
 use crate::validation::Rejection;
 
@@ -33,14 +35,17 @@ pub fn embed(state: &GameState, mov: &Move) -> Result<FaceMove, Rejection> {
     let forward = a != b || new_loop_runs_forward(state, a, &flat);
     let curve = run(&flat, forward);
     let back = run(&flat, !forward);
-    let at_a = corner(state, a, &curve);
-    let at_b = corner(state, b, &back);
+    let at_a = corner(state, a, &curve)?;
+    let at_b = corner(state, b, &back)?;
     let own = face
         .component_of(a, at_a)
         .map_err(|e| rejection(state, e, mov))?;
     let other = face
         .component_of(b, at_b)
         .map_err(|e| rejection(state, e, mov))?;
+    if face.corner_face(a, at_a) != face.corner_face(b, at_b) {
+        return Err(crossing(state, &flat, mov));
+    }
     let enclosed = if own == other {
         enclosed_by(state, a, at_a, b, at_b, &curve, own)
     } else {
@@ -69,6 +74,37 @@ fn rejection(state: &GameState, why: IllegalMove, mov: &Move) -> Rejection {
         IllegalMove::Corner | IllegalMove::Face | IllegalMove::Enclosed => {
             Rejection::crossing_somewhere(&mov.polyline)
         }
+    }
+}
+
+/// The ends sit in different faces, so the path crosses a boundary. Where
+/// its flattening meets an existing line, farthest from either end node,
+/// names the segment; the lines at the end nodes touch the path there, so
+/// those meetings do not count. Failing any, the whole path.
+fn crossing(state: &GameState, flat: &[Point], mov: &Move) -> Rejection {
+    let ends = [
+        state.nodes[mov.from_node].position,
+        state.nodes[mov.to_node].position,
+    ];
+    let clear = |p: &Point| {
+        ends.iter()
+            .map(|e| e.distance_to(p))
+            .fold(f64::INFINITY, f64::min)
+    };
+    let hit = flat
+        .windows(2)
+        .flat_map(|seg| {
+            state.lines.iter().flat_map(move |line| {
+                line.flat.windows(2).filter_map(move |other| {
+                    segment_intersection(&seg[0], &seg[1], &other[0], &other[1])
+                })
+            })
+        })
+        .filter(|at| clear(at) > 1e-6)
+        .max_by(|x, y| clear(x).partial_cmp(&clear(y)).unwrap_or(Ordering::Equal));
+    match hit {
+        Some(at) => Rejection::crossing(&mov.polyline, &at),
+        None => Rejection::crossing_somewhere(&mov.polyline),
     }
 }
 
@@ -119,24 +155,38 @@ fn probe(state: &GameState, comp: Component) -> Point {
     state.nodes[v].position
 }
 
+/// Headings this close to a spoke, in radians, have no side to pick.
+const ALONG_SPOKE: f64 = 1e-9;
+
 /// The spoke of `v` the new line follows in the rotation, read from the
-/// direction `outward` leaves `v` in.
-fn corner(state: &GameState, v: NodeId, outward: &[Point]) -> Option<HalfEdgeId> {
+/// direction `outward` leaves `v` in. A heading on top of a spoke is refused.
+fn corner(
+    state: &GameState,
+    v: NodeId,
+    outward: &[Point],
+) -> Result<Option<HalfEdgeId>, Rejection> {
     let rotation = state.face.rotation(v);
     let center = state.nodes[v].position;
     let radius = MIN_PATH_CLEARANCE * scale(state.board_size);
     let heading = leaving_angle(center, outward, radius);
-    rotation.iter().copied().min_by(|&x, &y| {
-        let turn_to = |h| {
-            turn(
-                leaving_angle(center, &half_edge_path(state, h), radius),
-                heading,
-            )
-        };
+    let turn_to = |h| {
+        turn(
+            leaving_angle(center, &half_edge_path(state, h), radius),
+            heading,
+        )
+    };
+    let on_a_spoke = rotation.iter().any(|&h| {
+        let t = turn_to(h);
+        t < ALONG_SPOKE || t > TAU - ALONG_SPOKE
+    });
+    if on_a_spoke {
+        return Err(Rejection::along_line(v));
+    }
+    Ok(rotation.iter().copied().min_by(|&x, &y| {
         turn_to(x)
             .partial_cmp(&turn_to(y))
             .unwrap_or(Ordering::Equal)
-    })
+    }))
 }
 
 /// Counterclockwise angle from `from` to `to`, in [0, 2π).
@@ -463,7 +513,7 @@ mod tests {
     }
 
     #[test]
-    fn a_line_between_faces_is_a_crossing_over_the_whole_path() {
+    fn a_line_between_faces_is_a_crossing_at_the_segment_that_crosses() {
         let mut state = row();
         state
             .apply_move(mov(
@@ -481,7 +531,7 @@ mod tests {
         );
         let rejection = embed(&state, &escape).unwrap_err();
         assert_eq!(rejection.kind, RejectionKind::PathCrossesLine);
-        assert_eq!(rejection.at, BoardLocation::Segments { first: 0, last: 9 });
+        assert_eq!(rejection.at, BoardLocation::Segments { first: 3, last: 3 });
     }
 
     #[test]
@@ -794,6 +844,114 @@ mod tests {
             assert_eq!(corners_in(3, outer), 1);
             assert_eq!(corners_in(4, lens), 1);
             assert_eq!(corners_in(4, outer), 2);
+        }
+    }
+
+    #[test]
+    fn a_path_leaving_along_an_existing_line_is_refused_at_the_node() {
+        let state = crossroads();
+        let along = mov(
+            1,
+            3,
+            vec![
+                p(500.0, 500.0),
+                p(450.0, 500.0),
+                p(450.0, 200.0),
+                p(500.0, 200.0),
+            ],
+            p(450.0, 200.0),
+        );
+        let rejection = embed(&state, &along).unwrap_err();
+        assert_eq!(rejection.kind, RejectionKind::PathAlongLine);
+        assert_eq!(rejection.at, BoardLocation::Node { id: 1 });
+    }
+
+    #[test]
+    fn a_first_segment_shorter_than_the_lookup_radius_does_not_set_the_heading() {
+        let state = crossroads();
+        let jog = mov(
+            1,
+            3,
+            vec![p(500.0, 500.0), p(503.0, 499.0), p(500.0, 200.0)],
+            p(501.0, 350.0),
+        );
+        assert_eq!(embed(&state, &jog).unwrap().at_a, Some(7));
+    }
+
+    /// A circle of radius 4 through `at`, bulging by (dx, dy) from it.
+    fn tiny_loop(at: Point, dx: f64, dy: f64) -> Vec<Point> {
+        (0..=24)
+            .map(|i| {
+                let t = i as f64 / 24.0 * TAU;
+                p(
+                    at.x + dx - dx * t.cos() + dy * t.sin(),
+                    at.y + dy - dy * t.cos() - dx * t.sin(),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_loop_smaller_than_the_lookup_radius_still_embeds() {
+        let state = row();
+        let alone = mov(0, 0, tiny_loop(p(200.0, 500.0), 4.0, 0.0), p(208.0, 500.0));
+        let topology = embed(&state, &alone).unwrap();
+        assert_eq!((topology.a, topology.at_a), (0, None));
+        assert!(topology.enclosed.is_empty());
+
+        let mut state = row();
+        state
+            .apply_move(mov(
+                0,
+                1,
+                straight(p(200.0, 500.0), p(500.0, 500.0)),
+                p(350.0, 500.0),
+            ))
+            .unwrap();
+        let above = mov(1, 1, tiny_loop(p(500.0, 500.0), 0.0, -4.0), p(500.0, 492.0));
+        let topology = embed(&state, &above).unwrap();
+        assert_eq!((topology.at_a, topology.at_b), (Some(3), Some(3)));
+        let along = mov(1, 1, tiny_loop(p(500.0, 500.0), -4.0, 0.0), p(492.0, 500.0));
+        assert_eq!(
+            embed(&state, &along).unwrap_err().kind,
+            RejectionKind::PathAlongLine
+        );
+    }
+
+    #[test]
+    fn a_crossing_is_named_where_the_path_meets_the_line_not_where_it_leaves_its_node() {
+        let state = loop_at_node_one(p(660.0, 500.0), false);
+        let under = mov(
+            0,
+            2,
+            vec![
+                p(200.0, 500.0),
+                p(200.0, 700.0),
+                p(660.0, 700.0),
+                p(660.0, 500.0),
+            ],
+            p(430.0, 700.0),
+        );
+        let rejection = embed(&state, &under).unwrap_err();
+        assert_eq!(rejection.kind, RejectionKind::PathCrossesLine);
+        assert_eq!(rejection.at, BoardLocation::Segments { first: 2, last: 2 });
+    }
+
+    #[test]
+    fn a_heading_a_hair_before_a_spoke_is_refused_too() {
+        let state = crossroads();
+        let shade = 1e-10_f64.tan() * 300.0;
+        for side in [shade, -shade] {
+            let grazing = mov(
+                1,
+                2,
+                vec![p(500.0, 500.0), p(800.0, 500.0 + side)],
+                p(650.0, 500.0 + side / 2.0),
+            );
+            assert_eq!(
+                embed(&state, &grazing).unwrap_err().kind,
+                RejectionKind::PathAlongLine
+            );
         }
     }
 }

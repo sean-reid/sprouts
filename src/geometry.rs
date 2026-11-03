@@ -89,6 +89,25 @@ pub fn point_in_polygon(polygon: &[Point], p: &Point) -> bool {
     inside
 }
 
+/// Where two closed segments meet, if they do and are not parallel.
+pub fn segment_intersection(a1: &Point, a2: &Point, b1: &Point, b2: &Point) -> Option<Point> {
+    let s1_x = a2.x - a1.x;
+    let s1_y = a2.y - a1.y;
+    let s2_x = b2.x - b1.x;
+    let s2_y = b2.y - b1.y;
+    let denom = -s2_x * s1_y + s1_x * s2_y;
+    if denom.abs() < 1e-10 {
+        return None;
+    }
+    let s = (-s1_y * (a1.x - b1.x) + s1_x * (a1.y - b1.y)) / denom;
+    let t = (s2_x * (a1.y - b1.y) - s2_y * (a1.x - b1.x)) / denom;
+    if (0.0..=1.0).contains(&s) && (0.0..=1.0).contains(&t) {
+        Some(Point::new(a1.x + t * s1_x, a1.y + t * s1_y))
+    } else {
+        None
+    }
+}
+
 /// Check if two line segments intersect (excluding endpoints)
 pub fn segments_intersect(a1: &Point, a2: &Point, b1: &Point, b2: &Point) -> bool {
     fn ccw(a: &Point, b: &Point, c: &Point) -> bool {

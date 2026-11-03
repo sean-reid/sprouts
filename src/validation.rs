@@ -4,7 +4,7 @@ use tsify::Tsify;
 use crate::curve;
 use crate::geometry::{
     closest_point_on_polyline, closest_point_on_segment, distance, polyline_length,
-    segments_intersect,
+    segment_intersection, segments_intersect,
 };
 use crate::types::{
     scale, GameState, Move, Point, AI_INTERSECTION_TOLERANCE, HUMAN_INTERSECTION_TOLERANCE,
@@ -30,6 +30,7 @@ pub enum RejectionKind {
     NodeTooClose,
     PathTooCloseToNode,
     PathCrossesLine,
+    PathAlongLine,
     NodeOffPath,
     NodeOffBoard,
     NodeNotInMiddle,
@@ -84,7 +85,7 @@ impl Rejection {
         )
     }
 
-    fn crossing(path: &[Point], crossing: &Point) -> Self {
+    pub(crate) fn crossing(path: &[Point], crossing: &Point) -> Self {
         let segment = nearest_segment(path, crossing);
         Self {
             kind: RejectionKind::PathCrossesLine,
@@ -94,6 +95,15 @@ impl Rejection {
                 last: segment,
             },
         }
+    }
+
+    /// The path leaves `id` in the exact direction of a line already there.
+    pub(crate) fn along_line(id: usize) -> Self {
+        Self::node(
+            RejectionKind::PathAlongLine,
+            id,
+            "Path leaves the node along an existing line",
+        )
     }
 
     pub(crate) fn missing_node(id: usize, role: &str) -> Self {
@@ -352,7 +362,7 @@ fn validate_move_internal(
                 }
                 debug_log!("[{}]   Line {}: INTERSECTION DETECTED", mode, line.id);
                 let crossing =
-                    get_intersection_point(seg_start, seg_end, line_seg_start, line_seg_end);
+                    segment_intersection(seg_start, seg_end, line_seg_start, line_seg_end);
                 if geometrically_shares_node {
                     if let Some(intersection) = crossing {
                         let from_pos = from_node.position;
@@ -490,7 +500,7 @@ fn validate_move_internal_tight(state: &GameState, mov: &Move) -> Result<(), Rej
                     continue;
                 }
                 let crossing =
-                    get_intersection_point(seg_start, seg_end, line_seg_start, line_seg_end);
+                    segment_intersection(seg_start, seg_end, line_seg_start, line_seg_end);
                 if geometrically_shares_node {
                     if let Some(intersection) = crossing {
                         let mut min_dist_to_any_node = f64::INFINITY;
@@ -512,24 +522,6 @@ fn validate_move_internal_tight(state: &GameState, mov: &Move) -> Result<(), Rej
         }
     }
     Ok(())
-}
-
-fn get_intersection_point(a1: &Point, a2: &Point, b1: &Point, b2: &Point) -> Option<Point> {
-    let s1_x = a2.x - a1.x;
-    let s1_y = a2.y - a1.y;
-    let s2_x = b2.x - b1.x;
-    let s2_y = b2.y - b1.y;
-    let denom = -s2_x * s1_y + s1_x * s2_y;
-    if denom.abs() < 1e-10 {
-        return None;
-    }
-    let s = (-s1_y * (a1.x - b1.x) + s1_x * (a1.y - b1.y)) / denom;
-    let t = (s2_x * (a1.y - b1.y) - s2_y * (a1.x - b1.x)) / denom;
-    if (0.0..=1.0).contains(&s) && (0.0..=1.0).contains(&t) {
-        Some(Point::new(a1.x + t * s1_x, a1.y + t * s1_y))
-    } else {
-        None
-    }
 }
 
 pub fn validate_new_node_placement(
