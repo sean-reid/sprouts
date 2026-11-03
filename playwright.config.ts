@@ -34,6 +34,11 @@ export default defineConfig({
       name: "desktop",
       use: { ...devices["Desktop Chrome"], viewport: { width: 1024, height: 800 } },
     },
+    {
+      name: "webkit",
+      testMatch: /(layout|play)\.spec\.ts$/,
+      use: { ...devices["Desktop Safari"], viewport: { width: 1024, height: 800 } },
+    },
   ],
   webServer: {
     command: `npm run build && npx vite preview --port ${port} --strictPort --host 127.0.0.1`,

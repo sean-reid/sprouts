@@ -14,6 +14,7 @@ interface Rect {
 }
 
 interface Layout {
+  play: Rect;
   canvas: Rect;
   panel: Rect;
   controls: Rect;
@@ -22,6 +23,10 @@ interface Layout {
 
 function other(player: Player): Player {
   return player === "human" ? "ai" : "human";
+}
+
+function wideViewport(): boolean {
+  return (test.info().project.use.viewport?.width ?? 0) >= 1024;
 }
 
 function layoutOf(page: Page): Promise<Layout> {
@@ -33,6 +38,7 @@ function layoutOf(page: Page): Promise<Layout> {
     const rows = [...document.querySelectorAll(".controls")].map(rect);
     const items = ["#undoBtn", ".toggle", "#turn"].map((s) => rect(document.querySelector(s)!));
     return {
+      play: rect(document.querySelector(".play-area")!),
       canvas: rect(document.getElementById("canvas")!),
       panel: rect(document.getElementById("history")!),
       controls: {
@@ -55,10 +61,13 @@ async function expectSideBySide(page: Page, label: string): Promise<void> {
   const controlsMid = (before.controls.left + before.controls.right) / 2;
   expect(Math.abs(groupMid - controlsMid)).toBeLessThanOrEqual(4);
   for (const top of before.tops) expect(Math.abs(top - before.tops[0]!)).toBeLessThan(1);
-  expect(before.canvas.right - before.canvas.left).toBeCloseTo(
-    before.canvas.bottom - before.canvas.top,
-    0,
+  const side = before.canvas.right - before.canvas.left;
+  expect(side).toBeCloseTo(before.canvas.bottom - before.canvas.top, 0);
+  const room = Math.min(
+    before.play.bottom - before.play.top,
+    before.play.right - before.play.left - (before.panel.right - before.panel.left) - gap,
   );
+  expect(side).toBeCloseTo(room, 0);
   await shot(page, `layout-idle-${label}`);
 
   await playExchange(page);
@@ -81,7 +90,7 @@ async function expectIndicator(page: Page, text: string, player: Player): Promis
 }
 
 test("the board and move list sit centred under one row of controls", async ({ page }) => {
-  test.skip(test.info().project.name !== "desktop", "the side-by-side layout starts at 1024 wide");
+  test.skip(!wideViewport(), "the side-by-side layout starts at 1024 wide");
   await openBoard(page);
   await expectSideBySide(page, "1024");
 
@@ -104,7 +113,7 @@ test("a finished game names the winner on the indicator and the ring", async ({ 
   await expectIndicator(page, won === "human" ? "You won" : "AI won", won);
 
   await shot(page, "layout-finished");
-  if (test.info().project.name === "desktop") {
+  if (wideViewport()) {
     await page.setViewportSize({ width: 1600, height: 900 });
     await expectIndicator(page, won === "human" ? "You won" : "AI won", won);
     await shot(page, "layout-finished-1600");
