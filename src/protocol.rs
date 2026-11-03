@@ -174,23 +174,17 @@ pub struct MovesFrom {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Tsify)]
 #[serde(rename_all = "camelCase")]
 pub enum UnroutableKind {
-    Corner,
-    Corridor,
     Room,
-    Crossing,
     Topology,
-    Rejected,
+    Bug,
 }
 
 impl From<&Unroutable> for UnroutableKind {
     fn from(why: &Unroutable) -> Self {
         match why {
-            Unroutable::Corner => Self::Corner,
-            Unroutable::Corridor => Self::Corridor,
             Unroutable::Room => Self::Room,
-            Unroutable::Crossing => Self::Crossing,
             Unroutable::Topology => Self::Topology,
-            Unroutable::Rejected(_) => Self::Rejected,
+            Unroutable::Bug(_) => Self::Bug,
         }
     }
 }
@@ -353,7 +347,7 @@ fn cut_off(model: &face::FaceModel) -> usize {
 /// Changes whenever the router draws a different curve for the same face
 /// move. A share link carries it, so a page with another router refuses
 /// the link instead of drawing a game the sharer never saw.
-pub const ROUTER_VERSION: u8 = 1;
+pub const ROUTER_VERSION: u8 = 2;
 
 /// A game with its real geometry, for working out which moves the router
 /// redraws. `known` holds the face move of a line already known to be
@@ -510,12 +504,9 @@ fn illegal(state: &GameState, mv: &face::Move, why: IllegalMove) -> Rejection {
 
 fn unroutable(mv: &face::Move, why: Unroutable) -> Rejection {
     match why {
-        Unroutable::Rejected(rejection) => rejection,
-        Unroutable::Corner => Rejection::unroutable(mv.a, "no matching corner"),
-        Unroutable::Corridor => Rejection::unroutable(mv.a, "no corridor through the face"),
         Unroutable::Room => Rejection::unroutable(mv.a, "no room"),
-        Unroutable::Crossing => Rejection::unroutable(mv.a, "the curve crosses a line"),
         Unroutable::Topology => Rejection::unroutable(mv.a, "the curve reads as another move"),
+        Unroutable::Bug(what) => Rejection::unroutable(mv.a, what),
     }
 }
 

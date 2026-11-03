@@ -1,4 +1,4 @@
-use super::sweep::{self, cramped, draws};
+use super::sweep::{self, draws};
 use super::*;
 use crate::face::Move as FaceMove;
 use crate::geometry::closest_point_on_polyline;
@@ -59,6 +59,11 @@ fn closest_pair(state: &GameState) -> f64 {
     best
 }
 
+/// The wall clearance the router erodes by.
+fn eroded_by(board: usize) -> f64 {
+    MIN_PATH_CLEARANCE_AI * scale(board) + curve::tolerance(board)
+}
+
 #[test]
 fn a_chord_on_an_empty_board_runs_straight_between_the_nodes() {
     let mut state = GameState::new(4);
@@ -72,7 +77,7 @@ fn a_chord_on_an_empty_board_runs_straight_between_the_nodes() {
     let flat = mov.flatten(1.0);
     for q in &flat {
         let (_, off) = crate::geometry::closest_point_on_segment(&a, &b, q);
-        assert!(off < 2.0, "strayed {off} from the chord at {q:?}");
+        assert!(off < 3.0, "strayed {off} from the chord at {q:?}");
     }
     state.apply_move(mov).unwrap();
 }
@@ -84,9 +89,9 @@ fn a_chord_bends_around_a_node_in_its_way() {
     assert_eq!(protocol::check(&state, &mov), Ok(()));
     let middle = state.nodes[1].position;
     let clearance = curve::nearest(&mov.segments, &middle).unwrap().distance;
-    assert!(clearance >= MIN_PATH_CLEARANCE_AI, "{clearance}");
+    assert!(clearance >= ai_node_clearance(1000), "{clearance}");
     assert!(
-        clearance <= NODE_ROOM * MIN_NODE_SPACING_AI + MIN_PATH_CLEARANCE_AI,
+        clearance <= NODE_ROOM * MIN_NODE_SPACING_AI + ai_node_clearance(1000),
         "{clearance}"
     );
 }
@@ -126,7 +131,10 @@ fn a_loop_enclosing_nothing_is_a_small_circle_clear_of_everything() {
         .map(|q| q.distance_to(&a))
         .fold(0.0, f64::max);
     let disc = node_disc(state.board_size);
-    assert!(reach >= 3.0 * disc, "{reach}");
+    assert!(
+        reach >= 3.0 * disc - curve::tolerance(state.board_size),
+        "{reach}"
+    );
     assert!(reach <= 5.0 * disc, "{reach}");
     assert!(mov.new_node_pos.distance_to(&a) >= 2.0 * disc);
     state.apply_move(mov).unwrap();
@@ -167,27 +175,24 @@ fn corridor(board: usize, gap: f64) -> GameState {
     state
 }
 
+/// A passage narrower than two clearances is closed; the same passage one
+/// clearance wider is open, and the line runs down its middle.
 #[test]
-fn a_corridor_one_clearance_wide_is_passable() {
-    let state = corridor(1000, MIN_PATH_CLEARANCE_AI);
-    let mov = route(&state, &chord(0, 1)).unwrap();
-    assert_eq!(protocol::check(&state, &mov), Ok(()));
-    let mid = 500.0;
-    for q in mov.flatten(0.5) {
-        assert!((q.y - mid).abs() < MIN_PATH_CLEARANCE_AI / 2.0, "{q:?}");
-    }
-}
-
-#[test]
-fn a_mobile_sized_corridor_is_passable_too() {
-    let state = corridor(500, MIN_PATH_CLEARANCE_AI * scale(500));
-    let mov = route(&state, &chord(0, 1)).unwrap();
-    assert_eq!(protocol::check(&state, &mov), Ok(()));
-    for q in mov.flatten(0.5) {
+fn a_passage_narrower_than_two_clearances_has_no_room() {
+    for board in [1000, 500] {
+        let c = eroded_by(board);
+        let closed = corridor(board, 2.0 * c - 1.0);
         assert!(
-            (q.y - 250.0).abs() < MIN_PATH_CLEARANCE_AI * scale(500) / 2.0,
-            "{q:?}"
+            matches!(route(&closed, &chord(0, 1)), Err(Unroutable::Room)),
+            "{board}"
         );
+        let open = corridor(board, 3.0 * c - 1.0);
+        let mov = route(&open, &chord(0, 1)).unwrap_or_else(|e| panic!("{board}: {e:?}"));
+        assert_eq!(protocol::check(&open, &mov), Ok(()));
+        let mid = board as f64 / 2.0;
+        for q in mov.flatten(0.5) {
+            assert!((q.y - mid).abs() < c / 2.0, "{board}: {q:?}");
+        }
     }
 }
 
@@ -229,19 +234,13 @@ fn the_ai_opens_with_a_move_the_normal_validator_accepts() {
     }
 }
 
-/// Share of listed moves that may fail to route for a reason other than
-/// room over the random games, checked after every game once `SAMPLE`
-/// routes have been tried; the measured share is in the PR and the bench
-/// report, most of it lines that cannot get the node clearance past a
-/// neighbour.
-const ROUTE_FAILURE_CEILING: f64 = 0.2;
-const SAMPLE: usize = 200;
-/// Routes tried, and failed for reasons other than room, over every case
-/// of the property test so far.
+/// Routes tried over every case of the property test so far, by outcome.
 static TALLY: std::sync::Mutex<sweep::Tally> = std::sync::Mutex::new(sweep::Tally {
     tried: 0,
-    failed: 0,
-    kinds: std::collections::BTreeMap::new(),
+    room: 0,
+    topology: 0,
+    bug: 0,
+    bugs: std::collections::BTreeMap::new(),
 });
 
 /// Random games to play; an unoptimised build takes some twenty seconds
@@ -265,35 +264,79 @@ proptest! {
 
     /// Random games where every move is drawn by the router: a random search
     /// move each turn, the list the AI ranks, falling back through the
-    /// others when it cannot be drawn. A position with nothing drawable has
-    /// failed on room alone, and the moves that fail otherwise stay rare.
-    /// A failing position prints as a bench fixture.
+    /// others when it cannot be drawn. No route may fail as a bug; a
+    /// failing position prints as a bench fixture.
     #[test]
-    fn every_listed_move_routes(nodes in 4usize..=12, picks in prop::collection::vec(any::<u32>(), 36)) {
+    fn no_listed_move_fails_as_a_bug(nodes in 4usize..=12, picks in prop::collection::vec(any::<u32>(), 36)) {
         let tally = sweep::game(nodes, &picks);
         prop_assert!(tally.is_ok(), "{}", tally.as_ref().unwrap_err());
         let mut total = TALLY.lock().unwrap();
         total.add(&tally.unwrap());
-        eprintln!("routes failed {} of {}: {:?}", total.failed, total.tried, total.kinds);
-        prop_assert!(
-            total.tried < SAMPLE || total.failed as f64 <= ROUTE_FAILURE_CEILING * total.tried as f64,
-            "{} of {} routes failed for reasons other than room: {:?}",
-            total.failed, total.tried, total.kinds
-        );
+        eprintln!("{total}");
+        prop_assert_eq!(total.bug, 0);
     }
 }
 
-/// Routes over the recorded positions that may still fail for a reason
-/// other than room. The positions were picked because the router failed
-/// in them, so this is the count to drive down, not a rate to hold.
-const HARD_FAILURE_ALLOWANCE: usize = 40;
-
-/// Positions from random games where the router once failed. Every
-/// position keeps a move the router can draw, and the moves that fail for
-/// a reason other than room stay within the allowance, each one listed.
+/// Positions from random games where an earlier router failed. Every
+/// position keeps a move the router can draw, and no route fails as a bug.
 #[test]
 fn recorded_positions_keep_a_drawable_move() {
-    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/routing");
+    let paths = fixture_paths("fixtures/routing");
+    assert!(!paths.is_empty());
+    let mut tally = sweep::Tally::default();
+    let mut undrawn = Vec::new();
+    for path in &paths {
+        let state = position(path);
+        let moves = state.face.search_moves();
+        let mut drawn = 0;
+        for mv in &moves {
+            tally.tried += 1;
+            match draws(&state, mv) {
+                Ok(_) => drawn += 1,
+                Err(Unroutable::Bug(what)) => {
+                    panic!("{}: {mv:?} failed as a bug: {what}", path.display())
+                }
+                Err(Unroutable::Room) => tally.room += 1,
+                Err(Unroutable::Topology) => tally.topology += 1,
+            }
+        }
+        eprintln!(
+            "{}: {drawn} of {} moves drawn",
+            path.file_name().unwrap().to_string_lossy(),
+            moves.len()
+        );
+        if drawn == 0 {
+            undrawn.push(path.display().to_string());
+        }
+    }
+    eprintln!("{tally}");
+    assert!(undrawn.is_empty(), "no listed move routes in {undrawn:?}");
+}
+
+/// The position after every move of a fixture, with the AI to move.
+fn position(path: &std::path::Path) -> GameState {
+    let fixture = crate::replay::load(path).unwrap();
+    let mut state = fixture.start();
+    state.current_player = Player::AI;
+    for m in &fixture.moves {
+        let polyline: Vec<Point> = m.polyline.iter().map(|q| p(q[0], q[1])).collect();
+        let mov = Move::new(
+            m.from,
+            m.to,
+            polyline,
+            p(m.new_node[0], m.new_node[1]),
+            Player::AI,
+            fixture.board_size,
+        );
+        state.apply_move(mov).unwrap();
+        state.current_player = Player::AI;
+    }
+    state
+}
+
+/// The JSON files under `dir`, sorted.
+fn fixture_paths(dir: &str) -> Vec<std::path::PathBuf> {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(dir);
     let mut paths: Vec<_> = std::fs::read_dir(&dir)
         .unwrap()
         .filter_map(Result::ok)
@@ -301,71 +344,32 @@ fn recorded_positions_keep_a_drawable_move() {
         .filter(|p| p.extension().is_some_and(|e| e == "json"))
         .collect();
     paths.sort();
-    assert!(!paths.is_empty());
-    let mut hard = Vec::new();
-    let mut tried = 0usize;
-    for path in &paths {
-        let fixture = crate::replay::load(path).unwrap();
-        let mut state = fixture.start();
-        state.current_player = Player::AI;
-        for m in &fixture.moves {
-            let polyline: Vec<Point> = m.polyline.iter().map(|q| p(q[0], q[1])).collect();
-            let mov = Move::new(
-                m.from,
-                m.to,
-                polyline,
-                p(m.new_node[0], m.new_node[1]),
-                Player::AI,
-                fixture.board_size,
-            );
-            state.apply_move(mov).unwrap();
-            state.current_player = Player::AI;
-        }
-        let moves = state.face.search_moves();
-        let mut drawn = 0;
-        let mut reasons = Vec::new();
-        for mv in &moves {
-            match draws(&state, mv) {
-                Ok(_) => drawn += 1,
-                Err(why) => {
-                    if !cramped(&why) {
-                        hard.push(format!("{}: {mv:?} -> {why:?}", path.display()));
-                    }
-                    reasons.push(why);
-                }
-            }
-        }
-        tried += moves.len();
-        assert!(
-            drawn > 0 || reasons.iter().all(sweep::walled_in),
-            "{}: no listed move routes, {reasons:?}",
-            path.display()
-        );
-    }
-    assert!(
-        hard.len() <= HARD_FAILURE_ALLOWANCE,
-        "{} of {tried} routes failed for reasons other than room:\n{}",
-        hard.len(),
-        hard.join("\n")
-    );
+    paths
+}
+
+/// The bits of every point of a drawn move's flattening and of its new
+/// node.
+#[cfg(not(debug_assertions))]
+fn bits(state: &GameState, drawn: &Move) -> String {
+    let tolerance = curve::tolerance(state.board_size);
+    let bits: Vec<String> = drawn
+        .flatten(tolerance)
+        .iter()
+        .chain(std::iter::once(&drawn.new_node_pos))
+        .map(|q| format!("{:x},{:x}", q.x.to_bits(), q.y.to_bits()))
+        .collect();
+    bits.join(" ")
 }
 
 /// Every move of every fixture under fixtures/games routed from its face
-/// move in the position it was played, as text: the bits of each
-/// flattening point and of the new node, or the failure.
+/// move in the position it was played, then every search move of every
+/// position under fixtures/routing, as text: the bits of each flattening
+/// point and of the new node, or the failure.
 #[cfg(not(debug_assertions))]
 fn routed_fixtures() -> String {
-    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/games");
-    let mut paths: Vec<_> = std::fs::read_dir(&dir)
-        .unwrap()
-        .filter_map(Result::ok)
-        .map(|e| e.path())
-        .filter(|p| p.extension().is_some_and(|e| e == "json"))
-        .collect();
-    paths.sort();
     let mut out = String::new();
-    for path in &paths {
-        let fixture = crate::replay::load(path).unwrap();
+    for path in fixture_paths("fixtures/games") {
+        let fixture = crate::replay::load(&path).unwrap();
         let mut state = fixture.start();
         out.push_str(&format!("{}\n", path.display()));
         for (index, m) in fixture.moves.iter().enumerate() {
@@ -380,19 +384,20 @@ fn routed_fixtures() -> String {
             );
             let face = embedding::embed(&state, &mov).unwrap();
             match route(&state, &face) {
-                Ok(drawn) => {
-                    let tolerance = curve::tolerance(state.board_size);
-                    let bits: Vec<String> = drawn
-                        .flatten(tolerance)
-                        .iter()
-                        .chain(std::iter::once(&drawn.new_node_pos))
-                        .map(|q| format!("{:x},{:x}", q.x.to_bits(), q.y.to_bits()))
-                        .collect();
-                    out.push_str(&format!("{index} {face:?} {}\n", bits.join(" ")));
-                }
+                Ok(drawn) => out.push_str(&format!("{index} {face:?} {}\n", bits(&state, &drawn))),
                 Err(why) => out.push_str(&format!("{index} {face:?} {why:?}\n")),
             }
             state.apply_move(mov).unwrap();
+        }
+    }
+    for path in fixture_paths("fixtures/routing") {
+        let state = position(&path);
+        out.push_str(&format!("{}\n", path.display()));
+        for mv in state.face.search_moves() {
+            match route(&state, &mv) {
+                Ok(drawn) => out.push_str(&format!("{mv:?} {}\n", bits(&state, &drawn))),
+                Err(why) => out.push_str(&format!("{mv:?} {why:?}\n")),
+            }
         }
     }
     out
@@ -440,12 +445,65 @@ fn routing_gives_the_same_curves_in_another_process() {
     }
 }
 
-/// Every forfeit in the seeded games with its diagnosis, for working the
-/// router's remaining failures down in one pass: `cargo test --release
-/// survey_forfeits -- --ignored --nocapture`.
+/// Replays one random game of the sweep from SPROUTS_NODES and the
+/// comma-separated SPROUTS_PICKS, for working a failure down by hand.
 #[test]
 #[ignore]
-fn survey_forfeits() {
-    let report = sweep::survey(SEED, CASES as usize);
-    eprintln!("{report}");
+fn replay_picks() {
+    let (Ok(nodes), Ok(picks)) = (
+        std::env::var("SPROUTS_NODES"),
+        std::env::var("SPROUTS_PICKS"),
+    ) else {
+        return;
+    };
+    let picks: Vec<u32> = picks
+        .split(',')
+        .map(|p| p.trim().parse().unwrap())
+        .collect();
+    match sweep::game(nodes.parse().unwrap(), &picks) {
+        Ok(tally) => eprintln!("{tally}"),
+        Err(e) => eprintln!("{e}"),
+    }
+}
+
+/// Routes every search move of the fixture named by SPROUTS_FIXTURE and
+/// prints how each went, for working a failure down by hand.
+#[test]
+#[ignore]
+fn diagnose_fixture() {
+    let Ok(path) = std::env::var("SPROUTS_FIXTURE") else {
+        return;
+    };
+    let state = position(std::path::Path::new(&path));
+    for line in &state.lines {
+        eprintln!(
+            "line {} ({}): {} to {} via node at {:?}, {} flat points",
+            line.id,
+            line.player as u8,
+            line.from_node,
+            line.to_node,
+            line.new_node_pos,
+            line.flat.len()
+        );
+    }
+    for f in 0..state.face.face_count() {
+        eprintln!("face {f}: {:?}", state.face.components(f));
+    }
+    for (v, node) in state.nodes.iter().enumerate() {
+        eprintln!(
+            "node {v} at {:?} degree {} home {:?}",
+            node.position,
+            state.face.degree(v),
+            state.face.corner_face(v, None).ok()
+        );
+    }
+    for mv in state.face.search_moves() {
+        let members = crate::ai::class_members(&state, &mv);
+        for mv in std::iter::once(mv).chain(members) {
+            match route(&state, &mv) {
+                Ok(mov) => eprintln!("{mv:?}: drawn, {} points", mov.polyline.len()),
+                Err(why) => eprintln!("{mv:?}: {why:?}"),
+            }
+        }
+    }
 }

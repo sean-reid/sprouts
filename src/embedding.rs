@@ -108,6 +108,22 @@ fn crossing(state: &GameState, flat: &[Point], mov: &Move) -> Rejection {
     }
 }
 
+/// The pieces a line drawn along `path` from `a` to `b` would enclose,
+/// read the way `embed` reads it: a loop runs in the direction the model
+/// holds it.
+pub(crate) fn sides(
+    state: &GameState,
+    a: NodeId,
+    at_a: Option<HalfEdgeId>,
+    b: NodeId,
+    at_b: Option<HalfEdgeId>,
+    own: Component,
+    path: &[Point],
+) -> Vec<NodeId> {
+    let forward = a != b || new_loop_runs_forward(state, a, path);
+    enclosed_by(state, a, at_a, b, at_b, &run(path, forward), own)
+}
+
 /// Pieces of the split face on the left of the new line: those inside the
 /// closed walk it completes when that walk runs counterclockwise, those
 /// outside it when it runs clockwise.

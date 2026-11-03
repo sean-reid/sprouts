@@ -119,10 +119,13 @@ fn run_bench() -> Result<bool, String> {
     }
 
     let tally = replay::sweep(SWEEP_SEED, SWEEP_GAMES);
-    println!(
-        "\nroutes failed {} of {} over {SWEEP_GAMES} seeded games: {:?}",
-        tally.failed, tally.tried, tally.kinds
-    );
+    println!("\nrouting over {SWEEP_GAMES} seeded games: {tally}");
+    if tally.bug > 0 {
+        failures.push(format!(
+            "{} routes failed as bugs: {:?}",
+            tally.bug, tally.bugs
+        ));
+    }
     let (forms, hits, misses, (lives, nodes)) = replay::nimber_stats();
     let rate = 100.0 * hits as f64 / (hits + misses).max(1) as f64;
     println!(

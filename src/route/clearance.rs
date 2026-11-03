@@ -1,7 +1,6 @@
 //! Pushes a path off the face boundary and away from nodes, as far as the
 //! room around it allows.
 
-use super::Unroutable;
 use crate::geometry::{closest_point_on_segment, segments_intersect};
 use crate::types::Point;
 
@@ -117,9 +116,6 @@ impl<'a> Obstacles<'a> {
         Some(Point::new(p.x + dx * scale, p.y + dy * scale))
     }
 
-    /// The feature point `i` is most short of its room from, if any. Only
-    /// violations matter, so anything outside its room's square is skipped
-    /// before a distance is computed.
     /// Every feature point `i` is short of its room from. Only violations
     /// matter, so anything outside its room's square is skipped before a
     /// distance is computed.
@@ -266,7 +262,7 @@ impl<'a> Obstacles<'a> {
 
 /// Resamples the path and nudges every point away from the boundary and
 /// the nodes until each has its room or the walls allow no more.
-pub(super) fn push(threaded: Vec<Point>, obstacles: &Obstacles) -> Result<Vec<Point>, Unroutable> {
+pub(super) fn push(threaded: Vec<Point>, obstacles: &Obstacles) -> Option<Vec<Point>> {
     let mut path = resample(&threaded, SPACING * obstacles.clearance);
     let stride = STRIDE * obstacles.clearance;
     for _ in 0..ROUNDS {
@@ -327,9 +323,9 @@ pub(super) fn push(threaded: Vec<Point>, obstacles: &Obstacles) -> Result<Vec<Po
             .any(|(p, q)| proper_crossing(w[0], w[1], *p, *q))
     };
     if path.windows(2).any(boundary) {
-        return Err(Unroutable::Crossing);
+        return None;
     }
-    Ok(path)
+    Some(path)
 }
 
 /// Moves each point part way to the midpoint of its neighbours where that
