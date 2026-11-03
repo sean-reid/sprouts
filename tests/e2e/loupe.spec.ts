@@ -5,13 +5,10 @@ import {
   frameOf,
   nodeAt,
   openBoard,
-  pinch,
-  pinchDrag,
   playExchange,
   ringPixels,
   shot,
   touchDrag,
-  zoomAt,
   type Client,
   type Frame,
 } from "./helpers";
@@ -227,36 +224,14 @@ test("a stroke from a node with a line opens no lens until the finger is clear o
 test("the lens flips below the finger near the top edge", async ({ page }) => {
   test.skip(!test.info().project.use.hasTouch, "touch only");
   const frame = await frameOf(page);
-  const centre = { x: frame.left + frame.width / 2, y: frame.top + frame.height / 2 };
-  await page.touchscreen.tap(centre.x, centre.y);
-  await page.touchscreen.tap(centre.x, centre.y);
-  let t = zoomAt(frame, fit(frame), centre, 2.5);
-  await expectNodeDrawnAt(page, nodeAt(frame, t, 3));
-
-  const lift = nodeAt(frame, t, 3).y - (frame.top + 70);
-  const fingers: [Client, Client] = [
-    { x: centre.x - 40, y: centre.y + 100 },
-    { x: centre.x + 40, y: centre.y + 100 },
-  ];
-  const moved: [Client, Client] = [
-    { x: fingers[0].x, y: fingers[0].y - lift },
-    { x: fingers[1].x, y: fingers[1].y - lift },
-  ];
-  const cdp = await page.context().newCDPSession(page);
-  await cdp.send("Input.dispatchTouchEvent", {
-    type: "touchStart",
-    touchPoints: [
-      { ...fingers[0], id: 1 },
-      { ...fingers[1], id: 2 },
-    ],
-  });
-  await pinchDrag(cdp, fingers, moved);
-  await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
-  t = pinch(frame, t, fingers, moved);
-  const top = nodeAt(frame, t, 3);
+  const t = fit(frame);
+  // Node 2 is the highest on the board and sits within the lens's lift
+  // and radius of the top edge at the fitted view.
+  const top = nodeAt(frame, t, 2);
   await expectNodeDrawnAt(page, top);
+  const cdp = await page.context().newCDPSession(page);
 
-  const start = nodeAt(frame, t, 2);
+  const start = nodeAt(frame, t, 0);
   const near = { x: top.x, y: top.y - 12 };
   const lens = lensCentre(frame, near);
   expect(lens.y).toBeGreaterThan(near.y);

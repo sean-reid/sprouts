@@ -30,7 +30,7 @@ async function replyTime(page: Page, count: number): Promise<number> {
   await clickAway(page);
   await expect(page.locator("#status")).toHaveText("Your turn!", { timeout: REPLY_MS });
   const took = Date.now() - started;
-  console.log(`${count} nodes: AI replied in ${took} ms`);
+  test.info().annotations.push({ type: "ai reply", description: `${count} nodes: ${took} ms` });
   return took;
 }
 
@@ -39,8 +39,11 @@ test.beforeEach(async ({ page }) => {
   await openBoard(page);
 });
 
+const FRESH = "Draw a line between two nodes";
+
 test("nine nodes start a game and the AI answers", async ({ page }) => {
   await startGame(page, 9);
+  await expect(page.locator("#status")).toHaveText(FRESH);
   await expectNodesDrawn(page, 9);
   await shot(page, "nodes-9");
   const took = await replyTime(page, 9);
@@ -51,6 +54,7 @@ test("nine nodes start a game and the AI answers", async ({ page }) => {
 test("twenty-four nodes fit the small board and the AI still answers", async ({ page }) => {
   test.skip(test.info().project.name !== "mobile", "the 375 wide board is the tight one");
   await startGame(page, 24);
+  await expect(page.locator("#status")).toHaveText(FRESH);
   await expectNodesDrawn(page, 24);
   await shot(page, "nodes-24-mobile");
   const took = await replyTime(page, 24);
@@ -60,11 +64,13 @@ test("twenty-four nodes fit the small board and the AI still answers", async ({ 
 
 test("the count is held to its range and comes back after a reload", async ({ page }) => {
   await startGame(page, 9);
+  await expect(page.locator("#status")).toHaveText(FRESH);
   await page.locator("#nodeCount").fill("40");
   await page.locator("#startBtn").click();
   await expect(page.locator("#nodeCount")).toHaveValue("24");
-  await expect(page.locator("#status")).toHaveText("Draw a line between two nodes");
+  await expect(page.locator("#status")).toHaveText(FRESH);
   await startGame(page, 5);
+  await expect(page.locator("#status")).toHaveText(FRESH);
   await replyTime(page, 5);
   await page.reload();
   await expect(page.locator("#status")).toHaveText("Your turn!", { timeout: 20_000 });
