@@ -14,7 +14,7 @@ use crate::face::Move as FaceMove;
 use crate::geometry::{closest_point_on_segment, segment_intersection, segments_intersect};
 use crate::types::{
     ai_node_clearance, node_disc, scale, GameState, Line, Move, Point, MIN_NODE_SPACING,
-    MIN_PATH_CLEARANCE, MIN_PATH_CLEARANCE_AI,
+    MIN_PATH_CLEARANCE,
 };
 
 const ROUNDS: usize = 24;
@@ -41,10 +41,6 @@ const SMOOTH_JOIN: f64 = 1e-6;
 /// Distances the board is relaxed toward, in board units.
 struct Targets {
     node: f64,
-    /// Two nodes this far apart or more read as a passage to the router;
-    /// up to `passage_slack` beyond it the passage is too tight to draw.
-    passage: f64,
-    passage_slack: f64,
     line_node: f64,
     line: f64,
     edge_node: f64,
@@ -57,8 +53,6 @@ impl Targets {
         let s = scale(board_size);
         Self {
             node: (MIN_NODE_SPACING * s).max(2.0 * node_disc(board_size)),
-            passage: 2.0 * ai_node_clearance(board_size),
-            passage_slack: MIN_PATH_CLEARANCE_AI * s,
             line_node: ai_node_clearance(board_size),
             line: MIN_PATH_CLEARANCE * s,
             edge_node: node_disc(board_size),
@@ -399,17 +393,10 @@ impl Layout {
         for i in 0..n {
             for j in i + 1..n {
                 let d = self.nodes[i].distance_to(&self.nodes[j]);
-                // A gap the router would plan through but cannot hold is
-                // widened until it can; narrower gaps it never tries.
-                let target = if d >= targets.passage && d < targets.passage + targets.passage_slack
-                {
-                    targets.passage + targets.passage_slack
-                } else {
-                    targets.node
-                };
-                if let (Some(f), Some(push)) =
-                    (short(d, target, Tightest::Nodes(i, j)), push.as_deref_mut())
-                {
+                if let (Some(f), Some(push)) = (
+                    short(d, targets.node, Tightest::Nodes(i, j)),
+                    push.as_deref_mut(),
+                ) {
                     let dir = away(self.nodes[j], self.nodes[i], f);
                     self.push_node(push, i, dir);
                     self.push_node(push, j, mul(dir, -1.0));
@@ -531,6 +518,27 @@ impl Layout {
                 && segment_intersection(&a[i - 1], &a[i], &b[j - 1], &b[j])
                     .is_none_or(|at| !self.near_any(&at, meet, touch))
         };
+        let boxes: Vec<(Point, Point)> = flats
+            .iter()
+            .map(|flat| {
+                flat.iter().fold(
+                    (
+                        Point::new(f64::INFINITY, f64::INFINITY),
+                        Point::new(f64::NEG_INFINITY, f64::NEG_INFINITY),
+                    ),
+                    |(lo, hi), p| {
+                        (
+                            Point::new(lo.x.min(p.x), lo.y.min(p.y)),
+                            Point::new(hi.x.max(p.x), hi.y.max(p.y)),
+                        )
+                    },
+                )
+            })
+            .collect();
+        let apart = |k: usize, l: usize| {
+            let ((alo, ahi), (blo, bhi)) = (boxes[k], boxes[l]);
+            alo.x > bhi.x || blo.x > ahi.x || alo.y > bhi.y || blo.y > ahi.y
+        };
         let mut count = 0;
         for (k, a) in flats.iter().enumerate() {
             let own = [self.lines[k].from, self.lines[k].to];
@@ -542,6 +550,9 @@ impl Layout {
                 }
             }
             for (l, b) in flats.iter().enumerate().skip(k + 1) {
+                if apart(k, l) {
+                    continue;
+                }
                 let shared = self.shared(k, l);
                 for i in 1..a.len() {
                     for j in 1..b.len() {
