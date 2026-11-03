@@ -1,9 +1,86 @@
-import type { GameState, Player, Point } from "./state";
+import type { Flash, GameState, Player, Point } from "./state";
 import type { View } from "./view";
 
-const PLAYER_COLORS: Record<Player, string> = { human: "#60A5FA", ai: "#EF4444" };
+export const PLAYER_COLORS: Record<Player, string> = { human: "#60A5FA", ai: "#EF4444" };
 const LINE_WIDTH = 3;
 const NODE_RADIUS = 8;
+const RING_WIDTH = 4;
+const PULSE_PERIOD_MS = 1200;
+const FLASH_COLOR = "#EF4444";
+const FLASH_WIDTH = 6;
+const FLASH_MIN_LENGTH = 24;
+const FLASH_RING_RADIUS = NODE_RADIUS + 6;
+
+export type Project = (world: Point) => Point;
+
+function strokePolyline(ctx: CanvasRenderingContext2D, points: Point[]): void {
+  const first = points[0];
+  if (!first) return;
+  ctx.beginPath();
+  ctx.moveTo(first.x, first.y);
+  for (const point of points.slice(1)) ctx.lineTo(point.x, point.y);
+  ctx.stroke();
+}
+
+function length(points: Point[]): number {
+  let total = 0;
+  for (let i = 1; i < points.length; i++) {
+    const a = points[i - 1];
+    const b = points[i];
+    if (a && b) total += Math.hypot(b.x - a.x, b.y - a.y);
+  }
+  return total;
+}
+
+// Widens the flashed range along the path until it is long enough to see.
+function flashedSpan(path: Point[], first: number, last: number): Point[] {
+  let lo = Math.min(first, path.length - 2);
+  let hi = Math.min(last + 1, path.length - 1);
+  while (length(path.slice(lo, hi + 1)) < FLASH_MIN_LENGTH && (lo > 0 || hi < path.length - 1)) {
+    if (lo > 0) lo--;
+    if (hi < path.length - 1) hi++;
+  }
+  return path.slice(lo, hi + 1);
+}
+
+function drawFlash(
+  ctx: CanvasRenderingContext2D,
+  state: GameState,
+  flash: Flash,
+  project: Project,
+): void {
+  ctx.strokeStyle = FLASH_COLOR;
+  ctx.lineCap = "round";
+  ctx.lineJoin = "round";
+  const { at } = flash;
+  if (at.kind === "segments") {
+    const path = flash.path.map(project);
+    ctx.lineWidth = FLASH_WIDTH;
+    strokePolyline(ctx, flashedSpan(path, at.first, at.last));
+    return;
+  }
+  const world =
+    at.kind === "node" ? state.nodes.find((node) => node.id === at.id)?.position : at.at;
+  if (!world) return;
+  const centre = project(world);
+  ctx.lineWidth = LINE_WIDTH;
+  ctx.beginPath();
+  ctx.arc(centre.x, centre.y, FLASH_RING_RADIUS, 0, Math.PI * 2);
+  ctx.stroke();
+}
+
+// The ring sits just inside the canvas edge in screen pixels, whatever the zoom.
+function drawRing(ctx: CanvasRenderingContext2D, state: GameState, view: View): void {
+  ctx.strokeStyle = PLAYER_COLORS[state.currentPlayer];
+  ctx.lineWidth = RING_WIDTH;
+  if (state.thinking && !state.reducedMotion) {
+    const phase = (performance.now() / PULSE_PERIOD_MS) * Math.PI * 2;
+    ctx.globalAlpha = 0.65 + 0.35 * Math.sin(phase);
+  }
+  const inset = RING_WIDTH / 2;
+  ctx.strokeRect(inset, inset, view.width - RING_WIDTH, view.height - RING_WIDTH);
+  ctx.globalAlpha = 1;
+}
 
 // Catmull-Rom through every point; tension 6 is the standard value.
 function drawSmoothPath(ctx: CanvasRenderingContext2D, points: Point[]): void {
@@ -31,8 +108,6 @@ function drawSmoothPath(ctx: CanvasRenderingContext2D, points: Point[]): void {
   }
   ctx.stroke();
 }
-
-export type Project = (world: Point) => Point;
 
 export const BOARD_BACKGROUND = "#1A1A1A";
 
@@ -88,6 +163,8 @@ export function drawBoard(ctx: CanvasRenderingContext2D, state: GameState, proje
       drawSmoothPath(ctx, screen(path.slice(0, shown)));
     }
   }
+
+  if (state.flash) drawFlash(ctx, state, state.flash, project);
 }
 
 // Draws in CSS pixels on a backing store kept at device pixels.
@@ -101,4 +178,5 @@ export function draw(ctx: CanvasRenderingContext2D, state: GameState, view: View
   ctx.fillStyle = BOARD_BACKGROUND;
   ctx.fillRect(0, 0, view.width, view.height);
   drawBoard(ctx, state, (p) => view.toScreen(p));
+  drawRing(ctx, state, view);
 }

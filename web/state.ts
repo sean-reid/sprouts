@@ -1,6 +1,6 @@
-import type { Line, Node, Player, Point } from "../pkg/sprouts";
+import type { BoardLocation, Line, Node, Player, Point } from "../pkg/sprouts";
 
-export type { Line, Node, Player, Point };
+export type { BoardLocation, Line, Node, Player, Point };
 
 export type Mode = "idle" | "dragging" | "placing" | "animating_ai";
 
@@ -12,6 +12,12 @@ export interface PlacementDot {
 export interface AnimatingLine {
   path: Point[];
   newPos: Point;
+}
+
+// The path is the one the rejection's segment indices refer to.
+export interface Flash {
+  at: BoardLocation;
+  path: Point[];
 }
 
 export interface Board {
@@ -27,6 +33,8 @@ export interface Board {
   dragEndNode: number | null;
   animatingLine: AnimatingLine | null;
   animationProgress: number;
+  thinking: boolean;
+  flash: Flash | null;
   gameOver: boolean;
   reviewing: boolean;
 }
@@ -35,6 +43,7 @@ export interface GameState extends Board {
   // Tracked per gesture rather than as a device flag so hybrids (Surface,
   // iPad with keyboard) can use touch and mouse in the same session.
   lastInputWasTouch: boolean;
+  reducedMotion: boolean;
 }
 
 export function freshBoard(): Board {
@@ -51,6 +60,8 @@ export function freshBoard(): Board {
     dragEndNode: null,
     animatingLine: null,
     animationProgress: 0,
+    thinking: false,
+    flash: null,
     gameOver: false,
     reviewing: false,
   };
