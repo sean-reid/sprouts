@@ -114,12 +114,72 @@ export async function expectNodeDrawnAt(page: Page, at: Client): Promise<void> {
   await expect.poll(() => blueSamplesAround(page, at)).toBeGreaterThanOrEqual(6);
 }
 
+export const PLACING_HINT = /Drag the dot/;
+
+// Locks a straight stroke between two nodes and returns its midpoint, where
+// the dot lands on an empty board.
 export async function drawBetween(page: Page, from: number, to: number): Promise<Client> {
   const a = await nodeOnScreen(page, from, 4);
   const b = await nodeOnScreen(page, to, 4);
   await mouseStroke(page, a, b);
-  await expect(page.locator("#status")).toHaveText(/place a new node/);
+  await expect(page.locator("#status")).toHaveText(PLACING_HINT);
   return { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+}
+
+export type DotColour = "green" | "red";
+
+// Reads the canvas pixel under a client point and says which placement dot
+// colour it is, or null for anything else.
+export function dotColourAt(page: Page, at: Client): Promise<DotColour | null> {
+  return page.evaluate(({ x, y }) => {
+    const canvas = document.getElementById("canvas") as HTMLCanvasElement;
+    const rect = canvas.getBoundingClientRect();
+    const px = Math.round((x - rect.left) * (canvas.width / rect.width));
+    const py = Math.round((y - rect.top) * (canvas.height / rect.height));
+    const [r, g, b] = canvas.getContext("2d")!.getImageData(px, py, 1, 1).data;
+    const near = (cr: number, cg: number, cb: number) => Math.hypot(r! - cr, g! - cg, b! - cb) < 60;
+    if (near(0x10, 0xb9, 0x81)) return "green";
+    if (near(0xef, 0x44, 0x44)) return "red";
+    return null;
+  }, at);
+}
+
+export async function expectDotAt(page: Page, at: Client, colour: DotColour = "green") {
+  await expect.poll(() => dotColourAt(page, at)).toBe(colour);
+}
+
+// A spot in the canvas corner, clear of the nodes and of any dot on the
+// first chord, where a press commits the placement.
+export function awayFrom(frame: Frame): Client {
+  return { x: frame.left + 24, y: frame.top + 24 };
+}
+
+export async function clickAway(page: Page): Promise<void> {
+  const at = awayFrom(await frameOf(page));
+  await page.mouse.click(at.x, at.y);
+}
+
+export async function tapAway(page: Page): Promise<void> {
+  const at = awayFrom(await frameOf(page));
+  await page.touchscreen.tap(at.x, at.y);
+}
+
+// Counts loupe-ring amber pixels anywhere on the canvas.
+export function ringPixels(page: Page): Promise<number> {
+  return page.evaluate(() => {
+    const canvas = document.getElementById("canvas") as HTMLCanvasElement;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return 0;
+    const { data } = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    let hits = 0;
+    for (let i = 0; i < data.length; i += 4) {
+      const r = data[i] ?? 0;
+      const g = data[i + 1] ?? 0;
+      const b = data[i + 2] ?? 0;
+      if (r > 200 && g > 150 && g < 220 && b < 100) hits++;
+    }
+    return hits;
+  });
 }
 
 export async function mouseStroke(page: Page, a: Client, b: Client): Promise<void> {
@@ -313,7 +373,7 @@ export async function wheelZoomTo(
   return t;
 }
 
-function clampToViewport(frame: Frame, t: Transform): Transform {
+export function clampToViewport(frame: Frame, t: Transform): Transform {
   const board = frame.board * t.scale;
   const axis = (offset: number, viewport: number): number =>
     board <= viewport ? (viewport - board) / 2 : Math.min(0, Math.max(viewport - board, offset));
@@ -338,8 +398,8 @@ export async function openBoard(page: Page, path = "/"): Promise<void> {
 // One human move and the AI's reply, with the mouse.
 export async function playExchange(page: Page): Promise<void> {
   const mid = await drawBetween(page, 0, 1);
-  await page.waitForTimeout(350);
-  await page.mouse.click(mid.x, mid.y);
+  await expectDotAt(page, mid);
+  await clickAway(page);
   await expect(page.locator("#status")).toHaveText("Your turn!", { timeout: 60_000 });
 }
 

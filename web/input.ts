@@ -11,6 +11,12 @@ export interface StrokeHandlers {
   end(world: Point, kind: PointerKind): void;
   tap(world: Point, kind: PointerKind): void;
   cancel(): void;
+  // True when the press takes hold of something the page shows; the pointer
+  // then drives drag until drop instead of drawing a stroke.
+  grab(world: Point, kind: PointerKind): boolean;
+  drag(world: Point, kind: PointerKind): void;
+  // Pointer up, a second finger, or a lost pointer; what was held stays put.
+  drop(): void;
 }
 
 export interface InputOptions {
@@ -64,6 +70,7 @@ export function attachInput(
 ): void {
   const pointers = new Map<number, Tracked>();
   let stroke: Stroke | null = null;
+  let held: number | null = null;
   let pinch: Pinch | null = null;
   let panPointer: number | null = null;
   let spaceHeld = false;
@@ -79,7 +86,14 @@ export function attachInput(
     else view.anchor(view.toWorld(screen), screen, view.fitScale * DOUBLE_TAP_ZOOM);
   };
 
+  const letGo = (): void => {
+    if (held === null) return;
+    held = null;
+    handlers.drop();
+  };
+
   const beginPinch = (): void => {
+    letGo();
     const [a, b] = [...pointers.entries()];
     if (!a || !b) return;
     const mid = midpoint(a[1].screen, b[1].screen);
@@ -120,6 +134,10 @@ export function attachInput(
       return;
     }
     const world = view.toWorld(screen);
+    if (handlers.grab(world, kind)) {
+      held = e.pointerId;
+      return;
+    }
     stroke = { id: e.pointerId, length: 0, last: world };
     handlers.start(world, kind);
   });
@@ -140,6 +158,10 @@ export function attachInput(
       return;
     }
     tracked.screen = screen;
+    if (held === e.pointerId) {
+      handlers.drag(view.toWorld(screen), kind);
+      return;
+    }
     if (pinch) {
       updatePinch();
       return;
@@ -161,6 +183,10 @@ export function attachInput(
     const kind = kindOf(e);
     const screen = local(e);
     if (panPointer === e.pointerId) panPointer = null;
+    if (held === e.pointerId) {
+      letGo();
+      return;
+    }
     if (pinch && pinch.ids.includes(e.pointerId)) {
       pinch = null;
       const remaining = pointers.entries().next().value;
@@ -205,6 +231,7 @@ export function attachInput(
     stroke = null;
     pinch = null;
     panPointer = null;
+    letGo();
     if (hadStroke) handlers.cancel();
   };
   const cancel = (e: PointerEvent): void => {

@@ -1,7 +1,9 @@
 import { expect, test, type Page } from "@playwright/test";
 import {
   armFlashProbe,
+  clickAway,
   drawBetween,
+  expectDotAt,
   frameOf,
   holdNext,
   holdOneWorkerMessage,
@@ -9,6 +11,7 @@ import {
   nodeOnScreen,
   openBoard,
   pixelAt,
+  PLACING_HINT,
   playExchange,
   readFlashProbe,
   ringPixel,
@@ -25,13 +28,12 @@ const lerp = (a: Client, b: Client, t: number): Client => ({
   y: a.y + (b.y - a.y) * t,
 });
 
-// Places the node halfway along the locked stroke's last leg and waits for
-// the rejection, checking the flash lands within 100 ms of the message.
-async function rejectAt(page: Page, spot: Client, message: string, flashAt: Client): Promise<void> {
-  await expect(page.locator("#status")).toHaveText(/place a new node/);
-  await page.waitForTimeout(350);
+// Commits the locked stroke with Enter and waits for the rejection, checking
+// the flash lands within 100 ms of the message.
+async function rejectWith(page: Page, message: string, flashAt: Client): Promise<void> {
+  await expect(page.locator("#status")).toHaveText(PLACING_HINT);
   await armFlashProbe(page, flashAt, message, AI);
-  await page.mouse.click(spot.x, spot.y);
+  await page.keyboard.press("Enter");
   await expect(page.locator("#status")).toHaveText(message);
   await expect.poll(async () => (await readFlashProbe(page)).flashAt).not.toBeNull();
   const probe = await readFlashProbe(page);
@@ -42,8 +44,8 @@ async function rejectAt(page: Page, spot: Client, message: string, flashAt: Clie
 async function ringWhileThinking(page: Page): Promise<Rgb[]> {
   await holdNext(page, "aiMove", 1500);
   const mid = await drawBetween(page, 0, 1);
-  await page.waitForTimeout(350);
-  await page.mouse.click(mid.x, mid.y);
+  await expectDotAt(page, mid);
+  await clickAway(page);
   await expect(page.locator("#status")).toHaveText("AI is thinking");
   const at = ringPixel(await frameOf(page));
   const samples: Rgb[] = [];
@@ -76,7 +78,7 @@ test("a stroke across an existing line flashes the crossed segment", async ({ pa
   await page.mouse.up();
 
   const crossing = lerp(n0, n1, 1 / 3);
-  await rejectAt(page, lerp(corner, n2, 0.5), "Path crosses an existing line", crossing);
+  await rejectWith(page, "Path crosses an existing line", crossing);
   await shot(page, "flash");
   await page.waitForTimeout(800);
   expect(near(await pixelAt(page, crossing), AI)).toBe(false);
@@ -95,7 +97,7 @@ test("a stroke brushing a node flashes that node", async ({ page }) => {
 
   // The flash ring sits 14 px out from the node centre.
   const onRing = { x: n1.x + 14, y: n1.y };
-  await rejectAt(page, lerp(n1, n2, 0.5), "Path passes too close to an existing node", onRing);
+  await rejectWith(page, "Path passes too close to an existing node", onRing);
   await shot(page, "flash-node");
   await page.waitForTimeout(800);
   expect(near(await pixelAt(page, onRing), AI)).toBe(false);
@@ -109,8 +111,8 @@ test("the turn indicator and ring follow the exchange", async ({ page }) => {
   await shot(page, "ring");
 
   const mid = await drawBetween(page, 0, 1);
-  await page.waitForTimeout(350);
-  await page.mouse.click(mid.x, mid.y);
+  await expectDotAt(page, mid);
+  await clickAway(page);
   await expect(page.locator("#turnText")).toHaveText("AI's turn");
   await expect(page.locator("#status")).toHaveText("AI is thinking");
   await expect(page.locator("#status")).toHaveText("Your turn!", { timeout: 60_000 });

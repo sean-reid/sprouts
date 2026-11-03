@@ -1,11 +1,13 @@
 import { expect, test, type Page } from "@playwright/test";
 import {
+  clickAway,
   fit,
   frameOf,
   holdNext,
   holdOneWorkerMessage,
   nodeWorld,
   openBoard,
+  PLACING_HINT,
   shot,
   toClient,
   wheelZoomTo,
@@ -137,7 +139,7 @@ async function lockArc(page: Page): Promise<Arc> {
     await page.mouse.move(at.x, at.y);
   }
   await page.mouse.up();
-  await expect(page.locator("#status")).toHaveText(/place a new node/);
+  await expect(page.locator("#status")).toHaveText(PLACING_HINT);
   return { frame, fitted, along };
 }
 
@@ -167,7 +169,7 @@ test("the locked curve is the line the move commits, at fit zoom and at 4x", asy
   expect(locked).toBeGreaterThan(500);
 
   await holdNext(page, "aiMove", 10_000);
-  await page.mouse.click(midZoomed.x, midZoomed.y);
+  await clickAway(page);
   await expect(page.locator("#status")).toHaveText(/AI is thinking/);
   const committed = await captureBlue(page, "committed", exclude);
   await shot(page, "curve-committed-4x");

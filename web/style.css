@@ -131,14 +131,6 @@ button:disabled {
   background: #ef4444;
 }
 
-button.confirm-btn {
-  background: #10b981;
-  color: white;
-  border-color: #059669;
-  padding: 12px 24px;
-  font-weight: 600;
-}
-
 .play-area {
   display: flex;
   flex-direction: column;
@@ -243,27 +235,28 @@ button.confirm-btn {
   height: min(100cqw, 100cqh);
 }
 
-#canvas.pan {
+#canvas.pan,
+#canvas.grab {
   cursor: grab;
 }
 
-#mobileOverlay {
+#canvas.grabbing {
+  cursor: grabbing;
+}
+
+#cancelBtn {
   position: fixed;
   bottom: 40px;
   left: 50%;
   transform: translateX(-50%);
-  display: none;
-  gap: 12px;
   z-index: 100;
+  min-height: 44px;
+  min-width: 120px;
+  padding: 12px 24px;
   background: rgba(20, 20, 20, 0.95);
-  padding: 16px;
-  border-radius: 12px;
   border: 1px solid #333;
+  border-radius: 12px;
   box-shadow: 0 10px 25px rgba(0, 0, 0, 0.5);
-}
-
-#mobileOverlay.visible {
-  display: flex;
 }
 
 .modal {

@@ -1,5 +1,5 @@
 import "./style.css";
-import type { Move, Outcome, Player, Snapshot } from "../pkg/sprouts";
+import type { AutoPlacement, Move, Outcome, Player, Rejection, Snapshot } from "../pkg/sprouts";
 import { Engine, StaleRequest } from "./engine";
 import {
   clearSaved,
@@ -41,6 +41,9 @@ function minStrokeLength(boardSize: number): number {
 const AI_ANIMATION_MS = 500;
 const FLASH_MS = 600;
 const DEFAULT_NODES = 4;
+// Screen pixels around the placement dot where a press takes hold of it.
+const DOT_GRAB_PX = 22;
+const PLACING_HINT = "Drag the dot to adjust it, or press anywhere else to place it";
 
 type StatusKind = "" | "win" | "lose";
 
@@ -62,7 +65,7 @@ const shareBtn = byId<HTMLButtonElement>("shareBtn");
 const historyEl = byId<HTMLElement>("history");
 const moveListEl = byId<HTMLOListElement>("moveList");
 const shareUrlEl = byId<HTMLInputElement>("shareUrl");
-const overlay = byId<HTMLElement>("mobileOverlay");
+const cancelBtn = byId<HTMLButtonElement>("cancelBtn");
 const modal = byId<HTMLElement>("gameOverModal");
 const winnerText = byId<HTMLElement>("winnerText");
 
@@ -80,7 +83,7 @@ const loupe = new Loupe();
 const inputOptions: InputOptions = { minStrokeLength: minStrokeLength(view.boardSize) };
 const motionQuery = window.matchMedia("(prefers-reduced-motion: reduce)");
 const state: GameState = watched(
-  { ...freshBoard(), lastInputWasTouch: false, reducedMotion: motionQuery.matches },
+  { ...freshBoard(), reducedMotion: motionQuery.matches },
   invalidate,
 );
 let timeline = new History(DEFAULT_NODES, view.boardSize);
@@ -98,8 +101,10 @@ let gameEpoch = 0;
 let submitting = false;
 let seeking = false;
 let booted = false;
-// Settles once the locked stroke's fit has arrived or been abandoned.
-let fitting: Promise<void> = Promise.resolve();
+// Settles once the locked stroke's dot is shown or the stroke is abandoned.
+let suggestion: Promise<void> = Promise.resolve();
+// Settles once the last drag of the dot has been answered.
+let dotUpdate: Promise<void> = Promise.resolve();
 
 const engine = new Engine(() => setStatus("Failed to load game engine", "lose"));
 
@@ -197,8 +202,10 @@ function hideLoupe(): void {
 
 function clearStroke(): void {
   hideLoupe();
-  engine.cancel("fit");
+  engine.cancel("lock");
   engine.cancel("placement");
+  canvas.classList.remove("grab", "grabbing");
+  cancelBtn.hidden = true;
   state.mode = "idle";
   state.dragPath = [];
   state.lockedPath = [];
@@ -224,27 +231,21 @@ function findNodeAt(at: Point, screenRadius: number): Node | null {
   return closest;
 }
 
-// Resolves null once the curve it was asked about is no longer on screen.
-async function closestValidSpot(at: Point): Promise<PlacementDot | null> {
-  await fitting;
-  const segments = state.lockedSegments;
-  if (!segments) return null;
-  const spot = await engine.call("placement", { segments, at });
-  return state.mode === "placing" && state.lockedSegments === segments ? spot : null;
+function overDot(world: Point): boolean {
+  const dot = state.placementDot;
+  if (state.mode !== "placing" || !dot) return false;
+  const a = view.toScreen(dot.position);
+  const b = view.toScreen(world);
+  return Math.hypot(a.x - b.x, a.y - b.y) <= DOT_GRAB_PX;
 }
 
 function handleStart(world: Point, kind: PointerKind): void {
-  state.lastInputWasTouch = kind === "touch";
   if (state.reviewing) {
     if (state.gameOver && timeline.atEnd) modal.classList.add("visible");
     return;
   }
-  if (state.mode === "placing") {
-    if (state.lastInputWasTouch) void handleMove(world, kind);
-    return;
-  }
   if (state.mode !== "idle" || state.thinking || state.gameOver || seeking) return;
-  const node = findNodeAt(world, state.lastInputWasTouch ? 30 : 15);
+  const node = findNodeAt(world, kind === "touch" ? 30 : 15);
   if (node && state.activeNodes.has(node.id)) {
     state.mode = "dragging";
     state.dragStartNode = node.id;
@@ -252,27 +253,14 @@ function handleStart(world: Point, kind: PointerKind): void {
   }
 }
 
-async function handleMove(point: Point, kind: PointerKind): Promise<void> {
-  state.lastInputWasTouch = kind === "touch";
+function handleMove(point: Point, kind: PointerKind): void {
   if (state.mode === "dragging") {
     const last = state.dragPath.at(-1);
     if (last && Math.hypot(point.x - last.x, point.y - last.y) > screenToWorld(5)) {
       state.dragPath = healPath([...state.dragPath, point]);
     }
-  } else if (state.mode === "placing") {
-    const snapDist = state.lastInputWasTouch ? 80 : 30;
-    const segments = state.lockedSegments;
-    if (!segments) return;
-    let spot: PlacementDot;
-    try {
-      spot = await engine.latest("placement", "placement", { segments, at: point });
-    } catch (error) {
-      if (error instanceof StaleRequest) return;
-      throw error;
-    }
-    if (state.mode !== "placing" || state.lockedSegments !== segments) return;
-    const { x, y } = spot.position;
-    state.placementDot = Math.hypot(point.x - x, point.y - y) < snapDist ? spot : null;
+  } else if (state.mode === "placing" && kind === "mouse") {
+    canvas.classList.toggle("grab", overDot(point));
   }
 }
 
@@ -285,8 +273,44 @@ function handleAfterMove(world: Point, kind: PointerKind): void {
   if (start && loupe.update(world, start, state, view)) invalidate();
 }
 
+function handleGrab(world: Point): boolean {
+  if (!overDot(world)) return false;
+  canvas.classList.remove("grab");
+  canvas.classList.add("grabbing");
+  return true;
+}
+
+function handleDrag(world: Point, kind: PointerKind): void {
+  dotUpdate = slideDot(world);
+  if (kind === "touch" && loupe.follow(world)) invalidate();
+}
+
+function handleDrop(): void {
+  canvas.classList.remove("grabbing");
+  hideLoupe();
+}
+
+// Moves the dot to the point of the curve nearest the pointer. A reply to an
+// older position is dropped, so the dot never jumps back.
+async function slideDot(at: Point): Promise<void> {
+  const segments = state.lockedSegments;
+  if (!segments) return;
+  let spot: PlacementDot;
+  try {
+    spot = await engine.latest("placement", "placement", { segments, at });
+  } catch (error) {
+    if (!(error instanceof StaleRequest)) setStatus("Engine error: " + describe(error), "lose");
+    return;
+  }
+  if (state.mode === "placing" && state.lockedSegments === segments) state.placementDot = spot;
+}
+
 function handleEnd(world: Point, kind: PointerKind): void {
   hideLoupe();
+  if (state.mode === "placing") {
+    void commitPlacement();
+    return;
+  }
   if (state.mode !== "dragging") return;
   const touch = kind === "touch";
   let endNode = findNodeAt(world, touch ? 30 : 15);
@@ -316,40 +340,40 @@ function handleEnd(world: Point, kind: PointerKind): void {
   state.lockedSegments = null;
   state.dragEndNode = endNode.id;
   state.mode = "placing";
+  cancelBtn.hidden = false;
   updateControls();
-
-  if (touch) {
-    overlay.classList.add("visible");
-    setStatus("Tap Confirm to place node, or drag on curve to adjust");
-  } else {
-    setStatus("Click on the curve to place a new node (ESC to cancel)", "win");
-  }
-  fitting = showFit();
-  if (touch) void fitting.then(autoPlaceMidpoint);
+  setStatus(PLACING_HINT);
+  suggestion = suggestPlacement();
 }
 
-// Swaps the raw stroke for the curve it commits as; placement runs on that.
-async function showFit(): Promise<void> {
+// Swaps the raw stroke for the curve it commits as, then shows the best spot
+// on it; a curve with no room for a node is rejected here.
+async function suggestPlacement(): Promise<void> {
   const path = state.lockedPath;
   let segments: Cubic[];
+  let suggested: AutoPlacement;
   try {
-    ({ segments } = await engine.latest("fit", "fit", { path }));
+    ({ segments } = await engine.latest("lock", "fit", { path }));
+    if (state.mode !== "placing" || state.lockedPath !== path) return;
+    state.lockedSegments = segments;
+    suggested = await engine.latest("lock", "autoPlacement", { segments });
   } catch (error) {
     if (error instanceof StaleRequest) return;
     setStatus("Could not fit the stroke: " + describe(error), "lose");
     clearStroke();
-    overlay.classList.remove("visible");
+    updateControls();
     return;
   }
-  if (state.mode !== "placing" || state.lockedPath !== path) return;
-  state.lockedSegments = segments;
+  if (state.mode !== "placing" || state.lockedSegments !== segments) return;
+  if (suggested.kind === "rejected") rejectStroke(suggested.rejection, path);
+  else state.placementDot = suggested.placement;
 }
 
-async function autoPlaceMidpoint(): Promise<void> {
-  const mid = state.lockedPath[Math.floor(state.lockedPath.length / 2)];
-  if (state.mode !== "placing" || state.lockedPath.length < 2 || !mid) return;
-  const spot = await closestValidSpot(mid);
-  if (spot && !state.placementDot) state.placementDot = spot;
+function rejectStroke(rejection: Rejection, path: Point[]): void {
+  setStatus(rejection.message, "lose");
+  flash(rejection.at, path);
+  clearStroke();
+  updateControls();
 }
 
 function abandonStroke(): void {
@@ -359,40 +383,24 @@ function abandonStroke(): void {
   state.dragPath = [];
 }
 
-async function handleTap(point: Point, kind: PointerKind): Promise<void> {
+function handleTap(): void {
   hideLoupe();
-  if (state.mode === "dragging") {
-    abandonStroke();
-    return;
-  }
-  if (state.mode !== "placing" || kind === "touch") return;
-  const spot = await closestValidSpot(point);
-  if (!spot) return;
-  const snap = screenToWorld(40);
-  if (Math.hypot(point.x - spot.position.x, point.y - spot.position.y) < snap && spot.valid) {
-    state.placementDot = spot;
-    await executeMove();
-    return;
-  }
-  if (state.placementDot?.valid) await executeMove();
+  if (state.mode === "dragging") abandonStroke();
+  else if (state.mode === "placing") void commitPlacement();
 }
 
-async function confirmMove(): Promise<void> {
-  if (state.mode !== "placing") return;
-  if (!state.placementDot?.valid) {
-    const mid = state.lockedPath[Math.floor(state.lockedPath.length / 2)] ?? state.lockedPath[0];
-    if (mid) {
-      const spot = await closestValidSpot(mid);
-      if (!spot) return;
-      if (spot.valid) state.placementDot = spot;
-    }
-  }
+// Waits for the dot and the last drag of it before the move goes in.
+async function commitPlacement(): Promise<void> {
+  const path = state.lockedPath;
+  if (state.mode !== "placing" || submitting) return;
+  await suggestion;
+  await dotUpdate;
+  if (state.mode !== "placing" || state.lockedPath !== path) return;
   await executeMove();
 }
 
 function cancelPlacement(): void {
   clearStroke();
-  overlay.classList.remove("visible");
   setStatus("Move cancelled");
   updateControls();
 }
@@ -409,7 +417,6 @@ async function executeMove(): Promise<void> {
     polyline: state.lockedPath,
     newNodePos: state.placementDot.position,
   };
-  overlay.classList.remove("visible");
 
   const epoch = gameEpoch;
   submitting = true;
@@ -423,11 +430,7 @@ async function executeMove(): Promise<void> {
     return;
   }
   if (outcome.kind === "rejected") {
-    const { message, at } = outcome.rejection;
-    setStatus(message, "lose");
-    flash(at, move.polyline);
-    clearStroke();
-    updateControls();
+    rejectStroke(outcome.rejection, move.polyline);
     return;
   }
 
@@ -674,7 +677,6 @@ function setBoardSize(boardSize: number): void {
 function resetTable(): void {
   Object.assign(state, freshBoard());
   clearStroke();
-  overlay.classList.remove("visible");
   shareUrlEl.hidden = true;
   stopThinking();
   gameEpoch++;
@@ -796,11 +798,14 @@ function wireInput(): void {
     view,
     {
       start: handleStart,
-      move: (world, kind) => void handleMove(world, kind),
+      move: handleMove,
       afterMove: handleAfterMove,
       end: handleEnd,
-      tap: (world, kind) => void handleTap(world, kind),
+      tap: handleTap,
       cancel: abandonStroke,
+      grab: handleGrab,
+      drag: handleDrag,
+      drop: handleDrop,
     },
     inputOptions,
   );
@@ -811,7 +816,10 @@ function wireInput(): void {
     }
   });
   document.addEventListener("keydown", (e) => {
-    if (e.key === "Escape" && state.mode === "placing") cancelPlacement();
+    if (state.mode === "placing") {
+      if (e.key === "Escape") cancelPlacement();
+      if (e.key === "Enter" && !(e.target instanceof HTMLButtonElement)) void commitPlacement();
+    }
     if (historyEl.hidden || typingInField(e.target) || e.altKey || e.ctrlKey || e.metaKey) return;
     if (e.key === "ArrowLeft") void step(-1);
     if (e.key === "ArrowRight") void step(1);
@@ -827,8 +835,7 @@ function wireInput(): void {
   backBtn.addEventListener("click", () => void step(-1));
   forwardBtn.addEventListener("click", () => void step(1));
   shareBtn.addEventListener("click", () => void share());
-  byId("cancelBtn").addEventListener("click", cancelPlacement);
-  byId("confirmBtn").addEventListener("click", () => void confirmMove());
+  cancelBtn.addEventListener("click", cancelPlacement);
   byId("reviewBtn").addEventListener("click", () => {
     state.reviewing = true;
     pinnedReview = true;
