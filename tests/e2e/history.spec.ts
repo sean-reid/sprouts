@@ -38,8 +38,10 @@ function visitorOptions(): BrowserContextOptions {
 const current = (page: Page) => page.locator("#moveList [aria-current]");
 
 // Link payload lengths in characters, after the hash prefix: one exchange
-// on either board, and the nine move game, measured with headroom.
-const EXCHANGE_LINK_BUDGET = 60;
+// on either board, and the nine move game, measured with headroom. The
+// first chord on the sunflower spans a third of the board, so one exchange
+// runs to about 62.
+const EXCHANGE_LINK_BUDGET = 70;
 const NINE_MOVE_LINK_BUDGET = 500;
 const HASH_PREFIX = "#game=";
 const NINE_MOVES = "fixtures/saved/nine-moves-4n-1000.json";
