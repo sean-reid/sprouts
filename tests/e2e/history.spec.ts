@@ -1,4 +1,15 @@
-import { expect, test, type BrowserContextOptions, type Page } from "@playwright/test";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
+import {
+  expect as baseExpect,
+  test,
+  type BrowserContextOptions,
+  type Page,
+} from "@playwright/test";
+import type { Fixture } from "../../web/record";
+
+// Every step here replays moves through the engine, which on the 1000
+// board takes several seconds per apply.
+const expect = baseExpect.configure({ timeout: 20_000 });
 import { frameOf, nodeOnScreen, openBoard, playExchange, shot, strokeCells } from "./helpers";
 
 const entries = (page: Page) => page.locator("#moveList li");
@@ -15,17 +26,13 @@ function visitorOptions(): BrowserContextOptions {
 }
 const current = (page: Page) => page.locator("#moveList [aria-current]");
 
-test.beforeEach(async ({ page }) => {
-  await openBoard(page);
-});
-
 // A stroke that leaves the board on its way between two nodes: the engine
 // accepts it, so a saved game with one must load again.
 async function playDetourExchange(page: Page): Promise<void> {
   const frame = await frameOf(page);
   const a = await nodeOnScreen(page, 0, 4);
   const b = await nodeOnScreen(page, 1, 4);
-  const via = { x: frame.left - 6, y: (a.y + b.y) / 2 };
+  const via = { x: frame.left - 6, y: b.y + (b.y - a.y) / 2 };
   await page.mouse.move(a.x, a.y);
   await page.mouse.down();
   await page.mouse.move(via.x, via.y, { steps: 15 });
@@ -38,15 +45,20 @@ async function playDetourExchange(page: Page): Promise<void> {
 }
 
 test("a reload restores the game and New Game clears it", async ({ page }) => {
+  await openBoard(page);
   await expect(page.locator("#history")).toBeHidden();
   await playDetourExchange(page);
   await expect(entries(page)).toHaveText(["1. You 0 to 1", /^2\. AI \d+ to \d+$/]);
   await expect(current(page)).toHaveText(/^2\. AI/);
 
   const saved = await page.evaluate(() => localStorage.getItem("sprouts.game"));
-  await test
-    .info()
-    .attach("saved-game.json", { body: saved ?? "", contentType: "application/json" });
+  const fixture = JSON.parse(saved ?? "null") as Fixture & { cursor: number };
+  expect(fixture.version).toBe(1);
+  expect(fixture.moves).toHaveLength(2);
+  expect(fixture.cursor).toBe(2);
+  expect(fixture.moves[0]).toMatchObject({ from: 0, to: 1 });
+  await mkdir("test-results/fixtures", { recursive: true });
+  await writeFile(`test-results/fixtures/${test.info().project.name}-saved.json`, saved ?? "");
 
   await page.reload();
   await expect(page.locator("#status")).toHaveText("Your turn!", { timeout: 20_000 });
@@ -67,6 +79,7 @@ test("a reload restores the game and New Game clears it", async ({ page }) => {
 test("jumping to a board where the AI is to move enters review and keeps the tail", async ({
   page,
 }) => {
+  await openBoard(page);
   await playExchange(page);
   await entries(page).nth(0).locator("button").click();
   await expect(page.locator("#status")).toHaveText("Reviewing: move 1 of 2.");
@@ -96,6 +109,7 @@ test("jumping to a board where the AI is to move enters review and keeps the tai
 });
 
 test("a share link reopens the game in review and steps through it", async ({ page, browser }) => {
+  await openBoard(page);
   await playExchange(page);
   const before = await strokeCells(page);
   await page.locator("#shareBtn").click();
@@ -155,7 +169,40 @@ test("a share link reopens the game in review and steps through it", async ({ pa
   await visitor.close();
 });
 
+test("a finished game reopens in review and steps single moves", async ({ page }) => {
+  const played = JSON.parse(
+    await readFile("fixtures/games/selfplay-4n-500.json", "utf8"),
+  ) as Fixture;
+  const record = JSON.stringify({ ...played, firstPlayer: "human", cursor: played.moves.length });
+  await page.addInitScript((saved) => localStorage.setItem("sprouts.game", saved), record);
+  await page.goto("/");
+  const total = played.moves.length;
+  await expect(page.locator("#status")).toHaveText(`Reviewing: move ${total} of ${total}.`, {
+    timeout: 60_000,
+  });
+  await expect(entries(page)).toHaveCount(total);
+  await shot(page, "history-finished");
+
+  const frame = await frameOf(page);
+  await page.mouse.click(frame.left + frame.width / 2, frame.top + frame.height / 2);
+  await expect(page.locator("#gameOverModal")).toBeVisible();
+  await page.locator("#reviewBtn").click();
+  await expect(page.locator("#gameOverModal")).toBeHidden();
+
+  await page.locator("#backBtn").click();
+  await expect(current(page)).toHaveText(new RegExp(`^${total - 1}\\.`));
+  await page.locator("#backBtn").click();
+  await expect(current(page)).toHaveText(new RegExp(`^${total - 2}\\.`));
+  await expect(page.locator("#status")).toHaveText(/^Reviewing: move \d+ of \d+\./);
+  await page.locator("#forwardBtn").click();
+  await expect(current(page)).toHaveText(new RegExp(`^${total - 1}\\.`));
+  await page.locator("#forwardBtn").click();
+  await expect(page.locator("#status")).toHaveText(`Reviewing: move ${total} of ${total}.`);
+  await expect(page.locator("#forwardBtn")).toBeDisabled();
+});
+
 test("the move list buttons meet the touch target size", async ({ page }) => {
+  await openBoard(page);
   await playExchange(page);
   for (const id of ["#backBtn", "#forwardBtn", "#shareBtn"]) {
     const box = await page.locator(id).boundingBox();
