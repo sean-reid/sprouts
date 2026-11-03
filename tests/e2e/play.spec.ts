@@ -74,3 +74,25 @@ test("placing the node commits the move and the AI replies", async ({ page }) =>
   await expect(page.locator("#status")).toHaveText("Move undone: your turn");
   await expect(page.locator("#undoBtn")).toBeDisabled();
 });
+
+test("a touch stroke locks the line and Confirm places the node", async ({ page }) => {
+  test.skip(!test.info().project.use.hasTouch, "touch only");
+  const a = await nodeOnScreen(page, 0, 4);
+  const b = await nodeOnScreen(page, 1, 4);
+  const cdp = await page.context().newCDPSession(page);
+  await cdp.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [a] });
+  for (let i = 1; i <= 20; i++) {
+    const t = i / 20;
+    await cdp.send("Input.dispatchTouchEvent", {
+      type: "touchMove",
+      touchPoints: [{ x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t }],
+    });
+  }
+  await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+  await expect(page.locator("#status")).toHaveText(/Tap Confirm/);
+  await expect(page.locator("#mobileOverlay")).toBeVisible();
+  await shot(page, "touch-placing");
+  await page.locator("#confirmBtn").click();
+  await expect(page.locator("#status")).toHaveText("Your turn!", { timeout: 60_000 });
+  await expect(page.locator("#mobileOverlay")).toBeHidden();
+});
