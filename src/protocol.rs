@@ -257,11 +257,8 @@ pub fn ai_move(state: &mut GameState) -> AiReply {
     }
 }
 
-/// Every legal move with `node` at one end. The search lists one move per
-/// class of interchangeable bare nodes, so each listed move is expanded
-/// into the members of its class that touch `node`; a chord between two
-/// different boundary pieces is listed with its lower node first and
-/// `enclosed` is sorted.
+/// Every legal move with `node` at one end. A chord between two different
+/// boundary pieces has its lower node first; `enclosed` is sorted.
 pub fn moves_from(state: &GameState, node: usize) -> MovesFrom {
     let face = &state.face;
     let mut moves: Vec<ModelMove> = Vec::new();
@@ -976,12 +973,8 @@ mod tests {
         }
     }
 
-    /// Four bare nodes: the search lists a loop at 0 round nothing, a loop
-    /// at 0 round node 1, and the chord 0 to 1. Node 0 gets every member
-    /// of those classes it touches: the bare loop, a loop round each other
-    /// node, and a chord to each other node. A bare loop's two sides are
-    /// one position, so node 2 holds the lowest other node outside and
-    /// lists loops round 1 and 3 only.
+    /// A bare loop's two sides are one position, so node 2 holds the
+    /// lowest other node outside and lists loops round 1 and 3 only.
     #[test]
     fn moves_from_lists_every_member_of_the_search_classes_at_the_node() {
         let state = GameState::new(4);
