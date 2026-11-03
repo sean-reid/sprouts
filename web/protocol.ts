@@ -1,48 +1,27 @@
-export type Request =
-  | { type: "init"; nodeCount: number; boardSize: number }
-  | { type: "get_state" }
-  | { type: "get_active_nodes" }
-  | { type: "is_game_over" }
-  | { type: "get_ai_move" }
-  | { type: "undo" }
-  | { type: "get_closest_point"; pathData: number[]; x: number; y: number }
-  | { type: "validate_placement"; pathData: number[]; newNodeX: number; newNodeY: number }
-  | {
-      type: "apply_move";
-      fromNode: number;
-      toNode: number;
-      pathData: number[];
-      newNodeX: number;
-      newNodeY: number;
-    }
-  | {
-      type: "get_move_error";
-      fromNode: number;
-      toNode: number;
-      pathData: number[];
-      newNodeX: number;
-      newNodeY: number;
-    };
+import type { SproutsGame } from "../pkg/sprouts";
 
-export interface Results {
-  init: null;
-  get_state: Float64Array;
-  get_active_nodes: Float64Array;
-  is_game_over: boolean;
-  get_ai_move: Float64Array;
-  undo: boolean;
-  get_closest_point: Float64Array;
-  validate_placement: boolean;
-  apply_move: boolean;
-  get_move_error: string;
+type GameMethods = {
+  [
+    K in keyof SproutsGame as K extends "free"
+      ? never
+      : K extends string
+        ? SproutsGame[K] extends (...args: never[]) => unknown
+          ? K
+          : never
+        : never
+  ]: SproutsGame[K];
+};
+
+// Every public method of the wasm class is a request; init builds the game.
+export interface Api extends GameMethods {
+  init(nodeCount: number, boardSize: number): void;
 }
 
-export type RequestType = Request["type"];
-export type RequestOf<K extends RequestType> = Extract<Request, { type: K }>;
+export type Method = keyof Api;
+export type Args<M extends Method> = Parameters<Api[M]>;
+export type Result<M extends Method> = ReturnType<Api[M]>;
 
-export interface Envelope {
-  id: number;
-  request: Request;
-}
+export type Envelope = { [M in Method]: { id: number; method: M; args: Args<M> } }[Method];
 
-export type Reply = { id: number; result: Results[RequestType] } | { id: number; error: string };
+export type Reply =
+  { id: number; ok: true; result: unknown } | { id: number; ok: false; error: string };

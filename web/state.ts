@@ -1,22 +1,6 @@
-export interface Point {
-  x: number;
-  y: number;
-}
+import type { Line, Node, Player, Point } from "../pkg/sprouts";
 
-export interface Node {
-  id: number;
-  position: Point;
-  connectionCount: number;
-}
-
-export interface Line {
-  id: number;
-  from: number;
-  to: number;
-  polyline: Point[];
-  newNodePos: Point;
-  player: number;
-}
+export type { Line, Node, Player, Point };
 
 export type Mode = "idle" | "dragging" | "placing" | "animating_ai";
 
@@ -35,7 +19,7 @@ export interface Board {
   nodes: Node[];
   lines: Line[];
   activeNodes: Set<number>;
-  currentPlayer: number;
+  currentPlayer: Player;
   dragPath: Point[];
   lockedPath: Point[];
   placementDot: PlacementDot | null;
@@ -60,7 +44,7 @@ export function freshBoard(): Board {
     nodes: [],
     lines: [],
     activeNodes: new Set(),
-    currentPlayer: 0,
+    currentPlayer: "human",
     dragPath: [],
     lockedPath: [],
     placementDot: null,
@@ -72,8 +56,4 @@ export function freshBoard(): Board {
     gameOver: false,
     reviewing: false,
   };
-}
-
-export function toPathData(points: Point[]): number[] {
-  return points.flatMap((p) => [p.x, p.y]);
 }

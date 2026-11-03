@@ -1,6 +1,6 @@
-import type { GameState, Point } from "./state";
+import type { GameState, Player, Point } from "./state";
 
-const PLAYER_COLORS = ["#60A5FA", "#EF4444"] as const;
+const PLAYER_COLORS: Record<Player, string> = { human: "#60A5FA", ai: "#EF4444" };
 
 // Catmull-Rom through every point; tension 6 is the standard value.
 function drawSmoothPath(ctx: CanvasRenderingContext2D, points: Point[]): void {
@@ -35,7 +35,7 @@ export function draw(ctx: CanvasRenderingContext2D, state: GameState): void {
   ctx.fillRect(0, 0, width, height);
 
   for (const line of state.lines) {
-    ctx.strokeStyle = PLAYER_COLORS[line.player === 0 ? 0 : 1];
+    ctx.strokeStyle = PLAYER_COLORS[line.player];
     ctx.lineWidth = 3;
     drawSmoothPath(ctx, line.polyline);
   }
@@ -77,7 +77,7 @@ export function draw(ctx: CanvasRenderingContext2D, state: GameState): void {
     const { path } = state.animatingLine;
     const shown = Math.floor(state.animationProgress * path.length);
     if (shown > 1) {
-      ctx.strokeStyle = PLAYER_COLORS[1];
+      ctx.strokeStyle = PLAYER_COLORS.ai;
       ctx.lineWidth = 3;
       drawSmoothPath(ctx, path.slice(0, shown));
     }

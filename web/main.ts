@@ -1,8 +1,9 @@
 import "./style.css";
-import { Engine } from "./engine";
+import type { Move, Outcome, Snapshot } from "../pkg/sprouts";
+import { Engine, StaleRequest } from "./engine";
 import { healPath } from "./path";
 import { draw } from "./render";
-import { freshBoard, toPathData, type GameState, type Line, type Node, type Point } from "./state";
+import { freshBoard, type GameState, type Node, type PlacementDot, type Point } from "./state";
 
 // A smaller grid on small screens keeps the skeleton pass fast; CSS scaling
 // handles display resolution.
@@ -33,6 +34,9 @@ const state: GameState = { ...freshBoard(), lastInputWasTouch: false };
 let lastNodeCount = DEFAULT_NODES;
 let thinkingInterval: ReturnType<typeof setInterval> | null = null;
 let placingModeEnteredAt = 0;
+// Bumped by newGame so replies and animations from the previous game stop.
+let gameEpoch = 0;
+let submitting = false;
 
 const engine = new Engine(() => setStatus("Failed to load game engine", "lose"));
 
@@ -67,7 +71,7 @@ function closeModal(): void {
 
 function showGameOver(): void {
   stopThinking();
-  const humanWins = state.currentPlayer === 1;
+  const humanWins = state.currentPlayer === "ai";
   setStatus(humanWins ? "You win!" : "AI wins", humanWins ? "win" : "lose");
   winnerText.textContent = humanWins ? "YOU WIN" : "AI WINS";
   winnerText.style.color = humanWins ? "#10B981" : "#EF4444";
@@ -75,6 +79,7 @@ function showGameOver(): void {
 }
 
 function clearStroke(): void {
+  engine.cancel("placement");
   state.mode = "idle";
   state.dragPath = [];
   state.lockedPath = [];
@@ -102,17 +107,11 @@ function findNodeAt(x: number, y: number): Node | null {
   return closest;
 }
 
-async function closestValidSpot(at: Point): Promise<{ position: Point; valid: boolean }> {
-  const pathData = toPathData(state.lockedPath);
-  const point = await engine.call({ type: "get_closest_point", pathData, x: at.x, y: at.y });
-  const position = { x: point[0] ?? at.x, y: point[1] ?? at.y };
-  const valid = await engine.call({
-    type: "validate_placement",
-    pathData,
-    newNodeX: position.x,
-    newNodeY: position.y,
-  });
-  return { position, valid };
+// Resolves null once the stroke it was asked about is no longer on screen.
+async function closestValidSpot(at: Point): Promise<PlacementDot | null> {
+  const path = state.lockedPath;
+  const spot = await engine.call("placement", { path, at });
+  return state.mode === "placing" && state.lockedPath === path ? spot : null;
 }
 
 function handleStart(clientX: number, clientY: number): void {
@@ -143,26 +142,18 @@ async function handleMove(clientX: number, clientY: number): Promise<void> {
       state.dragPath = healPath(state.dragPath);
     }
   } else if (state.mode === "placing") {
-    const pathData = toPathData(state.lockedPath);
-    const closest = await engine.call({
-      type: "get_closest_point",
-      pathData,
-      x: point.x,
-      y: point.y,
-    });
-    const position = { x: closest[0] ?? point.x, y: closest[1] ?? point.y };
     const snapDist = state.lastInputWasTouch ? 80 : 30;
-    if (Math.hypot(point.x - position.x, point.y - position.y) < snapDist) {
-      const valid = await engine.call({
-        type: "validate_placement",
-        pathData,
-        newNodeX: position.x,
-        newNodeY: position.y,
-      });
-      state.placementDot = { position, valid };
-    } else {
-      state.placementDot = null;
+    const path = state.lockedPath;
+    let spot: PlacementDot;
+    try {
+      spot = await engine.latest("placement", "placement", { path, at: point });
+    } catch (error) {
+      if (error instanceof StaleRequest) return;
+      throw error;
     }
+    if (state.mode !== "placing" || state.lockedPath !== path) return;
+    const { x, y } = spot.position;
+    state.placementDot = Math.hypot(point.x - x, point.y - y) < snapDist ? spot : null;
   }
 }
 
@@ -210,7 +201,7 @@ async function autoPlaceMidpoint(): Promise<void> {
   const mid = state.lockedPath[Math.floor(state.lockedPath.length / 2)];
   if (state.mode !== "placing" || state.lockedPath.length < 2 || !mid) return;
   const spot = await closestValidSpot(mid);
-  if (state.mode === "placing" && !state.placementDot) state.placementDot = spot;
+  if (spot && !state.placementDot) state.placementDot = spot;
 }
 
 async function handleDesktopClick(clientX: number, clientY: number): Promise<void> {
@@ -220,6 +211,7 @@ async function handleDesktopClick(clientX: number, clientY: number): Promise<voi
 
   const point = canvasCoords(clientX, clientY);
   const spot = await closestValidSpot(point);
+  if (!spot) return;
   if (Math.hypot(point.x - spot.position.x, point.y - spot.position.y) < 40 && spot.valid) {
     state.placementDot = spot;
     await executeMove();
@@ -234,6 +226,7 @@ async function confirmMove(): Promise<void> {
     const mid = state.lockedPath[Math.floor(state.lockedPath.length / 2)] ?? state.lockedPath[0];
     if (mid) {
       const spot = await closestValidSpot(mid);
+      if (!spot) return;
       if (spot.valid) state.placementDot = spot;
     }
   }
@@ -247,28 +240,31 @@ function cancelPlacement(): void {
 }
 
 async function executeMove(): Promise<void> {
+  if (submitting) return;
   if (!state.placementDot?.valid || state.dragStartNode === null || state.dragEndNode === null) {
     setStatus("Select a valid spot on the line", "lose");
     return;
   }
-  const move = {
+  const move: Move = {
     fromNode: state.dragStartNode,
     toNode: state.dragEndNode,
-    pathData: toPathData(state.lockedPath),
-    newNodeX: state.placementDot.position.x,
-    newNodeY: state.placementDot.position.y,
+    polyline: state.lockedPath,
+    newNodePos: state.placementDot.position,
   };
   overlay.classList.remove("visible");
 
-  const success = await engine.call({ type: "apply_move", ...move });
-  if (!success) {
-    const reason = await engine.call({ type: "get_move_error", ...move }).catch(() => "");
-    setStatus(reason || "Move rejected: try a different path", "lose");
+  const epoch = gameEpoch;
+  submitting = true;
+  const outcome = await engine.call("applyMove", move).catch(failure);
+  submitting = false;
+  if (epoch !== gameEpoch) return;
+  if (outcome.kind === "rejected") {
+    setStatus(outcome.reason, "lose");
     clearStroke();
     return;
   }
 
-  await refreshBoard();
+  applySnapshot(outcome.snapshot);
   clearStroke();
   updateUndoButton();
   if (!state.gameOver) {
@@ -277,119 +273,75 @@ async function executeMove(): Promise<void> {
   }
 }
 
-function reader(data: Float64Array): () => number {
-  let i = 0;
-  return () => {
-    const value = data[i++];
-    if (value === undefined) throw new Error("truncated engine payload");
-    return value;
-  };
+function failure(error: unknown): Outcome {
+  return { kind: "rejected", reason: error instanceof Error ? error.message : String(error) };
 }
 
-async function refreshBoard(): Promise<void> {
-  const next = reader(await engine.call({ type: "get_state" }));
-  const nodeCount = next();
-  const nodes: Node[] = [];
-  for (let i = 0; i < nodeCount; i++) {
-    nodes.push({ id: next(), position: { x: next(), y: next() }, connectionCount: next() });
-  }
-  const lineCount = next();
-  const lines: Line[] = [];
-  for (let i = 0; i < lineCount; i++) {
-    const id = next();
-    const from = next();
-    const to = next();
-    const pointCount = next();
-    const polyline: Point[] = [];
-    for (let j = 0; j < pointCount; j++) polyline.push({ x: next(), y: next() });
-    const newNodePos = { x: next(), y: next() };
-    const player = next();
-    lines.push({ id, from, to, polyline, newNodePos, player });
-  }
-  const currentPlayer = next();
-
-  const [activeNodes, gameOver] = await Promise.all([
-    engine.call({ type: "get_active_nodes" }),
-    engine.call({ type: "is_game_over" }),
-  ]);
-
-  state.nodes = nodes;
-  state.lines = lines;
-  state.currentPlayer = currentPlayer;
-  state.activeNodes = new Set(activeNodes);
-
-  if (gameOver) {
+function applySnapshot(snapshot: Snapshot): void {
+  state.nodes = snapshot.nodes;
+  state.lines = snapshot.lines;
+  state.currentPlayer = snapshot.currentPlayer;
+  state.activeNodes = new Set(snapshot.activeNodes);
+  if (snapshot.gameOver) {
     state.gameOver = true;
     showGameOver();
   }
   updateUndoButton();
 }
 
+async function refreshBoard(): Promise<void> {
+  applySnapshot(await engine.call("snapshot"));
+}
+
 async function performAIMove(): Promise<void> {
+  const epoch = gameEpoch;
   try {
-    const data = await engine.call({ type: "get_ai_move" });
+    const move = await engine.latest("turn", "aiMove");
     stopThinking();
-    if (data.length === 0) {
+    if (!move) {
       state.gameOver = true;
       showGameOver();
       return;
     }
-    const next = reader(data);
-    const fromNode = next();
-    const toNode = next();
-    const pointCount = next();
-    const path: Point[] = [];
-    for (let i = 0; i < pointCount; i++) path.push({ x: next(), y: next() });
-    const newPos = { x: next(), y: next() };
 
     state.mode = "animating_ai";
-    state.animatingLine = { path, newPos };
+    state.animatingLine = { path: move.polyline, newPos: move.newNodePos };
     state.animationProgress = 0;
     const startTime = performance.now();
     const animate = (now: number): void => {
+      if (epoch !== gameEpoch) return;
       state.animationProgress = Math.min((now - startTime) / AI_ANIMATION_MS, 1);
       if (state.animationProgress < 1) requestAnimationFrame(animate);
-      else void finishAIMove(fromNode, toNode, path, newPos);
+      else void finishAIMove(move, epoch);
     };
     requestAnimationFrame(animate);
   } catch (error) {
+    if (error instanceof StaleRequest) return;
     stopThinking();
     setStatus("AI error: " + (error instanceof Error ? error.message : String(error)), "lose");
     state.mode = "idle";
   }
 }
 
-async function finishAIMove(
-  fromNode: number,
-  toNode: number,
-  path: Point[],
-  newPos: Point,
-): Promise<void> {
-  try {
-    const success = await engine.call({
-      type: "apply_move",
-      fromNode,
-      toNode,
-      pathData: toPathData(path),
-      newNodeX: newPos.x,
-      newNodeY: newPos.y,
-    });
-    if (success) await refreshBoard();
+async function finishAIMove(move: Move, epoch: number): Promise<void> {
+  const outcome = await engine.call("applyMove", move).catch(failure);
+  if (epoch !== gameEpoch) return;
+  if (outcome.kind === "applied") {
+    applySnapshot(outcome.snapshot);
     if (!state.gameOver) setStatus("Your turn!");
-  } catch (error) {
-    setStatus("AI error: " + (error instanceof Error ? error.message : String(error)), "lose");
-  } finally {
-    state.mode = "idle";
-    state.animatingLine = null;
-    updateUndoButton();
+  } else {
+    setStatus("AI error: " + outcome.reason, "lose");
   }
+  state.mode = "idle";
+  state.animatingLine = null;
+  updateUndoButton();
 }
 
 async function undoMove(): Promise<void> {
   if (state.mode !== "idle" || thinkingInterval !== null) return;
   let undone = false;
   for (let i = 0; i < 2; i++) {
-    if (!(await engine.call({ type: "undo" }))) break;
+    if (!(await engine.call("undo"))) break;
     undone = true;
   }
   if (undone) {
@@ -404,11 +356,15 @@ async function undoMove(): Promise<void> {
 async function newGame(nodeCount: number): Promise<void> {
   lastNodeCount = nodeCount;
   Object.assign(state, freshBoard());
+  clearStroke();
+  overlay.classList.remove("visible");
   stopThinking();
+  gameEpoch++;
+  engine.cancel("turn");
   setStatus("Initializing...");
   closeModal();
   try {
-    await engine.call({ type: "init", nodeCount, boardSize: BOARD_SIZE });
+    await engine.call("init", nodeCount, BOARD_SIZE);
     await refreshBoard();
     setStatus("Draw a line between two nodes");
   } catch (error) {
