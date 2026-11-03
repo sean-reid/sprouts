@@ -4,7 +4,7 @@ use tsify::Tsify;
 use crate::ai;
 use crate::curve::{self, Cubic};
 use crate::embedding;
-use crate::face::Move as ModelMove;
+use crate::face::{self, IllegalMove, Move as ModelMove};
 use crate::geometry;
 use crate::route::{self, Unroutable};
 use crate::types::{self, scale, GameState, Line, Node, Player, Point, MIN_NODE_SPACING};
@@ -60,8 +60,15 @@ pub struct Snapshot {
 #[derive(Debug, Clone, Serialize, Tsify)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum Outcome {
-    Applied { snapshot: Snapshot },
-    Rejected { rejection: Rejection },
+    /// `topology` is the face move when the router draws this very line
+    /// from it, so a link can carry the move without its geometry.
+    Applied {
+        snapshot: Snapshot,
+        topology: Option<FaceMove>,
+    },
+    Rejected {
+        rejection: Rejection,
+    },
 }
 
 /// The AI's move with the spline it commits as, so the page animates the
@@ -228,21 +235,96 @@ pub fn snapshot(state: &GameState) -> Snapshot {
     }
 }
 
+#[cfg(any(test, feature = "bench"))]
 pub fn check(state: &GameState, mov: &types::Move) -> Result<(), Rejection> {
+    topology(state, mov).map(drop)
+}
+
+/// The face move of a line that passes every check for the player to move.
+fn topology(state: &GameState, mov: &types::Move) -> Result<face::Move, Rejection> {
     match state.current_player {
         Player::AI => validation::validate_ai_move(state, mov),
         Player::Human => validation::validate_move(state, mov),
     }?;
-    embedding::embed(state, mov).map(drop)
+    embedding::embed(state, mov)
 }
 
 pub fn apply(state: &mut GameState, mov: Move) -> Outcome {
     let mov = mov.by(state.current_player, state.board_size);
-    match check(state, &mov).and_then(|()| state.apply_move(mov)) {
-        Ok(()) => Outcome::Applied {
+    let applied = topology(state, &mov).and_then(|face| {
+        let topology = redraws(state, &face, &mov).then(|| face.into());
+        state.apply_move(mov).map(|()| topology)
+    });
+    match applied {
+        Ok(topology) => Outcome::Applied {
             snapshot: snapshot(state),
+            topology,
         },
         Err(rejection) => Outcome::Rejected { rejection },
+    }
+}
+
+/// Whether the router, given the face move, draws the line of `mov`: the
+/// flattenings stay within the fit tolerance of each other and the node
+/// lands in the same place.
+fn redraws(state: &GameState, face: &face::Move, mov: &types::Move) -> bool {
+    let tolerance = curve::tolerance(state.board_size);
+    let Ok(drawn) = route::route(state, face) else {
+        return false;
+    };
+    let ours = mov.flatten(tolerance);
+    let theirs = drawn.flatten(tolerance);
+    let within = |points: &[Point], of: &[Point]| {
+        points
+            .iter()
+            .all(|p| geometry::closest_point_on_polyline(of, p).1 <= tolerance)
+    };
+    drawn.new_node_pos.distance_to(&mov.new_node_pos) <= tolerance
+        && within(&ours, &theirs)
+        && within(&theirs, &ours)
+}
+
+/// Draws a move named by its topology with the router and applies it, as
+/// the player to move. The line is router output, so it is its own
+/// topology.
+pub fn apply_face_move(state: &mut GameState, mov: FaceMove) -> Outcome {
+    let listed: face::Move = mov.clone().into();
+    let drawn = state
+        .face
+        .check(&listed)
+        .map_err(|why| illegal(state, &listed, why))
+        .and_then(|()| route::route(state, &listed).map_err(|why| unroutable(&listed, why)));
+    match drawn.and_then(|line| state.apply_move(line)) {
+        Ok(()) => Outcome::Applied {
+            snapshot: snapshot(state),
+            topology: Some(mov),
+        },
+        Err(rejection) => Outcome::Rejected { rejection },
+    }
+}
+
+fn illegal(state: &GameState, mv: &face::Move, why: IllegalMove) -> Rejection {
+    let count = state.face.node_count();
+    match why {
+        IllegalMove::Node if mv.a >= count => Rejection::missing_node(mv.a, "Source"),
+        IllegalMove::Node => Rejection::missing_node(mv.b, "Target"),
+        IllegalMove::Degree if mv.a == mv.b => Rejection::self_loop_full(mv.a),
+        IllegalMove::Degree if state.face.degree(mv.a) == 3 => Rejection::node_full(mv.a, "Source"),
+        IllegalMove::Degree => Rejection::node_full(mv.b, "Target"),
+        IllegalMove::Corner | IllegalMove::Face | IllegalMove::Enclosed => {
+            Rejection::unroutable(mv.a, "the move does not fit the position")
+        }
+    }
+}
+
+fn unroutable(mv: &face::Move, why: Unroutable) -> Rejection {
+    match why {
+        Unroutable::Rejected(rejection) => rejection,
+        Unroutable::Corner => Rejection::unroutable(mv.a, "no matching corner"),
+        Unroutable::Corridor => Rejection::unroutable(mv.a, "no corridor through the face"),
+        Unroutable::Room => Rejection::unroutable(mv.a, "no room"),
+        Unroutable::Crossing => Rejection::unroutable(mv.a, "the curve crosses a line"),
+        Unroutable::Topology => Rejection::unroutable(mv.a, "the curve reads as another move"),
     }
 }
 
@@ -428,7 +510,7 @@ mod tests {
             })
             .collect();
         let far = ring[24];
-        let Outcome::Applied { snapshot: snap } = apply(
+        let Outcome::Applied { snapshot: snap, .. } = apply(
             &mut state,
             Move {
                 from_node: 0,
@@ -458,7 +540,7 @@ mod tests {
                 new_node_pos: over[1],
             },
         );
-        let Outcome::Applied { snapshot: snap } = outcome else {
+        let Outcome::Applied { snapshot: snap, .. } = outcome else {
             panic!("the closing chord was rejected: {outcome:?}");
         };
         assert!(snap.game_over);
@@ -508,9 +590,105 @@ mod tests {
             panic!("the AI has an opening move");
         };
         match apply(&mut state, mov) {
-            Outcome::Applied { snapshot } => assert_eq!(snapshot.current_player, Player::Human),
+            Outcome::Applied { snapshot, .. } => assert_eq!(snapshot.current_player, Player::Human),
             Outcome::Rejected { rejection } => panic!("opening rejected: {}", rejection.message),
         }
+    }
+
+    /// The AI's line is router output, so applying it reports the face
+    /// move it was drawn from, and that face move draws the same line again.
+    #[test]
+    fn an_ai_move_applies_with_its_topology_and_the_topology_redraws_it() {
+        let mut state = start(4, 1000, Player::AI, None).unwrap();
+        let AiReply::Move { mov, .. } = ai_move(&mut state) else {
+            panic!("the AI has an opening move");
+        };
+        let mut again = state.clone();
+        let Outcome::Applied { snapshot, topology } = apply(&mut state, mov.clone()) else {
+            panic!("the AI's own move was rejected");
+        };
+        let face = topology.expect("a routed line reports its topology");
+        assert_eq!((face.a, face.b), (mov.from_node, mov.to_node));
+        assert_eq!(face.at_a, None);
+        assert_eq!(face.at_b, None);
+        let wire = serde_json::to_value(&face).unwrap();
+        assert_eq!(wire["atA"], json!(null));
+        assert_eq!(wire["enclosed"], json!([]));
+
+        let Outcome::Applied {
+            snapshot: redrawn,
+            topology: own,
+        } = apply_face_move(&mut again, face.clone())
+        else {
+            panic!("the topology did not route");
+        };
+        assert_eq!(own, Some(face));
+        // The wire move refits its polyline and snaps the node again, which
+        // moves the last bit, so the two lines agree to a micron.
+        assert_eq!(
+            redrawn.lines[0].segments.len(),
+            snapshot.lines[0].segments.len()
+        );
+        for (x, y) in redrawn.lines[0]
+            .segments
+            .iter()
+            .zip(&snapshot.lines[0].segments)
+        {
+            for (px, py) in [(x.p0, y.p0), (x.p1, y.p1), (x.p2, y.p2), (x.p3, y.p3)] {
+                assert!(px.distance_to(&py) < 1e-6);
+            }
+        }
+        assert!(
+            redrawn.nodes[4]
+                .position
+                .distance_to(&snapshot.nodes[4].position)
+                < 1e-6
+        );
+        assert_eq!(redrawn.current_player, Player::Human);
+    }
+
+    /// A hand-drawn wave is nothing the router would draw, so the outcome
+    /// carries no topology for it.
+    #[test]
+    fn a_hand_drawn_move_applies_without_a_topology() {
+        let mut state = GameState::new(4);
+        let path = wavy(state.nodes[0].position, state.nodes[1].position);
+        let new_node_pos = path[20];
+        let mov = Move {
+            from_node: 0,
+            to_node: 1,
+            polyline: path,
+            new_node_pos,
+        };
+        let wire = serde_json::to_value(apply(&mut state, mov)).unwrap();
+        assert_eq!(wire["kind"], json!("applied"));
+        assert_eq!(wire["topology"], json!(null));
+    }
+
+    #[test]
+    fn a_face_move_that_does_not_fit_is_rejected_without_a_panic() {
+        let mut state = GameState::new(4);
+        let face = |a: usize, at_a: Option<usize>, b: usize| FaceMove {
+            a,
+            at_a,
+            b,
+            at_b: None,
+            enclosed: Vec::new(),
+        };
+        let missing = apply_face_move(&mut state, face(9, None, 0));
+        let Outcome::Rejected { rejection } = missing else {
+            panic!("node 9 does not exist");
+        };
+        assert_eq!(rejection.kind, validation::RejectionKind::MissingNode);
+        let Outcome::Rejected { rejection } = apply_face_move(&mut state, face(0, Some(3), 1))
+        else {
+            panic!("node 0 has no spoke 3");
+        };
+        assert_eq!(rejection.kind, validation::RejectionKind::Unroutable);
+        let wire = serde_json::to_value(&rejection).unwrap();
+        assert_eq!(wire["kind"], json!("unroutable"));
+        assert_eq!(wire["at"], json!({ "kind": "node", "id": 0 }));
+        assert!(state.lines.is_empty());
     }
 
     #[test]
@@ -535,7 +713,7 @@ mod tests {
             panic!("the AI has a reply");
         };
         match apply(&mut state, mov) {
-            Outcome::Applied { snapshot } => {
+            Outcome::Applied { snapshot, .. } => {
                 assert_eq!(snapshot.current_player, Player::Human);
                 assert_eq!(snapshot.lines.len(), 2);
             }
@@ -558,7 +736,7 @@ mod tests {
             new_node_pos,
         };
         match apply(&mut state, mov) {
-            Outcome::Applied { snapshot } => {
+            Outcome::Applied { snapshot, .. } => {
                 assert_eq!(snapshot.current_player, Player::Human);
                 assert_eq!(snapshot.lines[0].player, Player::AI);
             }
@@ -686,7 +864,7 @@ mod tests {
             polyline: path,
             new_node_pos: placed.position,
         };
-        let Outcome::Applied { snapshot } = apply(&mut state, mov) else {
+        let Outcome::Applied { snapshot, .. } = apply(&mut state, mov) else {
             panic!("wavy chord rejected");
         };
         assert_eq!(snapshot.lines[0].segments, shown);
@@ -716,7 +894,7 @@ mod tests {
         let AiReply::Move { mov, segments } = ai_move(&mut state) else {
             panic!("the AI has a move on an open board");
         };
-        let Outcome::Applied { snapshot } = apply(&mut state, mov) else {
+        let Outcome::Applied { snapshot, .. } = apply(&mut state, mov) else {
             panic!("the AI's own move was rejected");
         };
         assert_eq!(snapshot.lines.last().unwrap().segments, segments);
@@ -764,7 +942,7 @@ mod tests {
         let back: Move = serde_json::from_str(&text).unwrap();
         let mut direct = state.clone();
         let mut replayed = state.clone();
-        let (Outcome::Applied { snapshot: a }, Outcome::Applied { snapshot: b }) =
+        let (Outcome::Applied { snapshot: a, .. }, Outcome::Applied { snapshot: b, .. }) =
             (apply(&mut direct, mov), apply(&mut replayed, back))
         else {
             panic!("the chord was rejected");
@@ -1063,7 +1241,7 @@ mod tests {
                 "{listed:?} read back as {read:?}"
             );
             let mut played = state.clone();
-            let Outcome::Applied { snapshot } = apply(&mut played, mov) else {
+            let Outcome::Applied { snapshot, .. } = apply(&mut played, mov) else {
                 panic!("the routed move for {listed:?} was rejected");
             };
             assert_eq!(snapshot.lines[0].segments, segments);

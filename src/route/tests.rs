@@ -350,6 +350,96 @@ fn recorded_positions_keep_a_drawable_move() {
     );
 }
 
+/// Every move of every fixture under fixtures/games routed from its face
+/// move in the position it was played, as text: the bits of each
+/// flattening point and of the new node, or the failure.
+#[cfg(not(debug_assertions))]
+fn routed_fixtures() -> String {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/games");
+    let mut paths: Vec<_> = std::fs::read_dir(&dir)
+        .unwrap()
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|e| e == "json"))
+        .collect();
+    paths.sort();
+    let mut out = String::new();
+    for path in &paths {
+        let fixture = crate::replay::load(path).unwrap();
+        let mut state = fixture.start();
+        out.push_str(&format!("{}\n", path.display()));
+        for (index, m) in fixture.moves.iter().enumerate() {
+            let polyline: Vec<Point> = m.polyline.iter().map(|q| p(q[0], q[1])).collect();
+            let mov = Move::new(
+                m.from,
+                m.to,
+                polyline,
+                p(m.new_node[0], m.new_node[1]),
+                state.current_player,
+                fixture.board_size,
+            );
+            let face = embedding::embed(&state, &mov).unwrap();
+            match route(&state, &face) {
+                Ok(drawn) => {
+                    let tolerance = curve::tolerance(state.board_size);
+                    let bits: Vec<String> = drawn
+                        .flatten(tolerance)
+                        .iter()
+                        .chain(std::iter::once(&drawn.new_node_pos))
+                        .map(|q| format!("{:x},{:x}", q.x.to_bits(), q.y.to_bits()))
+                        .collect();
+                    out.push_str(&format!("{index} {face:?} {}\n", bits.join(" ")));
+                }
+                Err(why) => out.push_str(&format!("{index} {face:?} {why:?}\n")),
+            }
+            state.apply_move(mov).unwrap();
+        }
+    }
+    out
+}
+
+/// Names the file a child process writes its `routed_fixtures` to.
+#[cfg(not(debug_assertions))]
+const ROUTE_DUMP: &str = "SPROUTS_ROUTE_DUMP";
+
+/// A link carries an AI move as its face move and the visitor's machine
+/// draws it again, so the router has to give the same curve for the same
+/// input in any process: here, this one and two more.
+#[test]
+#[cfg(not(debug_assertions))]
+fn routing_gives_the_same_curves_in_another_process() {
+    if let Ok(path) = std::env::var(ROUTE_DUMP) {
+        std::fs::write(path, routed_fixtures()).unwrap();
+        return;
+    }
+    let here = routed_fixtures();
+    assert!(here.lines().any(|l| l.contains(',')), "nothing routed");
+    let exe = std::env::current_exe().unwrap();
+    for run in 0..2 {
+        let dump =
+            std::env::temp_dir().join(format!("sprouts-routes-{}-{run}.txt", std::process::id()));
+        let status = std::process::Command::new(&exe)
+            .args([
+                "--exact",
+                "route::tests::routing_gives_the_same_curves_in_another_process",
+            ])
+            .env(ROUTE_DUMP, &dump)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let there = std::fs::read_to_string(&dump).unwrap();
+        let _ = std::fs::remove_file(&dump);
+        if there != here {
+            let (ours, theirs) = here
+                .lines()
+                .zip(there.lines())
+                .find(|(a, b)| a != b)
+                .unwrap_or(("", ""));
+            panic!("run {run} routed differently:\n{ours}\n{theirs}");
+        }
+    }
+}
+
 /// Every forfeit in the seeded games with its diagnosis, for working the
 /// router's remaining failures down in one pass: `cargo test --release
 /// survey_forfeits -- --ignored --nocapture`.

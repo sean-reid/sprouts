@@ -35,6 +35,7 @@ pub enum RejectionKind {
     NodeOffBoard,
     NodeNotInMiddle,
     NoRoomForNode,
+    Unroutable,
 }
 
 /// Segment i of the submitted path joins its points i and i+1; the range is
@@ -161,6 +162,16 @@ impl Rejection {
             RejectionKind::NoRoomForNode,
             at,
             "No room for a new node on this line",
+        )
+    }
+
+    /// A move named by its topology that the router could not draw from
+    /// node `id`.
+    pub(crate) fn unroutable(id: usize, why: &str) -> Self {
+        Self::node(
+            RejectionKind::Unroutable,
+            id,
+            format!("The move cannot be drawn here ({why})"),
         )
     }
 }

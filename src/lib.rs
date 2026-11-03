@@ -51,6 +51,11 @@ impl SproutsGame {
         Ok(protocol::apply(&mut self.state, mov.to_rust()?).into_ts()?)
     }
 
+    #[wasm_bindgen(js_name = applyFaceMove)]
+    pub fn apply_face_move(&mut self, mov: Ts<FaceMove>) -> Result<Ts<Outcome>, JsError> {
+        Ok(protocol::apply_face_move(&mut self.state, mov.to_rust()?).into_ts()?)
+    }
+
     pub fn undo(&mut self) -> bool {
         self.state.undo_move()
     }
