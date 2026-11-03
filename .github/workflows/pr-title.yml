@@ -1,0 +1,17 @@
+name: pr-title
+
+on:
+  pull_request:
+    types: [opened, edited, reopened, synchronize]
+
+jobs:
+  conventional:
+    runs-on: ubuntu-latest
+    steps:
+      - name: require conventional commit title
+        env:
+          TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          echo "$TITLE" | grep -qE '^(feat|fix|security|deps|chore|docs|test|refactor|perf|ci|build|style|revert)(\([a-z0-9._/-]+\))?!?: .' && exit 0
+          echo "PR title must be a conventional commit: type(scope): subject"
+          exit 1
