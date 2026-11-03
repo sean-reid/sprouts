@@ -1,4 +1,4 @@
-//! Opening book for the AI, which always plays second.
+//! Opening book for the AI's first reply when the human opens.
 //!
 //! Sprouts solved results:
 //!   n=4: First player wins (max 11 moves)

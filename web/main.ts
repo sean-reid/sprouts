@@ -66,6 +66,7 @@ let flashTimer: ReturnType<typeof setTimeout> | null = null;
 // Bumped by newGame so replies and animations from the previous game stop.
 let gameEpoch = 0;
 let submitting = false;
+let undoing = false;
 
 const engine = new Engine(() => setStatus("Failed to load game engine", "lose"));
 
@@ -168,7 +169,7 @@ function handleStart(world: Point, kind: PointerKind): void {
     if (state.lastInputWasTouch) void handleMove(world, kind);
     return;
   }
-  if (state.mode !== "idle" || state.thinking || state.gameOver) return;
+  if (state.mode !== "idle" || state.thinking || undoing || state.gameOver) return;
   const node = findNodeAt(world, state.lastInputWasTouch ? 30 : 15);
   if (node && state.activeNodes.has(node.id)) {
     state.mode = "dragging";
@@ -402,21 +403,28 @@ async function finishAIMove(move: Move, epoch: number): Promise<void> {
 }
 
 async function undoMove(): Promise<void> {
-  if (state.mode !== "idle" || state.thinking) return;
-  let undone = false;
-  for (let i = 0; i < 2; i++) {
-    if (!(await engine.call("undo"))) break;
-    undone = true;
-  }
-  if (!undone) return;
-  state.gameOver = false;
-  state.reviewing = false;
-  closeModal();
-  await refreshBoard();
-  if (state.currentPlayer === "ai" && !state.gameOver) {
-    startAITurn();
-  } else {
-    setStatus("Move undone: your turn");
+  if (state.mode !== "idle" || state.thinking || undoing) return;
+  const epoch = gameEpoch;
+  undoing = true;
+  try {
+    let undone = false;
+    for (let i = 0; i < 2; i++) {
+      if (!(await engine.call("undo"))) break;
+      undone = true;
+    }
+    if (!undone || epoch !== gameEpoch) return;
+    state.gameOver = false;
+    state.reviewing = false;
+    closeModal();
+    await refreshBoard();
+    if (epoch !== gameEpoch) return;
+    if (state.currentPlayer === "ai" && !state.gameOver) {
+      startAITurn();
+    } else {
+      setStatus("Move undone: your turn");
+    }
+  } finally {
+    undoing = false;
   }
 }
 
@@ -427,17 +435,21 @@ async function newGame(nodeCount: number): Promise<void> {
   clearStroke();
   overlay.classList.remove("visible");
   stopThinking();
-  gameEpoch++;
+  updateTurn();
+  updateUndoButton();
+  const epoch = ++gameEpoch;
   engine.cancel("turn");
   setStatus("Initializing...");
   closeModal();
   try {
     await engine.call("init", nodeCount, BOARD_SIZE, firstPlayer);
+    if (epoch !== gameEpoch) return;
     await refreshBoard();
+    if (epoch !== gameEpoch) return;
     if (state.currentPlayer === "ai") startAITurn();
     else setStatus("Draw a line between two nodes");
   } catch (error) {
-    setStatus("Failed to start game: " + describe(error), "lose");
+    if (epoch === gameEpoch) setStatus("Failed to start game: " + describe(error), "lose");
   }
 }
 

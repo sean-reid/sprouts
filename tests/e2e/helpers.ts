@@ -247,6 +247,47 @@ export function near(pixel: Rgb, hex: string, tolerance = 40): boolean {
   return Math.hypot(pixel[0] - want[0]!, pixel[1] - want[1]!, pixel[2] - want[2]!) < tolerance;
 }
 
+export interface FlashProbe {
+  statusAt: number | null;
+  flashAt: number | null;
+}
+
+// Watches for the status to change to the message, then samples the pixel
+// every frame until it turns the colour, timing both in the page's clock.
+export function armFlashProbe(page: Page, at: Client, message: string, hex: string): Promise<void> {
+  return page.evaluate(
+    ({ x, y, message, hex }) => {
+      const probe: FlashProbe = { statusAt: null, flashAt: null };
+      (window as unknown as { flashProbe: FlashProbe }).flashProbe = probe;
+      const status = document.getElementById("status")!;
+      const canvas = document.getElementById("canvas") as HTMLCanvasElement;
+      const ctx = canvas.getContext("2d")!;
+      const want = [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16));
+      const sample = (): void => {
+        const rect = canvas.getBoundingClientRect();
+        const px = Math.round((x - rect.left) * (canvas.width / rect.width));
+        const py = Math.round((y - rect.top) * (canvas.height / rect.height));
+        const [r, g, b] = ctx.getImageData(px, py, 1, 1).data;
+        if (Math.hypot(r! - want[0]!, g! - want[1]!, b! - want[2]!) < 40) {
+          probe.flashAt = performance.now();
+        } else if (performance.now() - probe.statusAt! < 1000) {
+          requestAnimationFrame(sample);
+        }
+      };
+      new MutationObserver(() => {
+        if (probe.statusAt !== null || status.textContent !== message) return;
+        probe.statusAt = performance.now();
+        sample();
+      }).observe(status, { childList: true, characterData: true, subtree: true });
+    },
+    { x: at.x, y: at.y, message, hex },
+  );
+}
+
+export function readFlashProbe(page: Page): Promise<FlashProbe> {
+  return page.evaluate(() => (window as unknown as { flashProbe: FlashProbe }).flashProbe);
+}
+
 // The 4 px turn ring starts at the canvas edge; 2 px in is its centre line.
 export function ringPixel(frame: Frame): Client {
   return { x: frame.left + 2, y: frame.top + frame.height / 2 };
