@@ -39,6 +39,11 @@ impl Region {
         self.model.node_count()
     }
 
+    /// Faces borrowed from the rest of the position, numbered first.
+    pub fn frozen(&self) -> usize {
+        self.frozen
+    }
+
     /// Faces the game is played in, after the frozen ones.
     pub fn face_count(&self) -> usize {
         self.model.face_count() - self.frozen

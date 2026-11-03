@@ -711,6 +711,43 @@ mod tests {
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(96))]
 
+        /// One scratch kept across a game and its undoes, and across
+        /// games of other sizes, gives the form a fresh build gives, on
+        /// the whole position and on each region's frozen model.
+        #[test]
+        fn a_reused_scratch_matches_a_fresh_build(
+            games in prop::collection::vec(
+                (1usize..=8, prop::collection::vec(any::<u32>(), 12)),
+                3,
+            ),
+        ) {
+            let mut scratch = LiveScratch::default();
+            for (n, picks) in games {
+                let mut m = FaceModel::new(n);
+                let mut played = 0;
+                for pick in picks {
+                    let moves = m.moves();
+                    if moves.is_empty() {
+                        break;
+                    }
+                    m.apply(&moves[pick as usize % moves.len()]).unwrap();
+                    played += 1;
+                    let fresh = live_form(&m, 0);
+                    prop_assert_eq!(scratch.form(&m, 0).to_vec(), fresh);
+                    for region in m.regions() {
+                        let (model, frozen) = (region.model(), region.frozen());
+                        let fresh = live_form(model, frozen);
+                        prop_assert_eq!(scratch.form(model, frozen).to_vec(), fresh);
+                    }
+                }
+                for _ in 0..played {
+                    m.undo();
+                    let fresh = live_form(&m, 0);
+                    prop_assert_eq!(scratch.form(&m, 0).to_vec(), fresh);
+                }
+            }
+        }
+
         /// Two random games that reach the same form reach the same
         /// outcome; a position renamed at random keeps its form.
         #[test]
