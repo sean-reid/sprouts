@@ -11,6 +11,9 @@ export interface Routed {
 export interface Table {
   // Whether the human can start a move now.
   canPick(): boolean;
+  // Whether a keyboard move in progress may go on: the human's turn on an
+  // idle board or with a routed candidate up, nothing else pending.
+  canPlay(): boolean;
   movesFrom(node: number): Promise<FaceMove[]>;
   route(mv: FaceMove): Promise<RouteReply>;
   // Shows the routed curve as the locked stroke with its node dot.
@@ -44,6 +47,7 @@ function touching(moves: FaceMove[], a: number, b: number): FaceMove[] {
 export class KeyboardPlay {
   private phase: Phase = { kind: "idle" };
   private ticket = 0;
+  private routing = false;
 
   constructor(
     private readonly table: Table,
@@ -58,7 +62,10 @@ export class KeyboardPlay {
   async activate(id: number): Promise<void> {
     const phase = this.phase;
     if (phase.kind === "idle") {
-      if (!this.table.canPick()) return;
+      if (!this.table.canPick()) {
+        this.table.status(this.whyNot());
+        return;
+      }
       const ticket = ++this.ticket;
       let moves: FaceMove[];
       try {
@@ -80,12 +87,18 @@ export class KeyboardPlay {
       this.table.status(`Node ${id} picked. Tab to a partner and press Enter${loop}`);
       return;
     }
-    if (!phase.partners.has(id)) return;
+    if (!phase.partners.has(id) || this.routing || !this.table.canPlay()) return;
     if (phase.kind === "shown" && phase.partner === id) {
       this.table.commit();
       return;
     }
     await this.show(phase, id, touching(phase.moves, phase.start, id), 0, 1);
+  }
+
+  private whyNot(): string {
+    if (this.state.mode !== "idle") return "Finish or cancel the move in progress";
+    if (this.state.reviewing) return "Undo to play on from here.";
+    return "Wait for your turn";
   }
 
   // Left and Right step through the moves between the pair; both keys are
@@ -113,6 +126,7 @@ export class KeyboardPlay {
 
   reset(): void {
     this.ticket++;
+    this.routing = false;
     this.phase = { kind: "idle" };
     this.state.pickedNode = null;
     this.state.routed = false;
@@ -128,6 +142,7 @@ export class KeyboardPlay {
     from: number,
     step: -1 | 1,
   ): Promise<void> {
+    if (!this.table.canPlay()) return;
     const ticket = ++this.ticket;
     const count = candidates.length;
     for (let k = 0; k < count; k++) {
@@ -135,14 +150,17 @@ export class KeyboardPlay {
       const candidate = candidates[index];
       if (!candidate) break;
       let reply: RouteReply;
+      this.routing = true;
       try {
         reply = await this.table.route(candidate);
       } catch (error) {
         if (error instanceof StaleRequest) return;
         this.table.status("Engine error: " + describe(error), "lose");
         return;
+      } finally {
+        if (ticket === this.ticket) this.routing = false;
       }
-      if (ticket !== this.ticket) return;
+      if (ticket !== this.ticket || !this.table.canPlay()) return;
       if (reply.kind !== "routed") continue;
       this.phase = {
         kind: "shown",

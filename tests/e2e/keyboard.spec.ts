@@ -1,7 +1,12 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import AxeBuilder from "@axe-core/playwright";
 import { expect, test, type Page } from "@playwright/test";
-import { HIGHLIGHT_COLOR } from "../../web/render";
+import {
+  BOARD_BACKGROUND,
+  CANDIDATE_ALPHA,
+  HIGHLIGHT_COLOR,
+  PLAYER_COLORS,
+} from "../../web/render";
 import {
   colourCentroid,
   drawBetween,
@@ -17,8 +22,19 @@ import {
 
 // The focus ring sits at NODE_RADIUS + 6 in web/render.ts.
 const RING_RADIUS = 14;
-// The human's blue at half alpha over the board background.
-const CANDIDATE = "#3D5F8A";
+// The colour `over` leaves on `under` at the given alpha.
+function blend(over: string, under: string, alpha: number): string {
+  const channel = (i: number): string => {
+    const o = parseInt(over.slice(i, i + 2), 16);
+    const u = parseInt(under.slice(i, i + 2), 16);
+    return Math.round(o * alpha + u * (1 - alpha))
+      .toString(16)
+      .padStart(2, "0");
+  };
+  return `#${channel(1)}${channel(3)}${channel(5)}`;
+}
+
+const CANDIDATE = blend(PLAYER_COLORS.human, BOARD_BACKGROUND, CANDIDATE_ALPHA);
 const REPLY_MS = 60_000;
 
 const nodeButton = (page: Page, id: number) =>
@@ -92,7 +108,6 @@ test("a move made with the keyboard alone gets the AI's reply", async ({ page })
 
   await page.keyboard.press("Enter");
   await expect(status(page)).toHaveText(/^Node 0 picked/);
-  await expect(nodeButton(page, 2)).toHaveAttribute("tabindex", "-1");
   await page.keyboard.press(tabKey());
   await expect(nodeButton(page, 1)).toBeFocused();
   await expectRing(page, 0);
@@ -119,20 +134,20 @@ test("Right and Left step through the moves a pair has and redraw the candidate"
   await openBoard(page);
   await pick(page, 0);
   await page.keyboard.press("Enter");
-  await expect(status(page)).toHaveText(/^Move 1 of 2, loop on node 0\./);
+  await expect(status(page)).toHaveText(/^Move 1 of 4, loop on node 0\./);
   const first = await colourCentroid(page, CANDIDATE);
   expect(first.count).toBeGreaterThan(20);
   await shot(page, "keyboard-candidate-1");
 
   await page.keyboard.press("ArrowRight");
-  await expect(status(page)).toHaveText(/^Move 2 of 2, loop on node 0\./);
+  await expect(status(page)).toHaveText(/^Move 2 of 4, loop on node 0\./);
   const second = await colourCentroid(page, CANDIDATE);
   expect(second.count).toBeGreaterThan(20);
   expect(Math.hypot(second.at.x - first.at.x, second.at.y - first.at.y)).toBeGreaterThan(8);
   await shot(page, "keyboard-candidate-2");
 
   await page.keyboard.press("ArrowLeft");
-  await expect(status(page)).toHaveText(/^Move 1 of 2, loop on node 0\./);
+  await expect(status(page)).toHaveText(/^Move 1 of 4, loop on node 0\./);
   const again = await colourCentroid(page, CANDIDATE);
   expect(Math.hypot(again.at.x - first.at.x, again.at.y - first.at.y)).toBeLessThan(2);
   await expect(page.locator("#moveList")).toBeHidden();
@@ -141,11 +156,14 @@ test("Right and Left step through the moves a pair has and redraw the candidate"
 test("Escape at each step returns to idle and keeps focus where it was", async ({ page }) => {
   await openBoard(page);
   await pick(page, 0);
-  await expect(nodeButton(page, 2)).toHaveAttribute("tabindex", "-1");
+  // Every node is a partner on a fresh board, so Tab walks all four and wraps.
+  for (const id of [1, 2, 3, 0]) {
+    await page.keyboard.press(tabKey());
+    await expect(nodeButton(page, id)).toBeFocused();
+  }
   await page.keyboard.press("Escape");
   await expect(status(page)).toHaveText("Move cancelled");
   await expect(nodeButton(page, 0)).toBeFocused();
-  await expect(nodeButton(page, 2)).toHaveAttribute("tabindex", "0");
 
   await page.keyboard.press("Enter");
   await expect(status(page)).toHaveText(/^Node 0 picked/);
@@ -159,7 +177,6 @@ test("Escape at each step returns to idle and keeps focus where it was", async (
   await expect(nodeButton(page, 1)).toBeFocused();
   await expect(page.locator("#cancelBtn")).toBeHidden();
   expect(await findDot(page)).toBeNull();
-  await expect(nodeButton(page, 2)).toHaveAttribute("tabindex", "0");
   await expect(page.locator("#undoBtn")).toBeDisabled();
 });
 

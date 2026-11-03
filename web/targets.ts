@@ -105,10 +105,6 @@ export class NodeTargets {
     }
   }
 
-  focus(id: number): void {
-    this.buttons.get(id)?.focus();
-  }
-
   private idOf(target: EventTarget | null): number | null {
     const button = target instanceof Element ? target.closest<HTMLElement>("[data-node]") : null;
     return button ? Number(button.dataset.node) : null;

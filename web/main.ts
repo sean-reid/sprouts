@@ -128,8 +128,8 @@ const targets = new NodeTargets(targetsEl, boardEl, state, view, {
 });
 const keys = new KeyboardPlay(
   {
-    canPick: () =>
-      !busy() && !state.gameOver && !state.reviewing && state.currentPlayer === "human",
+    canPick: () => canPlay() && state.mode === "idle",
+    canPlay,
     movesFrom: async (node) => (await engine.call("movesFrom", node)).moves,
     route: (mv) => engine.latest("route", "routeMove", mv),
     lock: lockRouted,
@@ -557,6 +557,15 @@ function recordMove(move: Move, snapshot: Snapshot): void {
   persist();
 }
 
+// A keyboard move in progress may go on while it is the human's turn on
+// an idle board or with a routed candidate up and nothing else pending.
+function canPlay(): boolean {
+  const free = state.mode === "idle" || (state.mode === "placing" && state.routed);
+  const settled = !state.thinking && !submitting && !seeking;
+  return free && settled && !state.gameOver && !state.reviewing && state.currentPlayer === "human";
+}
+
+// A board that changes under a stroke or a candidate takes it down with it.
 function applySnapshot(snapshot: Snapshot): void {
   timeline.adopt(snapshot.lines);
   state.nodes = snapshot.nodes;
@@ -564,6 +573,7 @@ function applySnapshot(snapshot: Snapshot): void {
   state.currentPlayer = snapshot.currentPlayer;
   state.activeNodes = new Set(snapshot.activeNodes);
   state.gameOver = snapshot.gameOver;
+  if (state.mode !== "idle") clearStroke();
   keys.reset();
   targets.sync();
   updateTurn();
