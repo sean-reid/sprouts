@@ -373,13 +373,15 @@ async function finishAIMove(
     newNodeX: newPos.x,
     newNodeY: newPos.y,
   });
-  state.mode = "idle";
-  state.animatingLine = null;
   if (!success) {
+    state.mode = "idle";
+    state.animatingLine = null;
     setStatus("Your turn!");
     return;
   }
   await refreshBoard();
+  state.mode = "idle";
+  state.animatingLine = null;
   updateUndoButton();
   if (!state.gameOver) setStatus("Your turn!");
 }
