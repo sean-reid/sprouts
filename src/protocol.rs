@@ -112,20 +112,26 @@ pub struct Layout {
     pub nodes: Vec<Point>,
 }
 
-/// A fresh board, on the recorded positions when they match the count and
-/// on the default layout otherwise.
+/// A fresh board on the recorded positions, or on the default layout when
+/// none are given. Positions that do not match the count are an error.
 pub fn start(
     initial_nodes: usize,
     board_size: usize,
     first_player: Player,
     nodes: Option<Vec<Point>>,
-) -> GameState {
+) -> Result<GameState, String> {
     let mut state = match nodes {
         Some(nodes) if nodes.len() == initial_nodes => GameState::with_nodes(nodes, board_size),
-        _ => GameState::with_board_size(initial_nodes, board_size),
+        Some(nodes) => {
+            return Err(format!(
+                "{} starting positions for {initial_nodes} nodes",
+                nodes.len()
+            ))
+        }
+        None => GameState::with_board_size(initial_nodes, board_size),
     };
     state.current_player = first_player;
-    state
+    Ok(state)
 }
 
 /// A node is active when the face model gives it a legal move.
@@ -287,7 +293,7 @@ mod tests {
     /// but has nobody to reach, so it is not active either.
     #[test]
     fn snapshot_of_a_finished_game() {
-        let mut state = start(1, 1000, Player::Human, None);
+        let mut state = start(1, 1000, Player::Human, None).unwrap();
         let a = state.nodes[0].position;
         let ring: Vec<Point> = (0..=48)
             .map(|i| {
@@ -353,19 +359,22 @@ mod tests {
     }
 
     #[test]
-    fn start_takes_recorded_positions_only_when_they_match_the_count() {
+    fn start_takes_recorded_positions_and_refuses_a_count_mismatch() {
         let given = vec![Point::new(100.0, 100.0), Point::new(400.0, 100.0)];
-        let placed = start(2, 500, Player::AI, Some(given.clone()));
+        let placed = start(2, 500, Player::AI, Some(given.clone())).unwrap();
         assert_eq!(placed.nodes[1].position, given[1]);
         assert_eq!(placed.current_player, Player::AI);
-        let fallback = start(3, 500, Player::Human, Some(given));
-        assert_eq!(fallback.nodes.len(), 3);
-        assert_eq!(fallback.nodes[0].position, types::opening_layout(3, 500)[0]);
+        let refused = start(3, 500, Player::Human, Some(given))
+            .err()
+            .expect("a count mismatch is refused");
+        assert!(refused.contains("2 starting positions for 3 nodes"));
+        let laid_out = start(3, 500, Player::Human, None).unwrap();
+        assert_eq!(laid_out.nodes[0].position, types::opening_layout(3, 500)[0]);
     }
 
     #[test]
     fn the_ai_opening_on_a_full_size_board_is_accepted() {
-        let mut state = start(4, 1000, Player::AI, None);
+        let mut state = start(4, 1000, Player::AI, None).unwrap();
         let reply = ai_move(&mut state).expect("the AI has an opening move");
         match apply(&mut state, reply.mov) {
             Outcome::Applied { snapshot } => assert_eq!(snapshot.current_player, Player::Human),
@@ -375,7 +384,7 @@ mod tests {
 
     #[test]
     fn the_ai_answers_a_human_opening_with_a_move_that_applies() {
-        let mut state = start(4, 1000, Player::Human, None);
+        let mut state = start(4, 1000, Player::Human, None).unwrap();
         let a = state.nodes[0].position;
         let b = state.nodes[1].position;
         let polyline = straight(a, b, 20);
@@ -403,7 +412,7 @@ mod tests {
 
     #[test]
     fn the_ai_can_open_and_the_turn_passes_to_the_human() {
-        let mut state = start(4, 1000, Player::AI, None);
+        let mut state = start(4, 1000, Player::AI, None).unwrap();
         assert_eq!(snapshot(&state).current_player, Player::AI);
         let a = state.nodes[0].position;
         let b = state.nodes[1].position;
@@ -481,7 +490,8 @@ mod tests {
             recorded.board_size,
             Player::Human,
             nodes,
-        );
+        )
+        .unwrap();
         for mov in recorded.moves {
             match apply(&mut state, mov) {
                 Outcome::Applied { .. } => {}

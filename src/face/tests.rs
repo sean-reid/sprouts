@@ -1,4 +1,5 @@
 use super::*;
+use crate::face::canonical_form;
 use proptest::prelude::*;
 
 fn rotation_next(m: &FaceModel, h: HalfEdgeId) -> HalfEdgeId {
@@ -296,6 +297,220 @@ proptest! {
             prop_assert_eq!(
                 first_player_wins_searching(&mut m.clone()),
                 first_player_wins(&mut m.clone())
+            );
+        }
+    }
+}
+
+/// `mv`, listed on one model, carried to `target`, a model with the same
+/// half-edges whose nodes are `node_map` of the first's. The enclosed
+/// pieces are named by their lowest node, which the renaming changes, so
+/// each is found again from any node of it on the move's face. None when
+/// a piece has no corner on that face or the move is not legal there.
+fn carried(
+    reference: &FaceModel,
+    target: &FaceModel,
+    node_map: &[NodeId],
+    mv: &Move,
+) -> Option<Move> {
+    let face = reference.corner_face(mv.a, mv.at_a).ok()?;
+    let target_face = target.corner_face(node_map[mv.a], mv.at_a).ok()?;
+    let mut enclosed = Vec::new();
+    for &r in &mv.enclosed {
+        let v = *node_map.get(r)?;
+        let corner = if target.degree(v) == 0 {
+            None
+        } else {
+            Some(
+                *target
+                    .rotation(v)
+                    .iter()
+                    .find(|&&h| target.face_of(h) == target_face)?,
+            )
+        };
+        let piece = target.component_of(v, corner).ok()?;
+        enclosed.push(target.lowest_node(piece));
+    }
+    let _ = face;
+    let carried = Move {
+        a: node_map[mv.a],
+        at_a: mv.at_a,
+        b: node_map[mv.b],
+        at_b: mv.at_b,
+        enclosed,
+    };
+    target.check(&carried).ok()?;
+    Some(carried)
+}
+
+/// Plays `moves` on a fresh model whose starting nodes are renamed by
+/// `perm`, carrying each move across; the half-edges come out identical.
+fn renamed(n: usize, moves: &[Move], perm: &[NodeId]) -> FaceModel {
+    let mut reference = FaceModel::new(n);
+    let mut copy = FaceModel::new(n);
+    let mut node_map: Vec<NodeId> = perm.to_vec();
+    for mv in moves {
+        let carried = carried(&reference, &copy, &node_map, mv).expect("a renamed move is legal");
+        reference.apply(mv).unwrap();
+        copy.apply(&carried).unwrap();
+        node_map.push(copy.node_count() - 1);
+    }
+    copy
+}
+
+/// Swaps the move-order property has checked, so a run can show it was
+/// not vacuous.
+static SWAPS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+#[test]
+fn the_move_order_property_checks_real_swaps() {
+    let mut runner = proptest::test_runner::TestRunner::deterministic();
+    let before = SWAPS.load(std::sync::atomic::Ordering::Relaxed);
+    runner
+        .run(
+            &(2usize..=6, prop::collection::vec(any::<u32>(), 16)),
+            |(n, picks)| {
+                swapped_moves_body(n, &picks)?;
+                Ok(())
+            },
+        )
+        .unwrap();
+    assert!(SWAPS.load(std::sync::atomic::Ordering::Relaxed) - before > 50);
+}
+
+fn permutation(n: usize, keys: &[u32]) -> Vec<NodeId> {
+    let mut order: Vec<NodeId> = (0..n).collect();
+    order.sort_by_key(|&v| keys.get(v).copied().unwrap_or(0));
+    order
+}
+
+fn forms_after(m: &FaceModel, moves: &[Move]) -> Vec<Vec<u32>> {
+    let mut forms: Vec<Vec<u32>> = moves
+        .iter()
+        .map(|mv| {
+            let mut next = m.clone();
+            next.apply(mv).unwrap();
+            canonical_form(&next)
+        })
+        .collect();
+    forms.sort();
+    forms.dedup();
+    forms
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(256))]
+
+    #[test]
+    fn a_renamed_game_has_the_same_form_at_every_move(
+        n in 1usize..=6,
+        picks in prop::collection::vec(any::<u32>(), 16),
+        keys in prop::collection::vec(any::<u32>(), 6),
+    ) {
+        let (_, _, played) = play(n, &picks, false);
+        let perm = permutation(n, &keys);
+        for k in 0..=played.len() {
+            let mut reference = FaceModel::new(n);
+            for mv in &played[..k] {
+                reference.apply(mv).unwrap();
+            }
+            let copy = renamed(n, &played[..k], &perm);
+            prop_assert_eq!(canonical_form(&reference), canonical_form(&copy));
+        }
+    }
+
+    /// Two consecutive moves in different faces give one position in
+    /// either order, though its half-edges are numbered differently. Moves
+    /// in one face need not commute: the second may name a piece the first
+    /// made, or land nearer the same spoke.
+    #[test]
+    fn swapped_moves_that_stay_legal_give_the_same_form(
+        n in 2usize..=6,
+        picks in prop::collection::vec(any::<u32>(), 16),
+    ) {
+        swapped_moves_body(n, &picks)?;
+    }
+}
+
+fn swapped_moves_body(n: usize, picks: &[u32]) -> Result<(), TestCaseError> {
+    {
+        let (_, snapshots, played) = play(n, picks, false);
+        let identity: Vec<NodeId> = (0..64).collect();
+        let mut swaps = 0;
+        for i in 0..played.len().saturating_sub(1) {
+            let before = &snapshots[i];
+            let (first, second) = (&played[i], &played[i + 1]);
+            let created = before.node_count();
+            let first_face = before.corner_face(first.a, first.at_a).unwrap();
+            let second_face = snapshots[i + 1].corner_face(second.a, second.at_a).unwrap();
+            if second.a >= created
+                || second.b >= created
+                || second.enclosed.iter().any(|&r| r >= created)
+                || [second.at_a, second.at_b]
+                    .iter()
+                    .flatten()
+                    .any(|&h| h >= 2 * before.edge_count())
+                || second_face == first_face
+                || second_face >= before.face_count()
+            {
+                continue;
+            }
+            let Some(second_first) = carried(&snapshots[i + 1], before, &identity, second) else {
+                continue;
+            };
+            let mut swapped = before.clone();
+            swapped.apply(&second_first).unwrap();
+            let Some(first_second) = carried(before, &swapped, &identity, first) else {
+                continue;
+            };
+            swapped.apply(&first_second).unwrap();
+            let mut straight = before.clone();
+            straight.apply(first).unwrap();
+            straight.apply(second).unwrap();
+            prop_assert_eq!(canonical_form(&straight), canonical_form(&swapped));
+            prop_assert_ne!(straight, swapped);
+            swaps += 1;
+        }
+        SWAPS.fetch_add(swaps, std::sync::atomic::Ordering::Relaxed);
+    }
+    Ok(())
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(256))]
+
+    /// The moves the search lists reach every position the full list
+    /// does, up to renaming, from any position.
+    #[test]
+    fn search_moves_reach_the_positions_moves_reach(
+        n in 1usize..=6,
+        picks in prop::collection::vec(any::<u32>(), 16),
+    ) {
+        let (_, snapshots, _) = play(n, &picks, false);
+        for m in &snapshots {
+            prop_assert_eq!(forms_after(m, &m.search_moves()), forms_after(m, &m.moves()));
+        }
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(32))]
+
+    #[test]
+    fn equal_forms_give_equal_outcomes(
+        n in 1usize..=4,
+        picks in prop::collection::vec(any::<u32>(), 12),
+        keys in prop::collection::vec(any::<u32>(), 4),
+    ) {
+        let (_, snapshots, played) = play(n, &picks, false);
+        let perm = permutation(n, &keys);
+        let skip = if n == 4 { 4 } else { 0 };
+        for (k, reference) in snapshots.iter().enumerate().skip(skip) {
+            let copy = renamed(n, &played[..k], &perm);
+            prop_assert_eq!(canonical_form(reference), canonical_form(&copy));
+            prop_assert_eq!(
+                first_player_wins_searching(&mut copy.clone()),
+                first_player_wins_searching(&mut reference.clone())
             );
         }
     }

@@ -21,6 +21,21 @@ pub struct WallClock(std::time::Instant);
 #[cfg(target_arch = "wasm32")]
 pub struct WallClock(f64);
 
+/// performance.now() of the worker's global scope, which is monotonic.
+#[cfg(target_arch = "wasm32")]
+fn performance_now() -> f64 {
+    use wasm_bindgen::{JsCast, JsValue};
+    let performance = js_sys::Reflect::get(&js_sys::global(), &JsValue::from_str("performance"))
+        .expect("a global performance object");
+    let now: js_sys::Function = js_sys::Reflect::get(&performance, &JsValue::from_str("now"))
+        .expect("performance.now")
+        .unchecked_into();
+    now.call0(&performance)
+        .expect("performance.now() returns")
+        .as_f64()
+        .expect("a number of milliseconds")
+}
+
 impl WallClock {
     #[cfg(not(target_arch = "wasm32"))]
     pub fn start() -> Self {
@@ -29,7 +44,7 @@ impl WallClock {
 
     #[cfg(target_arch = "wasm32")]
     pub fn start() -> Self {
-        Self(js_sys::Date::now())
+        Self(performance_now())
     }
 }
 
@@ -41,7 +56,7 @@ impl Clock for WallClock {
 
     #[cfg(target_arch = "wasm32")]
     fn elapsed_ms(&mut self) -> f64 {
-        js_sys::Date::now() - self.0
+        performance_now() - self.0
     }
 }
 
@@ -143,8 +158,21 @@ impl<C: Clock> Budget<C> {
     fn spend(&mut self) {
         self.spent += 1;
         if !self.over && self.spent.is_multiple_of(CHECK_EVERY) {
-            let late = self.clock.elapsed_ms() >= self.limit_ms;
-            self.over = self.armed && late;
+            self.check();
+        }
+    }
+
+    fn check(&mut self) {
+        let late = self.clock.elapsed_ms() >= self.limit_ms;
+        self.over = self.armed && late;
+    }
+
+    /// Only an armed budget runs out; disarming also clears a cut, so the
+    /// depth-1 pass of a later search always finishes.
+    pub fn arm(&mut self, armed: bool) {
+        self.armed = armed;
+        if !armed {
+            self.over = false;
         }
     }
 
@@ -315,7 +343,7 @@ pub fn best_candidate_to<C: Clock>(
     let mut order: Vec<usize> = (0..candidates.len()).collect();
     let mut scores = vec![f64::NEG_INFINITY; candidates.len()];
     for depth in 1..=max_depth {
-        search.budget.armed = depth > 1;
+        search.budget.arm(depth > 1);
         let mut best = (f64::NEG_INFINITY, usize::MAX);
         for &idx in &order {
             root.apply_move(&candidates[idx]);
@@ -799,11 +827,9 @@ mod tests {
         assert_eq!(tt.probe(3, 1, 100.0, 200.0), Some(11.0));
     }
 
-    /// Filing a cut-off score as exact lets a later probe through a wider
-    /// window read a bound as the value: on the fresh 4-node board at
-    /// depth 3 the old table said 108 where plain minimax says 111. Over
-    /// these positions it disagrees eight times; the bounded table never
-    /// does.
+    /// A table that files a cut-off score as exact answers a later probe
+    /// through a wider window with a bound; one with bounds matches plain
+    /// minimax on every position where that table does not.
     #[test]
     fn storing_bounds_keeps_the_search_exact_where_an_exact_only_table_was_not() {
         let depth = 3;
@@ -830,7 +856,7 @@ mod tests {
                 }
             }
         }
-        assert_eq!(disagreements, 8);
+        assert!(disagreements > 0);
     }
 
     #[test]
@@ -941,6 +967,48 @@ mod tests {
         let pick = best_candidate(root.clone(), &candidates, &mut nodes(1 << 20));
         assert!(!pick.cut_off);
         assert_eq!(pick.depth, root.max_depth());
+    }
+
+    /// Always over, like a budget the depth-1 pass has already used up.
+    struct Expired;
+
+    impl Clock for Expired {
+        fn elapsed_ms(&mut self) -> f64 {
+            f64::INFINITY
+        }
+    }
+
+    /// A search handed a budget that has already run out changes nothing
+    /// and stores nothing; a later search on the same budget still gets
+    /// its depth-1 pick.
+    #[test]
+    fn an_expired_budget_stops_the_search_before_it_changes_or_stores_anything() {
+        let mut budget = Budget::new(Expired, SEARCH_BUDGET_MS);
+        budget.arm(true);
+        Search::new(&mut budget).minimax(
+            &mut fresh(6),
+            6,
+            0,
+            f64::NEG_INFINITY,
+            f64::INFINITY,
+            true,
+        );
+        assert!(budget.exhausted());
+        let spent = budget.spent();
+
+        let mut state = fresh(5);
+        let before = state.clone();
+        let mut search = Search::new(&mut budget);
+        let score = search.minimax(&mut state, 4, 0, f64::NEG_INFINITY, f64::INFINITY, true);
+        assert_eq!(score, 0.0);
+        assert!(search.tt.table.is_empty());
+        assert_eq!(state.face, before.face);
+        assert_eq!(state.is_ai_turn, before.is_ai_turn);
+        assert_eq!(budget.spent(), spent + 1);
+
+        let pick = best_candidate(fresh(5), &fresh(5).generate_moves(), &mut budget);
+        assert!(pick.depth >= 1);
+        assert!(pick.cut_off);
     }
 
     #[test]

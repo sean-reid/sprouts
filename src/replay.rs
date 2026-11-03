@@ -30,7 +30,8 @@ pub struct Fixture {
 }
 
 impl Fixture {
-    /// The board before the first move.
+    /// The board before the first move; `parse` has checked the positions
+    /// match the count.
     pub fn start(&self) -> GameState {
         protocol::start(
             self.initial_nodes,
@@ -40,6 +41,7 @@ impl Fixture {
                 .as_ref()
                 .map(|nodes| nodes.iter().map(|p| Point::new(p[0], p[1])).collect()),
         )
+        .expect("a parsed fixture's positions match its count")
     }
 }
 
@@ -164,6 +166,15 @@ pub fn parse(json: &str) -> Result<Fixture, String> {
             "fixture version {} is not {}",
             fixture.version, FIXTURE_VERSION
         ));
+    }
+    if let Some(nodes) = &fixture.nodes {
+        if nodes.len() != fixture.initial_nodes {
+            return Err(format!(
+                "{} starting positions for {} nodes",
+                nodes.len(),
+                fixture.initial_nodes
+            ));
+        }
     }
     Ok(fixture)
 }
@@ -478,6 +489,15 @@ mod tests {
         assert_ne!(state.nodes[0].position, opening_layout(4, 1000)[0]);
         let recorded = record(4, 500);
         assert_eq!(recorded.nodes.unwrap().len(), 4);
+    }
+
+    #[test]
+    fn rejects_positions_that_do_not_match_the_count() {
+        let json =
+            r#"{"version":1,"initialNodes":3,"boardSize":500,"nodes":[[1,2],[3,4]],"moves":[]}"#;
+        assert!(parse(json)
+            .unwrap_err()
+            .contains("2 starting positions for 3 nodes"));
     }
 
     #[test]

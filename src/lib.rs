@@ -37,9 +37,9 @@ impl SproutsGame {
         layout: Option<Ts<Layout>>,
     ) -> Result<SproutsGame, JsError> {
         let nodes = layout.map(|l| l.to_rust()).transpose()?.map(|l| l.nodes);
-        Ok(Self {
-            state: protocol::start(initial_nodes, board_size, first_player.to_rust()?, nodes),
-        })
+        let state = protocol::start(initial_nodes, board_size, first_player.to_rust()?, nodes)
+            .map_err(|e| JsError::new(&e))?;
+        Ok(Self { state })
     }
 
     pub fn snapshot(&self) -> Result<Ts<Snapshot>, JsError> {

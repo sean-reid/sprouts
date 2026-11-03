@@ -38,7 +38,7 @@ Web Worker (game state)
 Rust/WASM (logic, AI, validation)
 ```
 
-**Modules:** `curve.rs` (spline fit, flatten, nearest point), `morphology.rs` (skeleton), `pathfinding.rs` (A*), `ai.rs` (minimax), `validation.rs` (collision), `node_classifier.rs` (reachability), `components.rs` (union-find), `geometry.rs` (segment and polyline helpers)
+**Modules:** `curve.rs` (spline fit, flatten, nearest point), `morphology.rs` (skeleton), `pathfinding.rs` (A*), `abstract_graph.rs` (time-boxed search), `ai.rs` (candidate moves), `validation.rs` (collision), `node_classifier.rs` (reachability), `components.rs` (union-find), `geometry.rs` (segment and polyline helpers)
 
 ## How to Play
 
