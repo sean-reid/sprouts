@@ -158,7 +158,7 @@ for (const [file, budget, topologyMoves] of routed) {
 
 // A version 4 link of two moves, the second a face move, with its router
 // byte set to a version this page does not have.
-const OTHER_ROUTER_LINK = "#game=BAIABADoAwIAAgAAAQAC2AToB6AGAI8DAAICAgQEAgAE2AnoBw";
+const OTHER_ROUTER_LINK = "#game=BAMABADoAwIAAgAAAQAC2AToB6AGAI8DAAICAgQEAgAE2AnoBw";
 
 test("a link from another router opens a fresh game and says so", async ({ page }) => {
   await page.goto("/" + OTHER_ROUTER_LINK);

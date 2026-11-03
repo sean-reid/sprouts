@@ -549,3 +549,84 @@ fn diagnose_fixture() {
         }
     }
 }
+
+/// Writes a game of `moves` moves on `nodes` nodes to `path` in the saved
+/// record shape, the human moving first: human lines are routed at the
+/// human clearances and then bent by more than the redraw tolerance, so
+/// they travel as geometry in a link, and AI lines are what the AI draws.
+fn record_shared_game(nodes: usize, moves: usize, path: &std::path::Path) {
+    let mut state = GameState::with_board_size(nodes, 1000);
+    state.current_player = Player::Human;
+    let wobble = 3.0 * curve::tolerance(state.board_size);
+    let mut record = Vec::new();
+    for index in 0..moves {
+        let mov = if state.current_player == Player::Human {
+            let listed = state.face.search_moves();
+            listed
+                .iter()
+                .find_map(|face| {
+                    let routed = route(&state, face).ok()?;
+                    let n = routed.polyline.len();
+                    let bent: Vec<Point> = routed
+                        .polyline
+                        .iter()
+                        .enumerate()
+                        .map(|(i, q)| {
+                            let t = i as f64 / (n - 1) as f64;
+                            let s = (t * std::f64::consts::PI).sin();
+                            Point::new(q.x + wobble * s, q.y + wobble * s * (2.0 * t - 1.0))
+                        })
+                        .collect();
+                    let mov = Move::new(
+                        face.a,
+                        face.b,
+                        bent,
+                        routed.new_node_pos,
+                        Player::Human,
+                        state.board_size,
+                    );
+                    protocol::check(&state, &mov).ok()?;
+                    let drawn = crate::embedding::embed(&state, &mov).ok()?;
+                    (drawn.enclosed.len() == face.enclosed.len()).then_some(mov)
+                })
+                .unwrap_or_else(|| panic!("no human move at move {index}"))
+        } else {
+            match crate::ai::choose(&state) {
+                crate::ai::Reply::Move(mov) => mov,
+                other => panic!("the AI gave {other:?} at move {index}"),
+            }
+        };
+        record.push(serde_json::json!({
+            "from": mov.from_node,
+            "to": mov.to_node,
+            "polyline": mov.polyline.iter().map(|q| [q.x, q.y]).collect::<Vec<_>>(),
+            "newNode": [mov.new_node_pos.x, mov.new_node_pos.y],
+        }));
+        state.apply_move(mov).unwrap();
+    }
+    let nodes: Vec<[f64; 2]> = state.nodes[..state.initial_node_count]
+        .iter()
+        .map(|n| [n.position.x, n.position.y])
+        .collect();
+    let json = serde_json::json!({
+        "version": 1,
+        "initialNodes": state.initial_node_count,
+        "boardSize": state.board_size,
+        "nodes": nodes,
+        "moves": record,
+        "firstPlayer": "human",
+        "cursor": moves,
+    });
+    std::fs::write(path, json.to_string()).unwrap();
+}
+
+/// Rewrites the two shared-game fixtures that tests/e2e/replay-links.spec.ts
+/// carries as topology, for when the router's output changes:
+/// `cargo test --release record_shared_games -- --ignored`.
+#[test]
+#[ignore]
+fn record_shared_games() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/saved");
+    record_shared_game(4, 8, &dir.join("eight-moves-4n-1000.json"));
+    record_shared_game(9, 10, &dir.join("ten-moves-9n-1000.json"));
+}
