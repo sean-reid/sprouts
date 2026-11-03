@@ -46,7 +46,10 @@ function shot(page: Page, name: string) {
 
 test.beforeEach(async ({ page }) => {
   await page.goto("/");
-  await expect(page.locator("#status")).toHaveText("Draw a line between two nodes");
+  // Fetching the wasm and building the 1000 grid takes a few seconds on a shared runner.
+  await expect(page.locator("#status")).toHaveText("Draw a line between two nodes", {
+    timeout: 20_000,
+  });
 });
 
 test("opens on a four node board with undo disabled", async ({ page }) => {
