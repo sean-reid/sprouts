@@ -104,11 +104,25 @@ impl std::fmt::Display for Tally {
     }
 }
 
+/// A game given up on a router bug: the routes tried up to it and the
+/// reason, with the position as a fixture.
+#[derive(Debug)]
+pub struct Forfeit {
+    pub tally: Tally,
+    pub why: String,
+}
+
+impl std::fmt::Display for Forfeit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.why)
+    }
+}
+
 /// One random game on `nodes` nodes: each pick names a search move to try
 /// first, the rest follow in order until one draws. Every drawn move has to
 /// pass the AI validator and no route may fail as a bug; otherwise the
-/// position comes back as a fixture with the reasons.
-pub fn game(nodes: usize, picks: &[u32]) -> Result<Tally, String> {
+/// game is forfeited with the position as a fixture and the reason.
+pub fn game(nodes: usize, picks: &[u32]) -> Result<Tally, Forfeit> {
     let mut state = GameState::with_board_size(nodes, 1000);
     state.current_player = Player::AI;
     let mut tally = Tally::default();
@@ -124,22 +138,24 @@ pub fn game(nodes: usize, picks: &[u32]) -> Result<Tally, String> {
             match draws(&state, &moves[k]) {
                 Ok(mov) => {
                     if let Err(e) = validate_ai_move(&state, &mov) {
-                        return Err(format!(
+                        let why = format!(
                             "a drawn move was rejected: {:?} in\n{}",
                             e.kind,
                             fixture_json(&state)
-                        ));
+                        );
+                        return Err(Forfeit { tally, why });
                     }
                     drawn = Some(mov);
                     break;
                 }
                 Err(why) => {
                     if let Unroutable::Bug(what) = why {
-                        return Err(format!(
+                        let why = format!(
                             "{:?} failed as a bug: {what} in\n{}",
                             moves[k],
                             fixture_json(&state)
-                        ));
+                        );
+                        return Err(Forfeit { tally, why });
                     }
                     tally.count(&why);
                 }
@@ -173,15 +189,15 @@ pub fn games(seed: u64, games: usize) -> Vec<(usize, Vec<u32>)> {
         .collect()
 }
 
-/// The seeded games tallied together; a game that fails is counted as
-/// one bug.
+/// The seeded games tallied together, a forfeited game by the routes it
+/// tried plus one bug.
 pub fn sweep(seed: u64, count: usize) -> Tally {
     let mut total = Tally::default();
     for (nodes, picks) in games(seed, count) {
         match game(nodes, &picks) {
             Ok(tally) => total.add(&tally),
-            Err(_) => {
-                total.tried += 1;
+            Err(forfeit) => {
+                total.add(&forfeit.tally);
                 total.bug += 1;
                 *total.bugs.entry("forfeit".into()).or_default() += 1;
             }
