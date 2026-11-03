@@ -290,13 +290,48 @@ button:disabled {
   }
 }
 
+/* The clip keeps node targets that leave the viewport under zoom from
+   covering the page around the board. */
+#board {
+  position: relative;
+  flex: none;
+  outline: 1px solid #2a2a2a;
+  overflow: clip;
+  touch-action: none;
+}
+
+#board:focus-visible {
+  outline-color: #60a5fa;
+}
+
 #canvas {
   background: #1a1a1a;
-  outline: 1px solid #2a2a2a;
   display: block;
   touch-action: none;
   width: min(100cqw, 100cqh);
   height: min(100cqw, 100cqh);
+}
+
+/* Presses go to the canvas; the buttons are the keyboard path. */
+#nodeTargets {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+#nodeTargets button {
+  position: absolute;
+  width: 44px;
+  height: 44px;
+  margin: -22px 0 0 -22px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+}
+
+#nodeTargets button:focus {
+  outline: none;
 }
 
 #canvas.pan,

@@ -94,6 +94,16 @@ pub(crate) fn draw(
 /// or enclosing other isolated nodes. At most `CLASS_TRIES`, in the order
 /// the face lists its pieces.
 pub(crate) fn class_members(state: &GameState, rep: &FaceMove) -> Vec<FaceMove> {
+    class_members_where(state, rep, CLASS_TRIES, |_| true)
+}
+
+/// The members of `rep`'s class that `keep` accepts, at most `limit`.
+pub(crate) fn class_members_where(
+    state: &GameState,
+    rep: &FaceMove,
+    limit: usize,
+    keep: impl Fn(&FaceMove) -> bool,
+) -> Vec<FaceMove> {
     let model = &state.face;
     let Ok(face) = model.corner_face(rep.a, rep.at_a) else {
         return Vec::new();
@@ -156,9 +166,9 @@ pub(crate) fn class_members(state: &GameState, rep: &FaceMove) -> Vec<FaceMove> 
                     at_b: if bare(b) { None } else { rep.at_b },
                     enclosed,
                 };
-                if member != *rep && !out.contains(&member) {
+                if member != *rep && keep(&member) && !out.contains(&member) {
                     out.push(member);
-                    if out.len() == CLASS_TRIES {
+                    if out.len() == limit {
                         return out;
                     }
                 }

@@ -41,6 +41,11 @@ export interface Board {
   reviewing: boolean;
   // Index of the move whose line and nodes the board points out.
   highlightedMove: number | null;
+  // The node whose target has keyboard focus, and the start of a keyboard move.
+  focusedNode: number | null;
+  pickedNode: number | null;
+  // The locked curve came from the router, not a stroke.
+  routed: boolean;
 }
 
 export interface GameState extends Board {
@@ -67,6 +72,9 @@ export function freshBoard(): Board {
     gameOver: false,
     reviewing: false,
     highlightedMove: null,
+    focusedNode: null,
+    pickedNode: null,
+    routed: false,
   };
 }
 

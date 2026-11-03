@@ -15,8 +15,8 @@ mod types;
 mod validation;
 
 use protocol::{
-    AiReply, AutoPlacement, AutoPlacementQuery, Curve, FitQuery, Layout, Move, Outcome, Placement,
-    PlacementQuery, Snapshot,
+    AiReply, AutoPlacement, AutoPlacementQuery, Curve, FaceMove, FitQuery, Layout, Move, MovesFrom,
+    Outcome, Placement, PlacementQuery, RouteReply, Snapshot,
 };
 use tsify::{Ts, Tsify};
 use types::{GameState, Player};
@@ -58,6 +58,16 @@ impl SproutsGame {
     #[wasm_bindgen(js_name = aiMove)]
     pub fn ai_move(&mut self) -> Result<Ts<AiReply>, JsError> {
         Ok(protocol::ai_move(&mut self.state).into_ts()?)
+    }
+
+    #[wasm_bindgen(js_name = movesFrom)]
+    pub fn moves_from(&self, node: usize) -> Result<Ts<MovesFrom>, JsError> {
+        Ok(protocol::moves_from(&self.state, node).into_ts()?)
+    }
+
+    #[wasm_bindgen(js_name = routeMove)]
+    pub fn route_move(&self, mov: Ts<FaceMove>) -> Result<Ts<RouteReply>, JsError> {
+        Ok(protocol::route_move(&self.state, mov.to_rust()?).into_ts()?)
     }
 
     pub fn fit(&self, query: Ts<FitQuery>) -> Result<Ts<Curve>, JsError> {

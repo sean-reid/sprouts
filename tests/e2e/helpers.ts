@@ -366,6 +366,47 @@ export async function findDot(page: Page): Promise<Client | null> {
   });
 }
 
+// Centroid of the canvas pixels within tolerance of a colour, in client
+// coordinates, with how many there were.
+export async function colourCentroid(
+  page: Page,
+  hex: string,
+  tolerance = 40,
+): Promise<{ at: Client; count: number }> {
+  await nextFrame(page);
+  return page.evaluate(
+    ({ hex, tolerance }) => {
+      const canvas = document.getElementById("canvas") as HTMLCanvasElement;
+      const ctx = canvas.getContext("2d")!;
+      const rect = canvas.getBoundingClientRect();
+      const dpr = canvas.width / rect.width;
+      const want = [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16));
+      const { data, width } = ctx.getImageData(0, 0, canvas.width, canvas.height);
+      let count = 0;
+      let sx = 0;
+      let sy = 0;
+      for (let i = 0; i < data.length; i += 4) {
+        const [r, g, b] = [data[i] ?? 0, data[i + 1] ?? 0, data[i + 2] ?? 0];
+        if (Math.hypot(r - want[0]!, g - want[1]!, b - want[2]!) >= tolerance) continue;
+        count++;
+        sx += (i / 4) % width;
+        sy += Math.floor(i / 4 / width);
+      }
+      const at =
+        count === 0
+          ? { x: NaN, y: NaN }
+          : { x: rect.left + sx / count / dpr, y: rect.top + sy / count / dpr };
+      return { at, count };
+    },
+    { hex, tolerance },
+  );
+}
+
+// Safari moves focus between buttons only with Option held.
+export function tabKey(): string {
+  return test.info().project.name === "webkit" ? "Alt+Tab" : "Tab";
+}
+
 export type Rgb = [number, number, number];
 
 export async function pixelAt(page: Page, at: Client): Promise<Rgb> {
