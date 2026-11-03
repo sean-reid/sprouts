@@ -1,6 +1,9 @@
 import type { GameState, Player, Point } from "./state";
+import type { View } from "./view";
 
 const PLAYER_COLORS: Record<Player, string> = { human: "#60A5FA", ai: "#EF4444" };
+const LINE_WIDTH = 3;
+const NODE_RADIUS = 8;
 
 // Catmull-Rom through every point; tension 6 is the standard value.
 function drawSmoothPath(ctx: CanvasRenderingContext2D, points: Point[]): void {
@@ -29,48 +32,51 @@ function drawSmoothPath(ctx: CanvasRenderingContext2D, points: Point[]): void {
   ctx.stroke();
 }
 
-export function draw(ctx: CanvasRenderingContext2D, state: GameState): void {
-  const { width, height } = ctx.canvas;
+// Points are mapped to screen before stroking so widths stay constant under zoom.
+export function draw(ctx: CanvasRenderingContext2D, state: GameState, view: View): void {
+  const dpr = view.width > 0 ? ctx.canvas.width / view.width : 1;
+  const screen = (points: Point[]): Point[] => points.map((p) => view.toScreen(p));
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.fillStyle = "#1A1A1A";
-  ctx.fillRect(0, 0, width, height);
+  ctx.fillRect(0, 0, view.width, view.height);
 
+  ctx.lineWidth = LINE_WIDTH;
   for (const line of state.lines) {
     ctx.strokeStyle = PLAYER_COLORS[line.player];
-    ctx.lineWidth = 3;
-    drawSmoothPath(ctx, line.polyline);
+    drawSmoothPath(ctx, screen(line.polyline));
   }
 
   const activePath =
     state.mode === "dragging" ? state.dragPath : state.mode === "placing" ? state.lockedPath : null;
   if (activePath && activePath.length > 1) {
     ctx.strokeStyle = "#3B82F6";
-    ctx.lineWidth = 3;
-    drawSmoothPath(ctx, activePath);
+    drawSmoothPath(ctx, screen(activePath));
   }
 
   if (state.mode === "placing" && state.placementDot) {
     const { position, valid } = state.placementDot;
+    const at = view.toScreen(position);
     ctx.fillStyle = valid ? "#10B981" : "#EF4444";
     ctx.beginPath();
-    ctx.arc(position.x, position.y, 8, 0, Math.PI * 2);
+    ctx.arc(at.x, at.y, NODE_RADIUS, 0, Math.PI * 2);
     ctx.fill();
   }
 
+  ctx.font = "bold 10px sans-serif";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
   for (const node of state.nodes) {
     const remaining = 3 - node.connectionCount;
+    const at = view.toScreen(node.position);
     ctx.fillStyle = state.activeNodes.has(node.id) ? "#3B82F6" : "#555";
     ctx.strokeStyle = "#FFF";
     ctx.lineWidth = 2;
     ctx.beginPath();
-    ctx.arc(node.position.x, node.position.y, 8, 0, Math.PI * 2);
+    ctx.arc(at.x, at.y, NODE_RADIUS, 0, Math.PI * 2);
     ctx.fill();
     ctx.stroke();
-
     ctx.fillStyle = "#FFF";
-    ctx.font = "bold 10px sans-serif";
-    ctx.textAlign = "center";
-    ctx.textBaseline = "middle";
-    ctx.fillText(String(remaining), node.position.x, node.position.y + 0.5);
+    ctx.fillText(String(remaining), at.x, at.y + 0.5);
   }
 
   if (state.mode === "animating_ai" && state.animatingLine) {
@@ -78,8 +84,8 @@ export function draw(ctx: CanvasRenderingContext2D, state: GameState): void {
     const shown = Math.floor(state.animationProgress * path.length);
     if (shown > 1) {
       ctx.strokeStyle = PLAYER_COLORS.ai;
-      ctx.lineWidth = 3;
-      drawSmoothPath(ctx, path.slice(0, shown));
+      ctx.lineWidth = LINE_WIDTH;
+      drawSmoothPath(ctx, screen(path.slice(0, shown)));
     }
   }
 }

@@ -25,7 +25,6 @@ export interface Board {
   placementDot: PlacementDot | null;
   dragStartNode: number | null;
   dragEndNode: number | null;
-  hoveredNode: number | null;
   animatingLine: AnimatingLine | null;
   animationProgress: number;
   gameOver: boolean;
@@ -50,10 +49,22 @@ export function freshBoard(): Board {
     placementDot: null,
     dragStartNode: null,
     dragEndNode: null,
-    hoveredNode: null,
     animatingLine: null,
     animationProgress: 0,
     gameOver: false,
     reviewing: false,
   };
+}
+
+// Any assignment through the returned proxy reports a change, so the renderer
+// can redraw only when something moved.
+export function watched<T extends object>(target: T, onChange: () => void): T {
+  return new Proxy(target, {
+    set(object, key, value) {
+      const changed = !Object.is(Reflect.get(object, key), value);
+      Reflect.set(object, key, value);
+      if (changed) onChange();
+      return true;
+    },
+  });
 }
