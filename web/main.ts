@@ -1,7 +1,18 @@
 import "./style.css";
-import type { Move, Player, Snapshot } from "../pkg/sprouts";
+import type { Move, Outcome, Player, Snapshot } from "../pkg/sprouts";
 import { Engine, StaleRequest } from "./engine";
-import { attachInput, type PointerKind } from "./input";
+import {
+  clearSaved,
+  dropHash,
+  History,
+  loadSaved,
+  recordFromHash,
+  sameGame,
+  save,
+  shareUrl,
+  type GameRecord,
+} from "./history";
+import { attachInput, type InputOptions, type PointerKind } from "./input";
 import { Loupe } from "./loupe";
 import { healPath } from "./path";
 import { wireRecording } from "./record";
@@ -19,9 +30,13 @@ import { trackCanvasSize, View } from "./view";
 
 // A smaller grid on small screens keeps the skeleton pass fast; the view
 // scales it to the screen.
-const BOARD_SIZE = window.innerWidth <= 768 || window.innerHeight <= 768 ? 500 : 1000;
+function defaultBoardSize(): number {
+  return window.innerWidth <= 768 || window.innerHeight <= 768 ? 500 : 1000;
+}
 // Matches MIN_PATH_LENGTH in src/types.rs under the engine's board scale.
-const MIN_STROKE_LENGTH = 20 * (BOARD_SIZE / 1000);
+function minStrokeLength(boardSize: number): number {
+  return 20 * (boardSize / 1000);
+}
 const AI_ANIMATION_MS = 500;
 const FLASH_MS = 600;
 const DEFAULT_NODES = 4;
@@ -40,6 +55,12 @@ const undoBtn = byId<HTMLButtonElement>("undoBtn");
 const turnEl = byId<HTMLElement>("turn");
 const turnText = byId<HTMLElement>("turnText");
 const firstPlayerButtons = document.querySelectorAll<HTMLButtonElement>("button[data-first]");
+const backBtn = byId<HTMLButtonElement>("backBtn");
+const forwardBtn = byId<HTMLButtonElement>("forwardBtn");
+const shareBtn = byId<HTMLButtonElement>("shareBtn");
+const historyEl = byId<HTMLElement>("history");
+const moveListEl = byId<HTMLOListElement>("moveList");
+const shareUrlEl = byId<HTMLInputElement>("shareUrl");
 const overlay = byId<HTMLElement>("mobileOverlay");
 const modal = byId<HTMLElement>("gameOverModal");
 const winnerText = byId<HTMLElement>("winnerText");
@@ -53,20 +74,29 @@ function invalidate(): void {
   dirty = true;
 }
 
-const view = new View(BOARD_SIZE);
+const view = new View(defaultBoardSize());
 const loupe = new Loupe();
+const inputOptions: InputOptions = { minStrokeLength: minStrokeLength(view.boardSize) };
 const motionQuery = window.matchMedia("(prefers-reduced-motion: reduce)");
 const state: GameState = watched(
   { ...freshBoard(), lastInputWasTouch: false, reducedMotion: motionQuery.matches },
   invalidate,
 );
-let lastNodeCount = DEFAULT_NODES;
+let timeline = new History(DEFAULT_NODES, view.boardSize);
 let firstPlayer: Player = "human";
 let flashTimer: ReturnType<typeof setTimeout> | null = null;
-// Bumped by newGame so replies and animations from the previous game stop.
+// A page opened from a share link reviews that game and leaves the saved one alone.
+let shared = false;
+// A review the player opened, a link, or a finished game stays a review
+// until Undo; one entered by stepping onto an AI-to-move board does not.
+let pinnedReview = false;
+let lastNodeCount = DEFAULT_NODES;
+// Bumped whenever the table is reset so replies and animations from the
+// previous game stop.
 let gameEpoch = 0;
 let submitting = false;
-let undoing = false;
+let seeking = false;
+let booted = false;
 
 const engine = new Engine(() => setStatus("Failed to load game engine", "lose"));
 
@@ -96,15 +126,53 @@ function flash(at: BoardLocation, path: Point[]): void {
 function startAITurn(): void {
   state.thinking = true;
   setStatus("AI is thinking");
+  updateControls();
   void performAIMove();
 }
 
 function stopThinking(): void {
   state.thinking = false;
+  updateControls();
 }
 
-function updateUndoButton(): void {
-  undoBtn.disabled = state.lines.length === 0 || state.mode !== "idle";
+function busy(): boolean {
+  return state.mode !== "idle" || state.thinking || submitting || seeking;
+}
+
+function updateControls(): void {
+  const idle = !busy();
+  undoBtn.disabled = !idle || timeline.atStart;
+  backBtn.disabled = !idle || timeline.atStart;
+  forwardBtn.disabled = !idle || timeline.atEnd;
+  historyEl.hidden = timeline.moves.length === 0 && !state.reviewing;
+}
+
+function renderMoveList(): void {
+  const hadFocus = moveListEl.contains(document.activeElement);
+  const items = timeline.moves.map((_, index) => {
+    const item = document.createElement("li");
+    const button = document.createElement("button");
+    button.type = "button";
+    button.textContent = timeline.label(index);
+    if (index === timeline.cursor - 1) button.setAttribute("aria-current", "step");
+    button.addEventListener("click", () => void jumpTo(index + 1));
+    item.append(button);
+    return item;
+  });
+  moveListEl.replaceChildren(...items);
+  const current = moveListEl.querySelector<HTMLElement>("[aria-current]");
+  current?.scrollIntoView({ block: "nearest" });
+  if (hadFocus) (current ?? moveListEl.querySelector("button") ?? backBtn).focus();
+  updateControls();
+}
+
+// A link in the address bar describes the game only until it changes.
+function persist(): void {
+  if (!shared) {
+    save(timeline);
+    dropHash();
+  }
+  renderMoveList();
 }
 
 function closeModal(): void {
@@ -161,15 +229,14 @@ async function closestValidSpot(at: Point): Promise<PlacementDot | null> {
 function handleStart(world: Point, kind: PointerKind): void {
   state.lastInputWasTouch = kind === "touch";
   if (state.reviewing) {
-    state.reviewing = false;
-    modal.classList.add("visible");
+    if (state.gameOver && timeline.atEnd) modal.classList.add("visible");
     return;
   }
   if (state.mode === "placing") {
     if (state.lastInputWasTouch) void handleMove(world, kind);
     return;
   }
-  if (state.mode !== "idle" || state.thinking || undoing || state.gameOver) return;
+  if (state.mode !== "idle" || state.thinking || state.gameOver || seeking) return;
   const node = findNodeAt(world, state.lastInputWasTouch ? 30 : 15);
   if (node && state.activeNodes.has(node.id)) {
     state.mode = "dragging";
@@ -240,6 +307,7 @@ function handleEnd(world: Point, kind: PointerKind): void {
   state.lockedPath = [...state.dragPath.slice(0, -1), { ...endNode.position }];
   state.dragEndNode = endNode.id;
   state.mode = "placing";
+  updateControls();
 
   if (touch) {
     overlay.classList.add("visible");
@@ -299,6 +367,7 @@ function cancelPlacement(): void {
   clearStroke();
   overlay.classList.remove("visible");
   setStatus("Move cancelled");
+  updateControls();
 }
 
 async function executeMove(): Promise<void> {
@@ -323,6 +392,7 @@ async function executeMove(): Promise<void> {
   if (typeof outcome === "string") {
     setStatus("Engine error: " + outcome, "lose");
     clearStroke();
+    updateControls();
     return;
   }
   if (outcome.kind === "rejected") {
@@ -330,13 +400,20 @@ async function executeMove(): Promise<void> {
     setStatus(message, "lose");
     flash(at, move.polyline);
     clearStroke();
+    updateControls();
     return;
   }
 
-  applySnapshot(outcome.snapshot);
+  recordMove(move, outcome.snapshot);
   clearStroke();
-  updateUndoButton();
-  if (!state.gameOver) startAITurn();
+  if (state.gameOver) showGameOver();
+  else startAITurn();
+}
+
+function recordMove(move: Move, snapshot: Snapshot): void {
+  timeline.push(move);
+  applySnapshot(snapshot);
+  persist();
 }
 
 function applySnapshot(snapshot: Snapshot): void {
@@ -344,12 +421,9 @@ function applySnapshot(snapshot: Snapshot): void {
   state.lines = snapshot.lines;
   state.currentPlayer = snapshot.currentPlayer;
   state.activeNodes = new Set(snapshot.activeNodes);
+  state.gameOver = snapshot.gameOver;
   updateTurn();
-  if (snapshot.gameOver) {
-    state.gameOver = true;
-    showGameOver();
-  }
-  updateUndoButton();
+  updateControls();
 }
 
 async function refreshBoard(): Promise<void> {
@@ -368,6 +442,7 @@ async function performAIMove(): Promise<void> {
     }
 
     state.mode = "animating_ai";
+    updateControls();
     state.animatingLine = { path: move.polyline, newPos: move.newNodePos };
     state.animationProgress = 0;
     const startTime = performance.now();
@@ -383,66 +458,225 @@ async function performAIMove(): Promise<void> {
     stopThinking();
     setStatus("AI error: " + describe(error), "lose");
     state.mode = "idle";
+    updateControls();
   }
 }
 
 async function finishAIMove(move: Move, epoch: number): Promise<void> {
   const outcome = await engine.call("applyMove", move).catch(describe);
   if (epoch !== gameEpoch) return;
+  state.mode = "idle";
+  state.animatingLine = null;
   if (typeof outcome === "string") {
     setStatus("AI error: " + outcome, "lose");
   } else if (outcome.kind === "rejected") {
     setStatus("AI error: " + outcome.rejection.message, "lose");
   } else {
-    applySnapshot(outcome.snapshot);
-    if (!state.gameOver) setStatus("Your turn!");
+    recordMove(move, outcome.snapshot);
+    if (state.gameOver) showGameOver();
+    else setStatus("Your turn!");
   }
-  state.mode = "idle";
-  state.animatingLine = null;
-  updateUndoButton();
+  updateControls();
 }
 
-async function undoMove(): Promise<void> {
-  if (state.mode !== "idle" || state.thinking || undoing) return;
+// Moves the engine to the board after move number target by undoing or
+// re-applying stored moves. A stored move the engine now rejects ends the
+// list; the result says whether the target was reached in this game.
+async function seek(target: number): Promise<boolean> {
   const epoch = gameEpoch;
-  undoing = true;
+  seeking = true;
+  updateControls();
   try {
-    let undone = false;
-    for (let i = 0; i < 2; i++) {
-      if (!(await engine.call("undo"))) break;
-      undone = true;
+    while (timeline.cursor > target) {
+      const undone = await engine.call("undo").catch(() => false);
+      if (epoch !== gameEpoch) return false;
+      if (!undone) {
+        setStatus("Undo failed in the engine", "lose");
+        return false;
+      }
+      timeline.cursor--;
     }
-    if (!undone || epoch !== gameEpoch) return;
-    state.gameOver = false;
-    state.reviewing = false;
-    closeModal();
-    await refreshBoard();
-    if (epoch !== gameEpoch) return;
-    if (state.currentPlayer === "ai" && !state.gameOver) {
-      startAITurn();
-    } else {
-      setStatus("Move undone: your turn");
+    while (timeline.cursor < target) {
+      const move = timeline.moves[timeline.cursor];
+      if (!move) break;
+      let outcome: Outcome;
+      try {
+        outcome = await engine.call("applyMove", move);
+      } catch (error) {
+        if (epoch === gameEpoch) setStatus("Replay failed: " + describe(error), "lose");
+        return false;
+      }
+      if (epoch !== gameEpoch) return false;
+      if (outcome.kind === "rejected") {
+        timeline.truncate();
+        const { message } = outcome.rejection;
+        setStatus(`Replay stopped at move ${timeline.cursor + 1}: ${message}`, "lose");
+        return false;
+      }
+      timeline.cursor++;
+    }
+    return true;
+  } finally {
+    if (epoch === gameEpoch) {
+      await resyncCursor(epoch).catch(() => setStatus("Lost contact with the engine", "lose"));
+      if (epoch === gameEpoch) {
+        seeking = false;
+        persist();
+      }
+    }
+  }
+}
+
+// The engine's line count is the truth after a seek; a move it holds that
+// the list no longer has is taken back.
+async function resyncCursor(epoch: number): Promise<void> {
+  let snapshot = await engine.call("snapshot");
+  try {
+    while (epoch === gameEpoch && snapshot.lines.length > timeline.moves.length) {
+      if (!(await engine.call("undo"))) break;
+      snapshot = await engine.call("snapshot");
     }
   } finally {
-    undoing = false;
+    if (epoch === gameEpoch) {
+      timeline.cursor = Math.min(snapshot.lines.length, timeline.moves.length);
+      applySnapshot(snapshot);
+    }
   }
 }
 
-async function newGame(nodeCount: number): Promise<void> {
-  lastNodeCount = nodeCount;
-  Object.assign(state, freshBoard(), { currentPlayer: firstPlayer });
-  view.fit();
+// Review steps one move; a live game steps to the next board where it is
+// the human's turn, so an undo takes back the reply as well.
+function stepTarget(direction: -1 | 1): number {
+  let target = timeline.cursor + direction;
+  if (state.reviewing) return target;
+  const inRange = (n: number): boolean => n >= 0 && n <= timeline.moves.length;
+  if (inRange(target) && timeline.moverOf(target) !== "human" && inRange(target + direction)) {
+    target += direction;
+  }
+  return target;
+}
+
+// After a seek: a shared or finished game stays in review. A live game
+// hands the AI its turn at the end of the list and, on an earlier
+// AI-to-move board, enters review rather than letting the AI replace the
+// moves ahead; reaching the end again makes it live.
+function settleAfterSeek(): void {
+  if (!pinnedReview && !state.gameOver) {
+    state.reviewing = state.currentPlayer === "ai" && !timeline.atEnd;
+  }
+  if (state.reviewing) {
+    setStatus(reviewStatus());
+  } else if (!state.gameOver && state.currentPlayer === "ai") {
+    startAITurn();
+  } else if (state.gameOver) {
+    showGameOver();
+  } else {
+    setStatus("Your turn!");
+  }
+}
+
+async function jumpTo(target: number): Promise<void> {
+  if (busy() || target < 0 || target > timeline.moves.length) return;
+  const epoch = gameEpoch;
+  closeModal();
+  const reached = await seek(target);
+  if (epoch !== gameEpoch) return;
+  if (reached) settleAfterSeek();
+  else if (state.currentPlayer === "ai" && !state.gameOver) state.reviewing = true;
+}
+
+function reviewStatus(): string {
+  const total = timeline.moves.length;
+  const at = timeline.atStart ? "start" : `move ${timeline.cursor} of ${total}`;
+  const playable = !state.gameOver && state.currentPlayer === "human" && !timeline.atStart;
+  const hint = playable ? "Undo to play on from here." : "";
+  return `Reviewing: ${at}. ${hint}`.trim();
+}
+
+async function step(direction: -1 | 1): Promise<void> {
+  if (busy()) return;
+  const target = stepTarget(direction);
+  if (target < 0 || target > timeline.moves.length) return;
+  await jumpTo(target);
+}
+
+// Undo in a live game is back one pair. From a review it returns to play:
+// on the spot when it is already the human's turn, else one pair back.
+async function undoMove(): Promise<void> {
+  if (busy() || timeline.atStart) return;
+  const epoch = gameEpoch;
+  const wasReviewing = state.reviewing;
+  state.reviewing = false;
+  shared = false;
+  pinnedReview = false;
+  if (wasReviewing && !state.gameOver && state.currentPlayer === "human") {
+    persist();
+    setStatus("Your turn!");
+    return;
+  }
+  const target = stepTarget(-1);
+  const reached = await seek(Math.max(target, 0));
+  if (epoch !== gameEpoch || !reached) return;
+  if (!state.gameOver && state.currentPlayer === "ai") {
+    startAITurn();
+  } else {
+    setStatus("Move undone: your turn");
+  }
+}
+
+async function share(): Promise<void> {
+  const url = shareUrl(timeline.record());
+  window.history.replaceState(null, "", url);
+  try {
+    await navigator.clipboard.writeText(url);
+    setStatus("Link copied", "win");
+  } catch {
+    shareUrlEl.hidden = false;
+    shareUrlEl.value = url;
+    shareUrlEl.focus();
+    shareUrlEl.select();
+    setStatus("Copy the link below to share this game");
+  }
+}
+
+function setBoardSize(boardSize: number): void {
+  view.setBoardSize(boardSize);
+  inputOptions.minStrokeLength = minStrokeLength(boardSize);
+}
+
+function resetTable(): void {
+  Object.assign(state, freshBoard());
   clearStroke();
   overlay.classList.remove("visible");
+  shareUrlEl.hidden = true;
   stopThinking();
-  updateTurn();
-  updateUndoButton();
-  const epoch = ++gameEpoch;
+  gameEpoch++;
   engine.cancel("turn");
-  setStatus("Initializing...");
+  seeking = false;
+  submitting = false;
   closeModal();
+}
+
+// A fresh game forgets the saved one and the link; the fallback after a
+// failed load keeps both so the next move, not the failure, replaces them.
+async function newGame(nodeCount: number, fresh = true): Promise<void> {
+  lastNodeCount = nodeCount;
+  resetTable();
+  shared = false;
+  pinnedReview = false;
+  if (fresh) {
+    dropHash();
+    clearSaved();
+  }
+  const epoch = gameEpoch;
+  timeline = new History(nodeCount, defaultBoardSize(), firstPlayer);
+  state.currentPlayer = firstPlayer;
+  updateTurn();
+  setBoardSize(timeline.boardSize);
+  renderMoveList();
+  setStatus("Initializing...");
   try {
-    await engine.call("init", nodeCount, BOARD_SIZE, firstPlayer);
+    await engine.call("init", nodeCount, timeline.boardSize, firstPlayer);
     if (epoch !== gameEpoch) return;
     await refreshBoard();
     if (epoch !== gameEpoch) return;
@@ -453,11 +687,80 @@ async function newGame(nodeCount: number): Promise<void> {
   }
 }
 
+// Rebuilds a recorded game in the engine; a shared one opens at its last
+// move in review, a saved one at the cursor it was left at.
+async function restore(record: GameRecord, fromLink: boolean): Promise<void> {
+  resetTable();
+  const epoch = gameEpoch;
+  shared = fromLink;
+  pinnedReview = fromLink;
+  lastNodeCount = record.initialNodes;
+  timeline = History.from(record);
+  if (fromLink) timeline.cursor = timeline.moves.length;
+  const target = timeline.cursor;
+  timeline.cursor = 0;
+  chooseFirstPlayer(timeline.firstPlayer);
+  state.currentPlayer = firstPlayer;
+  updateTurn();
+  setBoardSize(timeline.boardSize);
+  setStatus("Initializing...");
+  await engine.call("init", timeline.initialNodes, timeline.boardSize, firstPlayer);
+  if (epoch !== gameEpoch) return;
+  state.reviewing = fromLink;
+  const reached = await seek(target);
+  if (epoch !== gameEpoch) return;
+  if (state.gameOver) {
+    state.reviewing = true;
+    pinnedReview = true;
+  }
+  if (!reached) {
+    if (state.currentPlayer === "ai" && !state.gameOver) state.reviewing = true;
+    return;
+  }
+  if (!state.reviewing && timeline.atStart && state.currentPlayer === "human") {
+    setStatus("Draw a line between two nodes");
+  } else {
+    settleAfterSeek();
+  }
+}
+
 function chooseFirstPlayer(player: Player): void {
   firstPlayer = player;
   for (const button of firstPlayerButtons) {
     button.setAttribute("aria-pressed", String(button.dataset.first === player));
   }
+}
+
+async function boot(): Promise<void> {
+  const linked = recordFromHash(location.hash);
+  const saved = loadSaved();
+  const epoch = gameEpoch;
+  try {
+    if (linked) {
+      if (saved && sameGame(saved, linked)) {
+        dropHash();
+        await restore(saved, false);
+      } else {
+        await restore(linked, true);
+      }
+    } else if (saved) {
+      await restore(saved, false);
+    } else {
+      await newGame(DEFAULT_NODES);
+    }
+  } catch (error) {
+    // A New Game clicked during the load has already replaced the table.
+    if (epoch + 1 !== gameEpoch) return;
+    await newGame(DEFAULT_NODES, false);
+    setStatus("Could not load the saved game: " + describe(error), "lose");
+  } finally {
+    booted = true;
+    invalidate();
+  }
+}
+
+function typingInField(target: EventTarget | null): boolean {
+  return target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement;
 }
 
 function wireInput(): void {
@@ -472,7 +775,7 @@ function wireInput(): void {
       tap: (world, kind) => void handleTap(world, kind),
       cancel: abandonStroke,
     },
-    { minStrokeLength: MIN_STROKE_LENGTH },
+    inputOptions,
   );
   canvas.addEventListener("contextmenu", (e) => {
     if (state.mode === "placing") {
@@ -482,6 +785,9 @@ function wireInput(): void {
   });
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape" && state.mode === "placing") cancelPlacement();
+    if (historyEl.hidden || typingInField(e.target) || e.altKey || e.ctrlKey || e.metaKey) return;
+    if (e.key === "ArrowLeft") void step(-1);
+    if (e.key === "ArrowRight") void step(1);
   });
 
   for (const button of document.querySelectorAll<HTMLButtonElement>("button[data-nodes]")) {
@@ -491,18 +797,23 @@ function wireInput(): void {
   for (const button of firstPlayerButtons) {
     button.addEventListener("click", () => chooseFirstPlayer(button.dataset.first as Player));
   }
+  backBtn.addEventListener("click", () => void step(-1));
+  forwardBtn.addEventListener("click", () => void step(1));
+  shareBtn.addEventListener("click", () => void share());
   byId("cancelBtn").addEventListener("click", cancelPlacement);
   byId("confirmBtn").addEventListener("click", () => void confirmMove());
   byId("reviewBtn").addEventListener("click", () => {
     state.reviewing = true;
+    pinnedReview = true;
     closeModal();
+    updateControls();
   });
   byId("newGameBtn").addEventListener("click", () => void newGame(lastNodeCount));
 }
 
 // The pulse on the ring is the one thing that animates without a state change.
 function frame(): void {
-  if (dirty || (state.thinking && !state.reducedMotion)) {
+  if (booted && (dirty || (state.thinking && !state.reducedMotion))) {
     dirty = false;
     draw(ctx, state, view);
     loupe.draw(ctx, state, view);
@@ -519,6 +830,6 @@ view.onChange(() => {
 });
 trackCanvasSize(canvas, view, invalidate);
 wireInput();
-wireRecording(state, BOARD_SIZE);
+wireRecording(state, () => timeline.boardSize);
 requestAnimationFrame(frame);
-void newGame(DEFAULT_NODES);
+void boot();

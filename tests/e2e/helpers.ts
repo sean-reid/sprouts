@@ -315,3 +315,28 @@ export async function playExchange(page: Page): Promise<void> {
   await page.mouse.click(mid.x, mid.y);
   await expect(page.locator("#status")).toHaveText("Your turn!", { timeout: 60_000 });
 }
+
+// Coarse map of which 10 px cells hold a stroke colour, for comparing two
+// renderings of the same board without pixel-exact matching.
+export function strokeCells(page: Page): Promise<boolean[]> {
+  return page.evaluate(() => {
+    const canvas = document.getElementById("canvas") as HTMLCanvasElement;
+    const ctx = canvas.getContext("2d")!;
+    const { data } = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    const cell = Math.round(10 * (canvas.width / canvas.getBoundingClientRect().width));
+    const cols = Math.ceil(canvas.width / cell);
+    const rows = Math.ceil(canvas.height / cell);
+    const cells = new Array<boolean>(cols * rows).fill(false);
+    for (let y = 0; y < canvas.height; y++) {
+      for (let x = 0; x < canvas.width; x++) {
+        const i = (y * canvas.width + x) * 4;
+        const r = data[i]!;
+        const g = data[i + 1]!;
+        const b = data[i + 2]!;
+        const stroke = (b > 180 && r < 120) || (r > 180 && g < 100);
+        if (stroke) cells[Math.floor(y / cell) * cols + Math.floor(x / cell)] = true;
+      }
+    }
+    return cells;
+  });
+}

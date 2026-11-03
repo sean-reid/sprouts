@@ -17,7 +17,13 @@ export class View {
   ty = 0;
   private readonly listeners: (() => void)[] = [];
 
-  constructor(readonly boardSize: number) {}
+  constructor(public boardSize: number) {}
+
+  // A game recorded on another board size takes the whole viewport again.
+  setBoardSize(boardSize: number): void {
+    this.boardSize = boardSize;
+    this.fit();
+  }
 
   onChange(listener: () => void): void {
     this.listeners.push(listener);

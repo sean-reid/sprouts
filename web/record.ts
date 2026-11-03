@@ -3,7 +3,7 @@ import type { GameState } from "./state";
 // Matches FIXTURE_VERSION in src/replay.rs.
 const FIXTURE_VERSION = 1;
 
-interface FixtureMove {
+export interface FixtureMove {
   from: number;
   to: number;
   polyline: [number, number][];
@@ -43,11 +43,11 @@ function saveGame(state: GameState, boardSize: number): void {
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
-export function wireRecording(state: GameState, boardSize: number): void {
+export function wireRecording(state: GameState, boardSize: () => number): void {
   if (!new URLSearchParams(window.location.search).has("record")) return;
   const button = document.createElement("button");
   button.id = "saveBtn";
   button.textContent = "Save Game";
-  button.addEventListener("click", () => saveGame(state, boardSize));
+  button.addEventListener("click", () => saveGame(state, boardSize()));
   document.querySelector(".controls")?.append(button);
 }

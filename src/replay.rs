@@ -289,6 +289,20 @@ mod tests {
     }
 
     #[test]
+    fn saved_game_from_the_page_loads_as_a_fixture() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/saved/first-exchange.json");
+        let raw: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(raw["firstPlayer"], "human");
+        assert_eq!(raw["cursor"], 2);
+        let fixture = load(&path).unwrap();
+        assert_eq!(fixture.moves.len(), 2);
+        let run = replay(&fixture);
+        assert_eq!(run.failure, None);
+        assert!(run.timings[2].terminal);
+    }
+
+    #[test]
     fn exported_game_replays() {
         let Ok(path) = std::env::var("SPROUTS_FIXTURE") else {
             return;

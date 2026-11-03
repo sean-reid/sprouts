@@ -272,16 +272,29 @@ mod tests {
         assert_eq!(placed.position, a);
     }
 
+    #[derive(Serialize, Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Recorded {
+        initial_nodes: usize,
+        board_size: usize,
+        moves: Vec<Move>,
+    }
+
+    fn replay(recorded: Recorded) -> GameState {
+        let mut state = GameState::with_board_size(recorded.initial_nodes, recorded.board_size);
+        for mov in recorded.moves {
+            match apply(&mut state, mov) {
+                Outcome::Applied { .. } => {}
+                Outcome::Rejected { rejection } => {
+                    panic!("replay rejected: {}", rejection.message)
+                }
+            }
+        }
+        state
+    }
+
     #[test]
     fn a_recorded_game_replays_from_its_move_list() {
-        #[derive(Serialize, Deserialize)]
-        #[serde(rename_all = "camelCase")]
-        struct Recorded {
-            initial_nodes: usize,
-            board_size: usize,
-            moves: Vec<Move>,
-        }
-
         let layout = GameState::new(4);
         let chord = |from: usize, to: usize| {
             let polyline = straight(layout.nodes[from].position, layout.nodes[to].position, 10);
@@ -300,16 +313,7 @@ mod tests {
         })
         .unwrap();
 
-        let recorded: Recorded = serde_json::from_str(&fixture).unwrap();
-        let mut state = GameState::with_board_size(recorded.initial_nodes, recorded.board_size);
-        for mov in recorded.moves {
-            match apply(&mut state, mov) {
-                Outcome::Applied { .. } => {}
-                Outcome::Rejected { rejection } => {
-                    panic!("replay rejected: {}", rejection.message)
-                }
-            }
-        }
+        let state = replay(serde_json::from_str(&fixture).unwrap());
         assert_eq!(state.lines.len(), 2);
         assert_eq!(state.lines[1].player, Player::AI);
         assert_eq!(state.current_player, Player::Human);
