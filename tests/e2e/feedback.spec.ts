@@ -117,7 +117,7 @@ test("the turn indicator and ring follow the exchange", async ({ page }) => {
   await expect(page.locator("#status")).toHaveText("AI is thinking");
   await expect(page.locator("#status")).toHaveText("Your turn!", { timeout: 60_000 });
   await expect(page.locator("#turnText")).toHaveText("Your turn");
-  expect(near(await pixelAt(page, ring), HUMAN)).toBe(true);
+  await expect.poll(async () => near(await pixelAt(page, ring), HUMAN)).toBe(true);
 });
 
 test("AI starts opens with the AI's line and no human input", async ({ page }) => {
