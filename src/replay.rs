@@ -6,6 +6,7 @@ pub use crate::ai::nimber_stats;
 use crate::protocol;
 #[cfg(feature = "bench")]
 pub use crate::route::sweep::{sweep, Tally};
+use crate::settle;
 pub use crate::types::Player;
 use crate::types::{opening_layout, GameState, Move, Point};
 use crate::validation::Rejection;
@@ -79,7 +80,7 @@ impl FixtureMove {
     }
 }
 
-pub const PHASE_COUNT: usize = 5;
+pub const PHASE_COUNT: usize = 6;
 
 pub const PHASES: [&str; PHASE_COUNT] = [
     "face_update",
@@ -87,6 +88,7 @@ pub const PHASES: [&str; PHASE_COUNT] = [
     "routing",
     "search",
     "validation",
+    "settle",
 ];
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -98,6 +100,8 @@ pub struct Phases {
     pub routing: Duration,
     pub search: Duration,
     pub validation: Duration,
+    /// Relaxing the board around the recorded move once it is in.
+    pub settle: Duration,
 }
 
 impl Phases {
@@ -108,6 +112,7 @@ impl Phases {
             self.routing,
             self.search,
             self.validation,
+            self.settle,
         ]
     }
 
@@ -128,6 +133,9 @@ pub struct MoveTiming {
     pub routing_failures: usize,
     /// No listed move could be drawn, though the position had some.
     pub undrawn: bool,
+    /// Least clearance on the board as a share of its target, after the
+    /// recorded move went in and again once the board settled.
+    pub clearance: Option<(f64, f64)>,
     pub phases: Phases,
 }
 
@@ -284,11 +292,19 @@ pub fn replay(fixture: &Fixture) -> Replay {
             (mov, verdict)
         });
 
+        let mut clearance = None;
         let applied = match verdict {
             Some((mov, Ok(()))) => {
                 let t = Instant::now();
                 let applied = state.apply_move(mov);
                 phases.face_update = t.elapsed();
+                if applied.is_ok() {
+                    let (before, _) = settle::least_clearance(&state);
+                    let t = Instant::now();
+                    settle::settle(&mut state);
+                    phases.settle = t.elapsed();
+                    clearance = Some((before, settle::least_clearance(&state).0));
+                }
                 applied.map_err(|e| format!("move {index} rejected: {}", e.message))
             }
             Some((_, Err(e))) => Err(format!("move {index} rejected: {}", e.message)),
@@ -309,6 +325,7 @@ pub fn replay(fixture: &Fixture) -> Replay {
             game_over,
             routing_failures,
             undrawn,
+            clearance,
             phases,
         });
 
@@ -343,15 +360,20 @@ pub fn nodes_per_depth(fixture: &Fixture, max_depth: usize) -> Vec<usize> {
     totals
 }
 
+/// Why a self-play game stopped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stop {
+    GameOver,
+    /// No listed move could be drawn.
+    Undrawn,
+    /// The drawn move failed the validation the page applies to its side.
+    Rejected,
+}
+
 /// Plays the AI against itself, holding each side to the validation the page
 /// applies to that side.
 pub fn record(initial_nodes: usize, board_size: usize) -> Fixture {
-    let mut state = GameState::with_board_size(initial_nodes, board_size);
-    let mut moves = Vec::new();
-    while let Some(mov) = next_accepted_move(&mut state) {
-        moves.push(FixtureMove::from_move(&mov));
-        state.apply_move(mov).expect("an accepted move applies");
-    }
+    let (moves, _) = self_play(initial_nodes, board_size, true);
     Fixture {
         version: FIXTURE_VERSION,
         initial_nodes,
@@ -366,21 +388,43 @@ pub fn record(initial_nodes: usize, board_size: usize) -> Fixture {
     }
 }
 
-/// The AI's move for the position, or none when the game is over, every
-/// listed move was refused, or its move fails the validation the page
-/// would apply; the last two are reported on stderr since they end the
-/// recording early. A draw that stops at its time limit is an error, not a
-/// position to record.
-fn next_accepted_move(state: &mut GameState) -> Option<Move> {
+/// The AI against itself, settling the board after each move or not, with
+/// the moves it made and why it stopped.
+pub fn self_play(
+    initial_nodes: usize,
+    board_size: usize,
+    settled: bool,
+) -> (Vec<FixtureMove>, Stop) {
+    let mut state = GameState::with_board_size(initial_nodes, board_size);
+    let mut moves = Vec::new();
+    loop {
+        let mov = match next_accepted_move(&mut state) {
+            Ok(mov) => mov,
+            Err(stop) => return (moves, stop),
+        };
+        moves.push(FixtureMove::from_move(&mov));
+        state.apply_move(mov).expect("an accepted move applies");
+        if settled {
+            settle::settle(&mut state);
+        }
+    }
+}
+
+/// The AI's move for the position, or why there is none: the game is
+/// over, the AI could not draw a move, or its move fails the validation
+/// the page would apply. The last two are reported on stderr since they
+/// end a recording early. A draw that stops at its time limit is an error,
+/// not a position to record.
+fn next_accepted_move(state: &mut GameState) -> Result<Move, Stop> {
     let mov = match ai::choose(state) {
         ai::Reply::Move(mov) => mov,
-        ai::Reply::GameOver => return None,
+        ai::Reply::GameOver => return Err(Stop::GameOver),
         ai::Reply::Undrawn(ai::Undrawn::Exhausted) => {
             eprintln!(
                 "recording stopped after {} moves: every listed move was refused",
                 state.move_history.len()
             );
-            return None;
+            return Err(Stop::Undrawn);
         }
         ai::Reply::Undrawn(ai::Undrawn::OutOfTime) => panic!(
             "the draw ran out of time after {} moves; the recording would differ between runs",
@@ -388,14 +432,14 @@ fn next_accepted_move(state: &mut GameState) -> Option<Move> {
         ),
     };
     match validate_for(state, &mov) {
-        Ok(()) => Some(mov),
+        Ok(()) => Ok(mov),
         Err(e) => {
             eprintln!(
                 "recording stopped after {} moves: the AI's move was rejected: {}",
                 state.move_history.len(),
                 e.message
             );
-            None
+            Err(Stop::Rejected)
         }
     }
 }
@@ -436,6 +480,20 @@ mod tests {
         let run = replay(&fixture);
         assert_eq!(run.failure, None);
         assert!(run.timings[2].terminal);
+    }
+
+    /// The board after every recorded move, each checked as the page would.
+    fn play(fixture: &Fixture) -> GameState {
+        let mut state = fixture.start();
+        for (index, recorded) in fixture.moves.iter().enumerate() {
+            let mov = recorded.to_move(state.current_player, state.board_size);
+            if let Err(e) = validate_for(&state, &mov) {
+                panic!("move {index} rejected: {}", e.message);
+            }
+            state.apply_move(mov).unwrap();
+            settle::settle(&mut state);
+        }
+        state
     }
 
     /// Recorded on the live site on 2026-11-03, where the page declared the
@@ -526,7 +584,7 @@ mod tests {
     #[test]
     fn breaches_name_only_phases_over_budget() {
         let budgets: BTreeMap<String, f64> = PHASES.iter().map(|p| (p.to_string(), 10.0)).collect();
-        let max = [5.0, 10.0, 10.5, 0.0, 200.0];
+        let max = [5.0, 10.0, 10.5, 0.0, 200.0, 1.0];
         let hits = breaches("g", &max, &budgets);
         assert_eq!(hits.len(), 2);
         assert!(hits[0].starts_with("g: routing 10.50 ms over budget 10.00 ms"));
