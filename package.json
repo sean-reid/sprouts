@@ -9,7 +9,8 @@
     "build": "vite build",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
-    "lint": "eslint web tests vite.config.ts playwright.config.ts eslint.config.js prettier.config.js --max-warnings 0",
+    "test": "vitest run",
+    "lint": "eslint web tests vite.config.ts vitest.config.ts playwright.config.ts eslint.config.js prettier.config.js --max-warnings 0",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "test:e2e": "playwright test"
@@ -23,6 +24,7 @@
     "typescript": "^6.0.3",
     "typescript-eslint": "^8.72.1",
     "vite": "^8.3.5",
+    "vitest": "^5.1.0",
     "wrangler": "^4.156.2"
   }
 }
