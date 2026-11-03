@@ -1,24 +1,21 @@
 mod abstract_graph;
 mod ai;
-mod components;
 mod curve;
 mod embedding;
 pub mod face;
 mod geometry;
-mod morphology;
 mod nimber;
-mod node_classifier;
-mod pathfinding;
 mod protocol;
 #[cfg(feature = "bench")]
 pub use abstract_graph::search_rate;
-#[cfg(feature = "bench")]
+#[cfg(any(test, feature = "bench"))]
 pub mod replay;
+mod route;
 mod types;
 mod validation;
 
 use protocol::{
-    AiMove, AutoPlacement, AutoPlacementQuery, Curve, FitQuery, Layout, Move, Outcome, Placement,
+    AiReply, AutoPlacement, AutoPlacementQuery, Curve, FitQuery, Layout, Move, Outcome, Placement,
     PlacementQuery, Snapshot,
 };
 use tsify::{Ts, Tsify};
@@ -59,10 +56,8 @@ impl SproutsGame {
     }
 
     #[wasm_bindgen(js_name = aiMove)]
-    pub fn ai_move(&mut self) -> Result<Option<Ts<AiMove>>, JsError> {
-        Ok(protocol::ai_move(&mut self.state)
-            .map(|mov| mov.into_ts())
-            .transpose()?)
+    pub fn ai_move(&mut self) -> Result<Ts<AiReply>, JsError> {
+        Ok(protocol::ai_move(&mut self.state).into_ts()?)
     }
 
     pub fn fit(&self, query: Ts<FitQuery>) -> Result<Ts<Curve>, JsError> {

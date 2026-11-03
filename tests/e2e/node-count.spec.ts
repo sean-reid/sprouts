@@ -12,10 +12,9 @@ import {
   startGame,
 } from "./helpers";
 
-// The AI still draws its candidates through the raster pipeline, which
-// takes 12.8 s of the reply at 9 nodes on the runner's 1000 board; the
-// search itself holds to 800 ms.
-const REPLY_MS = 25_000;
+// One 800 ms search plus up to 800 ms of routing. The runner measured
+// 1.8 s at 5 and 24 nodes and 2.8 s at 9 nodes; the bound is twice that.
+const REPLY_MS = 6_000;
 
 async function expectNodesDrawn(page: Page, count: number): Promise<void> {
   for (let i = 0; i < count; i++) {

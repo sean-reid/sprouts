@@ -1,5 +1,4 @@
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
 use tsify::Tsify;
 
 use crate::curve::{self, Cubic};
@@ -24,10 +23,23 @@ pub const MIN_PATH_CLEARANCE_AI: f64 = 6.0;
 pub const HUMAN_INTERSECTION_TOLERANCE: f64 = 30.0;
 pub const AI_INTERSECTION_TOLERANCE: f64 = 8.0;
 
-// Morphology / pathfinding
-pub const LINE_RASTER_WIDTH: f64 = 3.0;
-pub const NODE_PROTECTION_RADIUS: i32 = 6;
-pub const MAX_ASTAR_ITERATIONS: usize = 300_000;
+/// Radius of a node disc on the page, in CSS pixels.
+pub const NODE_DISC_PX: f64 = 8.0;
+/// Width of the board on the narrowest layout, the 375 px phone page, in
+/// CSS pixels.
+pub const NARROWEST_BOARD_PX: f64 = 340.0;
+
+/// Radius of a node disc in board units on the narrowest layout, where the
+/// discs are largest against the board.
+pub fn node_disc(board_size: usize) -> f64 {
+    NODE_DISC_PX * board_size as f64 / NARROWEST_BOARD_PX
+}
+
+/// Nearest an AI line comes to the centre of a node it does not touch: the
+/// disc, plus the line clearance.
+pub fn ai_node_clearance(board_size: usize) -> f64 {
+    node_disc(board_size) + MIN_PATH_CLEARANCE_AI * scale(board_size)
+}
 
 /// Fraction of the board the outermost starting node sits from the centre.
 pub const LAYOUT_REACH: f64 = 0.35;
@@ -64,18 +76,6 @@ impl Point {
         let dx = self.x - other.x;
         let dy = self.y - other.y;
         (dx * dx + dy * dy).sqrt()
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct PixelCoord {
-    pub x: i32,
-    pub y: i32,
-}
-
-impl PixelCoord {
-    pub fn new(x: i32, y: i32) -> Self {
-        Self { x, y }
     }
 }
 
@@ -159,6 +159,27 @@ impl Move {
         }
     }
 
+    /// A move whose spline is already fit, with its node on that curve.
+    pub fn from_segments(
+        from_node: usize,
+        to_node: usize,
+        polyline: Vec<Point>,
+        segments: Vec<Cubic>,
+        new_node_pos: Point,
+        player: Player,
+    ) -> Self {
+        let new_node_pos =
+            curve::nearest(&segments, &new_node_pos).map_or(new_node_pos, |hit| hit.point);
+        Self {
+            from_node,
+            to_node,
+            polyline,
+            segments,
+            new_node_pos,
+            player,
+        }
+    }
+
     pub fn flatten(&self, tolerance: f64) -> Vec<Point> {
         curve::flatten(&self.segments, tolerance)
     }
@@ -169,7 +190,6 @@ pub struct GameState {
     pub nodes: Vec<Node>,
     pub lines: Vec<Line>,
     pub face: FaceModel,
-    pub skeleton_cache: SkeletonCache,
     pub move_history: Vec<Move>,
     pub current_player: Player,
     pub next_node_id: usize,
@@ -200,7 +220,6 @@ impl GameState {
             nodes,
             lines: Vec::new(),
             face: FaceModel::new(initial_nodes),
-            skeleton_cache: SkeletonCache::new_with_size(board_size),
             move_history: Vec::new(),
             current_player: Player::Human,
             next_node_id: initial_nodes,
@@ -216,13 +235,6 @@ impl GameState {
 
     pub fn find_node_mut(&mut self, id: usize) -> Option<&mut Node> {
         self.nodes.iter_mut().find(|n| n.id == id)
-    }
-
-    pub fn lines_connected_to(&self, node_id: usize) -> Vec<&Line> {
-        self.lines
-            .iter()
-            .filter(|line| line.from_node == node_id || line.to_node == node_id)
-            .collect()
     }
 
     /// Fails, changing nothing, when the line cannot be placed in a face.
@@ -276,7 +288,6 @@ impl GameState {
             Player::AI => Player::Human,
         };
 
-        self.skeleton_cache.invalidate();
         Ok(())
     }
 
@@ -316,120 +327,7 @@ impl GameState {
             Player::AI => Player::Human,
         };
 
-        self.skeleton_cache.invalidate();
         true
-    }
-}
-
-#[derive(Clone)]
-pub struct SkeletonCache {
-    pub skeleton: Grid<bool>,
-    pub distance_transform: Grid<u8>,
-    pub component_labels: Grid<u32>, // 0 = not skeleton, 1+ = component ID
-    pub components: HashMap<usize, ComponentMetadata>,
-    pub is_valid: bool,
-}
-
-impl SkeletonCache {
-    pub fn new_with_size(board_size: usize) -> Self {
-        Self {
-            skeleton: Grid::new(board_size, board_size, false),
-            distance_transform: Grid::new(board_size, board_size, 0),
-            component_labels: Grid::new(board_size, board_size, 0),
-            components: HashMap::new(),
-            is_valid: false,
-        }
-    }
-
-    pub fn invalidate(&mut self) {
-        self.is_valid = false;
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct ComponentMetadata {
-    pub pixel_count: usize,
-    pub accessible_nodes: HashSet<usize>,
-    pub bounding_box: BoundingBox,
-    pub max_internal_distance: f64,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct BoundingBox {
-    pub min_x: i32,
-    pub min_y: i32,
-    pub max_x: i32,
-    pub max_y: i32,
-}
-
-impl BoundingBox {
-    pub fn new() -> Self {
-        Self {
-            min_x: i32::MAX,
-            min_y: i32::MAX,
-            max_x: i32::MIN,
-            max_y: i32::MIN,
-        }
-    }
-
-    pub fn update(&mut self, x: i32, y: i32) {
-        self.min_x = self.min_x.min(x);
-        self.min_y = self.min_y.min(y);
-        self.max_x = self.max_x.max(x);
-        self.max_y = self.max_y.max(y);
-    }
-}
-
-#[derive(Clone)]
-pub struct Grid<T> {
-    pub width: usize,
-    pub height: usize,
-    pub data: Vec<T>,
-}
-
-impl<T: Clone> Grid<T> {
-    pub fn new(width: usize, height: usize, default: T) -> Self {
-        Self {
-            width,
-            height,
-            data: vec![default; width * height],
-        }
-    }
-
-    pub fn get(&self, x: i32, y: i32) -> Option<&T> {
-        if x < 0 || y < 0 || x >= self.width as i32 || y >= self.height as i32 {
-            None
-        } else {
-            Some(&self.data[y as usize * self.width + x as usize])
-        }
-    }
-
-    pub fn get_mut(&mut self, x: i32, y: i32) -> Option<&mut T> {
-        if x < 0 || y < 0 || x >= self.width as i32 || y >= self.height as i32 {
-            None
-        } else {
-            Some(&mut self.data[y as usize * self.width + x as usize])
-        }
-    }
-
-    pub fn set(&mut self, x: i32, y: i32, value: T) {
-        if let Some(cell) = self.get_mut(x, y) {
-            *cell = value;
-        }
-    }
-
-    pub fn in_bounds(&self, x: i32, y: i32) -> bool {
-        x >= 0 && y >= 0 && x < self.width as i32 && y < self.height as i32
-    }
-}
-
-impl Grid<bool> {
-    pub fn invert(&self) -> Grid<bool> {
-        let mut result = Grid::new(self.width, self.height, false);
-        for i in 0..self.data.len() {
-            result.data[i] = !self.data[i];
-        }
-        result
     }
 }
 
@@ -640,41 +538,5 @@ mod tests {
         for (id, cc) in &snapshot {
             assert_eq!(gs.find_node(*id).unwrap().connection_count, *cc);
         }
-    }
-
-    // --- Grid ---
-
-    #[test]
-    fn grid_get_set() {
-        let mut g: Grid<i32> = Grid::new(10, 10, 0);
-        g.set(3, 4, 42);
-        assert_eq!(*g.get(3, 4).unwrap(), 42);
-        assert_eq!(*g.get(0, 0).unwrap(), 0);
-    }
-
-    #[test]
-    fn grid_in_bounds() {
-        let g: Grid<bool> = Grid::new(5, 5, false);
-        assert!(g.in_bounds(0, 0));
-        assert!(g.in_bounds(4, 4));
-        assert!(!g.in_bounds(-1, 0));
-        assert!(!g.in_bounds(5, 0));
-        assert!(!g.in_bounds(0, 5));
-    }
-
-    #[test]
-    fn grid_out_of_bounds_returns_none() {
-        let g: Grid<i32> = Grid::new(5, 5, 0);
-        assert!(g.get(-1, 0).is_none());
-        assert!(g.get(5, 0).is_none());
-    }
-
-    #[test]
-    fn grid_invert() {
-        let mut g: Grid<bool> = Grid::new(3, 3, false);
-        g.set(1, 1, true);
-        let inv = g.invert();
-        assert!(*inv.get(0, 0).unwrap());
-        assert!(!*inv.get(1, 1).unwrap());
     }
 }

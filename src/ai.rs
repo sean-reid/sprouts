@@ -1,167 +1,39 @@
 use std::cell::RefCell;
 
-use crate::abstract_graph::{choose, AbstractState, Budget, WallClock, SEARCH_BUDGET_MS};
-use crate::embedding;
-use crate::face::Move as FaceMove;
+use crate::abstract_graph::{self, AbstractState, Budget, Clock, WallClock, SEARCH_BUDGET_MS};
+use crate::face::{Component, Move as FaceMove};
 use crate::nimber::Nimbers;
-use crate::node_classifier::{classify_nodes, NodeClassification};
-use crate::pathfinding::{
-    find_path_on_skeleton, find_path_relaxed, find_path_tight, find_self_loop_on_skeleton,
-    generate_geometric_self_loop,
-};
+use crate::route;
 use crate::types::{GameState, Move, Player};
-use crate::validation::{validate_ai_move, validate_ai_move_tight};
 
-/// Generate all concrete moves with pixel paths (expensive — called once at root).
-pub(crate) fn generate_concrete_moves_from_classification(
-    state: &mut GameState,
-    classification: &NodeClassification,
-) -> Vec<Move> {
-    let mut moves = Vec::new();
-    let mut failed_pairs = Vec::new();
-
-    for (from_id, to_id) in &classification.legal_pairs {
-        let mut found = false;
-        if let Some(path) = find_path_on_skeleton(state, *from_id, *to_id) {
-            if path.len() >= 3 {
-                let new_node_pos = find_optimal_node_placement(&path, state);
-                let mov = Move::new(
-                    *from_id,
-                    *to_id,
-                    path,
-                    new_node_pos,
-                    state.current_player,
-                    state.board_size,
-                );
-                if validate_ai_move(state, &mov).is_ok() {
-                    moves.push(mov);
-                    found = true;
-                }
-            }
-        }
-        if !found {
-            failed_pairs.push((*from_id, *to_id));
-        }
-    }
-
-    for &node_id in &classification.self_loop_candidates {
-        // Try skeleton-based first, then geometric fallback immediately
-        let path = find_self_loop_on_skeleton(state, node_id)
-            .or_else(|| generate_geometric_self_loop(state, node_id));
-        if let Some(path) = path {
-            if path.len() < 5 {
-                continue;
-            }
-            let new_node_pos = find_optimal_node_placement(&path, state);
-            let mov = Move::new(
-                node_id,
-                node_id,
-                path,
-                new_node_pos,
-                state.current_player,
-                state.board_size,
-            );
-            if validate_ai_move(state, &mov).is_ok() || validate_ai_move_tight(state, &mov).is_ok()
-            {
-                moves.push(mov);
-            }
-        }
-    }
-
-    // Retry ALL failed pairs (pathfinding failed OR validation failed) with
-    // free-space A*.  No `moves.is_empty()` guard — a pair that failed the
-    // skeleton pathfinder might succeed with the relaxed one.
-    if !failed_pairs.is_empty() {
-        let mut still_failed = Vec::new();
-        for (from_id, to_id) in &failed_pairs {
-            if let Some(path) = find_path_relaxed(state, *from_id, *to_id) {
-                if path.len() < 3 {
-                    still_failed.push((*from_id, *to_id));
-                    continue;
-                }
-                let new_node_pos = find_optimal_node_placement(&path, state);
-                let mov = Move::new(
-                    *from_id,
-                    *to_id,
-                    path,
-                    new_node_pos,
-                    state.current_player,
-                    state.board_size,
-                );
-                if validate_ai_move(state, &mov).is_ok() {
-                    moves.push(mov);
-                } else {
-                    still_failed.push((*from_id, *to_id));
-                }
-            } else {
-                still_failed.push((*from_id, *to_id));
-            }
-        }
-        // Last resort: tightest buffer + tightest validation for narrow corridors
-        for (from_id, to_id) in &still_failed {
-            // Try all pathfinding methods with tight validation
-            let paths: Vec<Option<Vec<crate::types::Point>>> = vec![
-                find_path_tight(state, *from_id, *to_id),
-                find_path_relaxed(state, *from_id, *to_id),
-                find_path_on_skeleton(state, *from_id, *to_id),
-            ];
-            for path_opt in paths.into_iter().flatten() {
-                if path_opt.len() < 3 {
-                    continue;
-                }
-                let new_node_pos = find_optimal_node_placement(&path_opt, state);
-                let mov = Move::new(
-                    *from_id,
-                    *to_id,
-                    path_opt,
-                    new_node_pos,
-                    state.current_player,
-                    state.board_size,
-                );
-                if validate_ai_move(state, &mov).is_ok()
-                    || validate_ai_move_tight(state, &mov).is_ok()
-                {
-                    moves.push(mov);
-                    break;
-                }
-            }
-        }
-    }
-
-    moves
+/// The AI's answer to a position.
+#[derive(Debug, Clone)]
+pub enum Reply {
+    Move(Move),
+    /// The model lists moves but none of them could be drawn; the game is
+    /// still open.
+    Undrawn,
+    GameOver,
 }
 
-/// The drawn moves the face model can place, each with its topology.
-pub(crate) fn embedded_moves(state: &GameState, moves: Vec<Move>) -> Vec<(Move, FaceMove)> {
-    moves
-        .into_iter()
-        .filter_map(|mov| {
-            let topology = embedding::embed(state, &mov).ok()?;
-            Some((mov, topology))
-        })
-        .collect()
-}
+/// Class members tried for a listed move that cannot be drawn, before the
+/// next ranked move is.
+const CLASS_TRIES: usize = 6;
+/// Wall clock for drawing, after the search has had its own.
+const ROUTE_BUDGET_MS: f64 = 800.0;
 
-pub fn find_best_move(state: &mut GameState) -> Option<Move> {
-    // The skeleton pathfinder reads the grid the classifier builds.
-    let classification = classify_nodes(state);
-
-    // 1. GENERATE CONCRETE MOVES (pixel-level, once)
-    let generated = generate_concrete_moves_from_classification(state, &classification);
-    let mut candidates = embedded_moves(state, generated);
+/// Lists the search moves, ranks them once on the model, and draws the
+/// best one that routes, walking the ranking on failure.
+pub fn choose(state: &GameState) -> Reply {
+    let candidates = state.face.search_moves();
     if candidates.is_empty() {
-        return None;
+        return Reply::GameOver;
     }
-    if candidates.len() == 1 {
-        return candidates.pop().map(|(mov, _)| mov);
+    let order = rank(state, &candidates);
+    match draw(state, &candidates, &order) {
+        (Some(mov), _) => Reply::Move(mov),
+        (None, _) => Reply::Undrawn,
     }
-
-    // 2. SEARCH over the face model from each candidate.
-    let topologies: Vec<FaceMove> = candidates.iter().map(|(_, t)| t.clone()).collect();
-    let best_idx = search_best_index(state, &topologies);
-
-    // 3. RETURN best concrete move (already validated during generation)
-    candidates.into_iter().nth(best_idx).map(|(mov, _)| mov)
 }
 
 thread_local! {
@@ -169,11 +41,134 @@ thread_local! {
     static NIMBERS: RefCell<Nimbers> = RefCell::new(Nimbers::new());
 }
 
-/// Index into `candidates` of the move to play.
-pub(crate) fn search_best_index(state: &GameState, candidates: &[FaceMove]) -> usize {
+/// Indices into `candidates`, best first, from one search.
+pub(crate) fn rank(state: &GameState, candidates: &[FaceMove]) -> Vec<usize> {
+    if candidates.len() < 2 {
+        return (0..candidates.len()).collect();
+    }
     let root = AbstractState::new(state.face.clone(), state.current_player == Player::AI);
     let mut budget = Budget::new(WallClock::start(), SEARCH_BUDGET_MS);
-    NIMBERS.with(|nimbers| choose(root, candidates, &mut budget, &mut nimbers.borrow_mut()).index)
+    NIMBERS.with(|nimbers| {
+        abstract_graph::choose(root, candidates, &mut budget, &mut nimbers.borrow_mut()).order
+    })
+}
+
+/// Routes the candidates in ranked order until one draws, trying the other
+/// members of a move's class before moving down the ranking. Once
+/// `ROUTE_BUDGET_MS` has passed, every remaining candidate still gets one
+/// attempt at the cheap clearance, so Undrawn means every listed move was
+/// tried. Returns the drawn move and the number of ranked moves passed
+/// over.
+pub(crate) fn draw(
+    state: &GameState,
+    candidates: &[FaceMove],
+    order: &[usize],
+) -> (Option<Move>, usize) {
+    let mut clock = WallClock::start();
+    let mut failures = 0;
+    for &idx in order {
+        let listed = &candidates[idx];
+        if clock.elapsed_ms() > ROUTE_BUDGET_MS {
+            if let Ok(mov) = route::route_cheap(state, listed) {
+                return (Some(mov), failures);
+            }
+            failures += 1;
+            continue;
+        }
+        let tries = std::iter::once(listed.clone()).chain(class_members(state, listed));
+        for attempt in tries {
+            if let Ok(mov) = route::route(state, &attempt) {
+                return (Some(mov), failures);
+            }
+            if clock.elapsed_ms() > ROUTE_BUDGET_MS {
+                break;
+            }
+        }
+        failures += 1;
+    }
+    (None, failures)
+}
+
+/// Other moves reaching the same position as `rep` up to relabelling the
+/// isolated nodes of its face: the same move from another isolated node,
+/// or enclosing other isolated nodes. At most `CLASS_TRIES`, in the order
+/// the face lists its pieces.
+pub(crate) fn class_members(state: &GameState, rep: &FaceMove) -> Vec<FaceMove> {
+    let model = &state.face;
+    let Ok(face) = model.corner_face(rep.a, rep.at_a) else {
+        return Vec::new();
+    };
+    let isolated: Vec<usize> = model
+        .components(face)
+        .iter()
+        .filter_map(|c| match c {
+            Component::Node(v) => Some(*v),
+            Component::Cycle(_) => None,
+        })
+        .collect();
+    let bare = |v: usize| model.degree(v) == 0;
+    let ends_a: Vec<usize> = if bare(rep.a) {
+        isolated.clone()
+    } else {
+        vec![rep.a]
+    };
+    let cycles: Vec<usize> = rep.enclosed.iter().copied().filter(|v| !bare(*v)).collect();
+    let wanted = rep.enclosed.len() - cycles.len();
+    let mut out = Vec::new();
+    for &a in &ends_a {
+        let ends_b: Vec<usize> = if rep.a == rep.b {
+            vec![a]
+        } else if bare(rep.b) {
+            isolated.iter().copied().filter(|&v| v != a).collect()
+        } else {
+            vec![rep.b]
+        };
+        for &b in &ends_b {
+            // The lowest other piece of a bare loop is held outside, as in
+            // the enumeration, so only the rest are enclosable.
+            let mut pool: Vec<usize> = isolated
+                .iter()
+                .copied()
+                .filter(|&v| v != a && v != b)
+                .collect();
+            if a == b && bare(a) {
+                let first_other = model
+                    .components(face)
+                    .iter()
+                    .map(|&c| model.lowest_node(c))
+                    .find(|&v| v != a);
+                pool.retain(|&v| Some(v) != first_other);
+                if first_other.is_some_and(|v| cycles.contains(&v)) {
+                    continue;
+                }
+            }
+            if pool.len() < wanted {
+                continue;
+            }
+            for start in 0..=pool.len() - wanted {
+                let mut enclosed = cycles.clone();
+                enclosed.extend_from_slice(&pool[start..start + wanted]);
+                enclosed.sort_unstable();
+                let member = FaceMove {
+                    a,
+                    at_a: if bare(a) { None } else { rep.at_a },
+                    b,
+                    at_b: if bare(b) { None } else { rep.at_b },
+                    enclosed,
+                };
+                if member != *rep && !out.contains(&member) {
+                    out.push(member);
+                    if out.len() == CLASS_TRIES {
+                        return out;
+                    }
+                }
+                if wanted == 0 {
+                    break;
+                }
+            }
+        }
+    }
+    out
 }
 
 /// Size of the worker's nimber table, its hit and miss counts, and the
@@ -199,29 +194,6 @@ pub(crate) fn nodes_to_depth(state: &GameState, candidates: &[FaceMove], depth: 
     let root = AbstractState::new(state.face.clone(), state.current_player == Player::AI);
     let mut budget = Budget::new(Still, f64::INFINITY);
     best_candidate_to(root, candidates, &mut budget, &mut Nimbers::new(), depth).spent
-}
-
-pub fn find_optimal_node_placement(
-    path: &[crate::types::Point],
-    state: &crate::types::GameState,
-) -> crate::types::Point {
-    if path.len() < 3 {
-        if path.len() == 2 {
-            return crate::types::Point::new(
-                (path[0].x + path[1].x) / 2.0,
-                (path[0].y + path[1].y) / 2.0,
-            );
-        }
-        let c = crate::types::BOARD_SIZE as f64 / 2.0;
-        return crate::types::Point::new(c, c);
-    }
-    if path.len() == 3 {
-        return path[1];
-    }
-    rank_node_placements(path, state)
-        .first()
-        .copied()
-        .unwrap_or(path[path.len() / 2])
 }
 
 /// Points of the middle 80% of the path ordered by clearance, the farthest
@@ -266,6 +238,6 @@ pub fn rank_node_placements(
     scored.into_iter().map(|(_, point)| point).collect()
 }
 
-pub fn select_ai_move(state: &mut GameState) -> Option<Move> {
-    find_best_move(state)
+pub fn select_ai_move(state: &GameState) -> Reply {
+    choose(state)
 }

@@ -31,11 +31,8 @@ import {
 } from "./state";
 import { trackCanvasSize, View } from "./view";
 
-// A smaller grid on small screens keeps the skeleton pass fast; the view
-// scales it to the screen.
-function defaultBoardSize(): number {
-  return window.innerWidth <= 768 || window.innerHeight <= 768 ? 500 : 1000;
-}
+// World units across the board; the view scales it to the screen.
+const BOARD_SIZE = 1000;
 // Matches MIN_PATH_LENGTH in src/types.rs under the engine's board scale.
 function minStrokeLength(boardSize: number): number {
   return 20 * (boardSize / 1000);
@@ -84,7 +81,7 @@ function invalidate(): void {
   dirty = true;
 }
 
-const view = new View(defaultBoardSize());
+const view = new View(BOARD_SIZE);
 const loupe = new Loupe();
 const inputOptions: InputOptions = { minStrokeLength: minStrokeLength(view.boardSize) };
 const motionQuery = window.matchMedia("(prefers-reduced-motion: reduce)");
@@ -522,9 +519,15 @@ async function performAIMove(): Promise<void> {
   try {
     const reply = await engine.latest("turn", "aiMove");
     stopThinking();
-    if (!reply) {
+    if (reply.kind === "gameOver") {
       state.gameOver = true;
       showGameOver();
+      return;
+    }
+    if (reply.kind === "undrawn") {
+      setStatus("The AI could not draw a move here. Undo or start a new game.", "lose");
+      state.mode = "idle";
+      updateControls();
       return;
     }
 
@@ -773,7 +776,7 @@ async function newGame(nodeCount: number, fresh = true): Promise<void> {
     clearSaved();
   }
   const epoch = gameEpoch;
-  timeline = new History(nodeCount, defaultBoardSize(), firstPlayer);
+  timeline = new History(nodeCount, BOARD_SIZE, firstPlayer);
   state.currentPlayer = firstPlayer;
   updateTurn();
   setBoardSize(timeline.boardSize);

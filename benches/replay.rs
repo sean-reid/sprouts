@@ -1,10 +1,15 @@
-use sprouts::replay::{self, ms, Fixture, MoveTiming, PHASES};
+use sprouts::replay::{self, ms, Fixture, MoveTiming, PHASES, PHASE_COUNT};
+
+/// Seeded random games routed after the fixtures, so the report keeps the
+/// share of search moves the router cannot draw.
+const SWEEP_SEED: u64 = 7;
+const SWEEP_GAMES: usize = 24;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 const RECORD_NODES: [usize; 3] = [4, 5, 6];
-const RECORD_BOARDS: [usize; 2] = [1000, 500];
+const RECORD_BOARDS: [usize; 1] = [1000];
 
 fn fixtures_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures")
@@ -38,14 +43,17 @@ fn load_budgets() -> Result<BTreeMap<String, f64>, String> {
     Ok(budgets)
 }
 
-fn print_table(name: &str, fixture: &Fixture, timings: &[MoveTiming]) -> [f64; 6] {
+fn print_table(name: &str, fixture: &Fixture, timings: &[MoveTiming]) -> [f64; PHASE_COUNT] {
     println!(
         "\n{name}: {} nodes, board {}, {} moves",
         fixture.initial_nodes,
         fixture.board_size,
         fixture.moves.len()
     );
-    print!("{:>4} {:>6} {:>5}", "move", "player", "over");
+    print!(
+        "{:>4} {:>6} {:>5} {:>6} {:>7}",
+        "move", "player", "over", "failed", "undrawn"
+    );
     for phase in PHASES {
         print!(" {phase:>14}");
     }
@@ -57,14 +65,22 @@ fn print_table(name: &str, fixture: &Fixture, timings: &[MoveTiming]) -> [f64; 6
             (false, replay::Player::Human) => "human",
             (false, replay::Player::AI) => "ai",
         };
-        print!("{:>4} {:>6} {:>5}", t.index, player, t.game_over);
+        print!(
+            "{:>4} {:>6} {:>5} {:>6} {:>7}",
+            t.index, player, t.game_over, t.routing_failures, t.undrawn
+        );
         for d in t.phases.as_array() {
             print!(" {:>14.2}", ms(d));
         }
         println!(" {:>10.2}", ms(t.phases.total()));
     }
     let max = replay::max_per_phase(timings);
-    print!("{:>4} {:>6} {:>5}", "max", "", "");
+    let failed: usize = timings.iter().map(|t| t.routing_failures).sum();
+    let undrawn = timings.iter().filter(|t| t.undrawn).count();
+    print!(
+        "{:>4} {:>6} {:>5} {:>6} {:>7}",
+        "max", "", "", failed, undrawn
+    );
     for v in max {
         print!(" {v:>14.2}");
     }
@@ -102,6 +118,11 @@ fn run_bench() -> Result<bool, String> {
         }
     }
 
+    let tally = replay::sweep(SWEEP_SEED, SWEEP_GAMES);
+    println!(
+        "\nroutes failed {} of {} over {SWEEP_GAMES} seeded games: {:?}",
+        tally.failed, tally.tried, tally.kinds
+    );
     let (forms, hits, misses, (lives, nodes)) = replay::nimber_stats();
     let rate = 100.0 * hits as f64 / (hits + misses).max(1) as f64;
     println!(

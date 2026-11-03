@@ -25,8 +25,7 @@ export function frameOf(page: Page): Promise<Frame> {
   return page.evaluate(() => {
     const canvas = document.getElementById("canvas") as HTMLCanvasElement;
     const rect = canvas.getBoundingClientRect();
-    const board = window.innerWidth <= 768 || window.innerHeight <= 768 ? 500 : 1000;
-    return { left: rect.left, top: rect.top, width: rect.width, height: rect.height, board };
+    return { left: rect.left, top: rect.top, width: rect.width, height: rect.height, board: 1000 };
   });
 }
 
@@ -480,7 +479,7 @@ export async function shot(page: Page, name: string): Promise<Buffer> {
 
 export async function openBoard(page: Page, path = "/"): Promise<void> {
   await page.goto(path);
-  // Fetching the wasm and building the 1000 grid takes a few seconds on a shared runner.
+  // Fetching and compiling the wasm takes a few seconds on a shared runner.
   await expect(page.locator("#status")).toHaveText("Draw a line between two nodes", {
     timeout: 20_000,
   });

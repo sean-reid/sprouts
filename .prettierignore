@@ -8,3 +8,5 @@ package-lock.json
 CHANGELOG.md
 .release-please-manifest.json
 fixtures/games/
+fixtures/routing/
+fixtures/undrawn/
