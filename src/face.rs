@@ -467,7 +467,10 @@ impl FaceModel {
     }
 }
 
+mod canonical;
 mod moves;
+
+pub use canonical::canonical_form;
 
 #[cfg(test)]
 mod tests;
