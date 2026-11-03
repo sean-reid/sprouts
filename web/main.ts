@@ -699,6 +699,7 @@ function animateSettle(before: Geometry): void {
     };
     if (t < 1) requestAnimationFrame(frame);
     else state.settling = null;
+    targets.place();
   };
   requestAnimationFrame(frame);
 }
