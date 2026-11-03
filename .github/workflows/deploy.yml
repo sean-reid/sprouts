@@ -15,7 +15,6 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
   CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID || '860e267e26cbf52bdca301d114b3c203' }}
 
 jobs:
@@ -46,6 +45,8 @@ jobs:
           cache: npm
       - run: npm ci
       - name: require the deploy token
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
         run: |
           if [ -z "$CLOUDFLARE_API_TOKEN" ]; then
             echo "::error::CLOUDFLARE_API_TOKEN is not set in Actions secrets"
@@ -53,11 +54,15 @@ jobs:
           fi
       - run: npm run build
       - name: create the Pages project on first deploy
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
         run: |
           out=$(npx wrangler pages project create sprouts-game --production-branch main 2>&1) \
             || echo "$out" | grep -q "already exists" \
             || { echo "$out"; exit 1; }
       - run: npx wrangler pages deploy --branch main --commit-hash "$GITHUB_SHA"
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       - name: smoke
         run: |
           curl -fsS --retry 5 --retry-all-errors --retry-delay 5 https://sprouts-game.pages.dev/ | grep -qi sprouts
