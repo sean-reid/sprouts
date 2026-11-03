@@ -349,6 +349,33 @@ mod tests {
         }
     }
 
+    /// The book answers a human opening by joining an untouched node to the
+    /// one the human used, and needs the skeleton built to draw it.
+    #[test]
+    fn the_ai_answers_a_human_opening_from_the_book() {
+        let mut state = start(4, 1000, Player::Human);
+        let a = state.nodes[0].position;
+        let b = state.nodes[1].position;
+        let polyline = straight(a, b, 20);
+        let new_node_pos = polyline[10];
+        let Outcome::Applied { .. } = apply(
+            &mut state,
+            Move {
+                from_node: 0,
+                to_node: 1,
+                polyline,
+                new_node_pos,
+            },
+        ) else {
+            panic!("the opening chord was rejected");
+        };
+        let reply = ai_move(&mut state).expect("the AI has a reply");
+        let ends = [reply.mov.from_node, reply.mov.to_node];
+        assert!(ends.iter().all(|&id| id < 4));
+        assert!(ends.contains(&2) || ends.contains(&3));
+        assert!(ends.contains(&0) || ends.contains(&1));
+    }
+
     #[test]
     fn the_ai_can_open_and_the_turn_passes_to_the_human() {
         let mut state = start(4, 1000, Player::AI);

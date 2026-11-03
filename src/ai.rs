@@ -141,6 +141,9 @@ pub(crate) fn embedded_moves(state: &GameState, moves: Vec<Move>) -> Vec<(Move, 
 }
 
 pub fn find_best_move(state: &mut GameState) -> Option<Move> {
+    // The skeleton pathfinder reads the grid the classifier builds.
+    let classification = classify_nodes(state);
+
     // 1. OPENING BOOK
     if let Some((from, to)) = opening_book::lookup_opening(state) {
         if let Some(path) = find_path_on_skeleton(state, from, to) {
@@ -162,7 +165,6 @@ pub fn find_best_move(state: &mut GameState) -> Option<Move> {
     }
 
     // 2. GENERATE CONCRETE MOVES (pixel-level, once)
-    let classification = classify_nodes(state);
     let generated = generate_concrete_moves_from_classification(state, &classification);
     let mut candidates = embedded_moves(state, generated);
     if candidates.is_empty() {
