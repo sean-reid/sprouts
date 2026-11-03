@@ -15,8 +15,9 @@ mod types;
 mod validation;
 
 use protocol::{
-    AiReply, AutoPlacement, AutoPlacementQuery, Curve, FaceMove, FitQuery, Layout, Move, MovesFrom,
-    Outcome, Placement, PlacementQuery, Rehearsal, RouteReply, Snapshot,
+    AiReply, AutoPlacement, AutoPlacementQuery, Classification, Classified, Curve, FaceMove,
+    FitQuery, Layout, Move, MovesFrom, Outcome, Placement, PlacementQuery, Rehearsal, RouteReply,
+    Snapshot,
 };
 use tsify::{Ts, Tsify};
 use types::{GameState, Player, Point};
@@ -63,6 +64,13 @@ impl SproutsGame {
     /// The index of the first move of a link a fresh engine refuses, if any.
     pub fn rehearse(&self, plan: Ts<Rehearsal>) -> Result<Option<usize>, JsError> {
         protocol::rehearse(plan.to_rust()?).map_err(|e| JsError::new(&e))
+    }
+
+    /// For each move of a game, the face move the router redraws it from.
+    pub fn classify(&self, plan: Ts<Classification>) -> Result<Ts<Classified>, JsError> {
+        Ok(protocol::classify(plan.to_rust()?)
+            .map_err(|e| JsError::new(&e))?
+            .into_ts()?)
     }
 
     pub fn undo(&mut self) -> bool {

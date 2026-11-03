@@ -1,4 +1,6 @@
 import type {
+  Classification,
+  Classified,
   Cubic,
   FaceMove,
   Line,
@@ -60,6 +62,10 @@ const RECORD_VERSION = 1;
 // a move as its face move where the router redraws it; a version 1 or 2
 // link was drawn on the circle layout.
 const LINK_VERSION = 4;
+// Matches ROUTER_VERSION in src/protocol.rs; a version 4 link carries it
+// right after the version byte, and the engine refuses a rehearsal for
+// any other.
+export const ROUTER_VERSION = 1;
 const LAYOUT_LINK_VERSION = 3;
 const CUBIC_LINK_VERSION = 2;
 const STROKE_LINK_VERSION = 1;
@@ -131,12 +137,23 @@ export class History {
     return this.moverOf(this.cursor);
   }
 
-  // A move made from the cursor discards whatever was ahead of it.
+  // A move made from the cursor discards whatever was ahead of it; the
+  // AI's move comes with the face move it was drawn from.
   push(move: Move, topology?: FaceMove): void {
     this.moves.length = this.cursor;
-    this.moves.push(cloneMove(move));
+    const kept = cloneMove(move);
+    if (topology) kept.topology = topology;
+    this.moves.push(kept);
     this.cursor = this.moves.length;
-    this.settle(this.cursor - 1, topology);
+  }
+
+  // A copy to work on while the game goes on.
+  clone(): History {
+    const copy = new History(this.initialNodes, this.boardSize, this.firstPlayer);
+    copy.nodes = this.nodes ? this.nodes.map(([x, y]) => [x, y]) : null;
+    copy.moves = this.moves.map(cloneMove);
+    copy.cursor = this.cursor;
+    return copy;
   }
 
   truncate(): void {
@@ -155,13 +172,12 @@ export class History {
     });
   }
 
-  // Records what the engine reported on applying move number index + 1:
-  // its topology, and for a move that arrived as topology, the line drawn.
-  settle(index: number, topology: FaceMove | undefined, line?: Line): void {
+  // Takes the line the engine drew for move number index + 1 when the move
+  // arrived as topology.
+  settle(index: number, line: Line | undefined): void {
     const move = this.moves[index];
-    if (!move) return;
-    if (topology) move.topology = topology;
-    if (line && !drawn(move) && line.fromNode === move.fromNode && line.toNode === move.toNode) {
+    if (!move || !line || drawn(move)) return;
+    if (line.fromNode === move.fromNode && line.toNode === move.toNode) {
       move.polyline = line.polyline.map((p) => ({ x: p.x, y: p.y }));
       move.newNodePos = { x: line.newNodePos.x, y: line.newNodePos.y };
       move.segments = line.segments;
@@ -170,7 +186,7 @@ export class History {
 
   // Takes the outcome of applying move number index + 1.
   applied(index: number, outcome: Applied): void {
-    this.settle(index, outcome.topology, outcome.snapshot.lines[index]);
+    this.settle(index, outcome.snapshot.lines[index]);
   }
 
   // The id of the node move number index + 1 created.
@@ -247,20 +263,15 @@ export function toMove(move: RecordedMove): Move {
   };
 }
 
-function toRecordMove(move: RecordedMove): RecordMove {
-  if (drawn(move) || !move.topology) {
-    return {
-      from: move.fromNode,
-      to: move.toNode,
-      polyline: move.polyline.map((p): [number, number] => [p.x, p.y]),
-      newNode: [move.newNodePos.x, move.newNodePos.y],
-    };
-  }
+// The saved record holds strokes only; a move the engine has not drawn
+// yet has none to give.
+function toRecordMove(move: RecordedMove): FixtureMove {
+  if (!drawn(move)) throw new RangeError("a move the engine has not drawn cannot be saved");
   return {
     from: move.fromNode,
     to: move.toNode,
-    face: move.topology,
-    node: [move.newNodePos.x, move.newNodePos.y],
+    polyline: move.polyline.map((p): [number, number] => [p.x, p.y]),
+    newNode: [move.newNodePos.x, move.newNodePos.y],
   };
 }
 
@@ -395,8 +406,9 @@ function scaleOf(boardSize: number): number {
   return boardSize / 1000;
 }
 
-// Share link layout, little endian: version u8, flags u8 (bit 0 is AI
-// first, bit 1 says the starting positions follow the header), initial
+// Share link layout, little endian: version u8, the router version u8
+// from version 4 on, flags u8 (bit 0 says the AI opens, bit 1 says the
+// starting positions follow the header), initial
 // nodes u16, board size u16, move count u16, cursor u16, the starting
 // positions as zigzag varint deltas in link quanta when they are not the
 // default layout, then per move: from and to as varints, a shape u8 and
@@ -421,6 +433,7 @@ export function encodeRecord(history: History): string {
       ? history.nodes
       : null;
   out.u8(LINK_VERSION);
+  out.u8(ROUTER_VERSION);
   out.u8((history.firstPlayer === "ai" ? FLAG_AI_FIRST : 0) | (layout ? FLAG_LAYOUT : 0));
   out.u16(history.initialNodes);
   out.u16(history.boardSize);
@@ -485,6 +498,17 @@ function encodeCubics(move: RecordedMove, scale: number): Uint8Array | null {
   return out.bytes();
 }
 
+// A link whose topology moves were drawn by another router, which this
+// page would draw differently.
+export class StaleLink extends Error {
+  constructor() {
+    super("This link comes from another version of the game and cannot be replayed here");
+    this.name = "StaleLink";
+  }
+}
+
+// Null for a link that does not parse; throws StaleLink for one made for
+// another router.
 export function decodeRecord(payload: string): GameRecord | null {
   let bytes: Uint8Array;
   try {
@@ -496,6 +520,7 @@ export function decodeRecord(payload: string): GameRecord | null {
   try {
     const version = reader.u8();
     if (!LINK_VERSIONS.includes(version)) return null;
+    if (version === LINK_VERSION && reader.u8() !== ROUTER_VERSION) throw new StaleLink();
     const flags = reader.u8();
     const initialNodes = reader.u16();
     const boardSize = reader.u16();
@@ -534,7 +559,8 @@ export function decodeRecord(payload: string): GameRecord | null {
       moves,
       cursor,
     });
-  } catch {
+  } catch (error) {
+    if (error instanceof StaleLink) throw error;
     return null;
   }
 }
@@ -647,12 +673,27 @@ function pointAt(c: Cubic, t: number): Point {
   };
 }
 
+// The real history, for the engine to say which moves the router redraws;
+// null while a move the engine has not drawn is in the list.
+export function classification(history: History): Classification | null {
+  if (!history.moves.every(drawn)) return null;
+  return {
+    initialNodes: history.initialNodes,
+    boardSize: history.boardSize,
+    firstPlayer: history.firstPlayer,
+    nodes: history.nodes?.map(([x, y]) => ({ x, y })),
+    moves: history.moves.map(toMove),
+    known: history.moves.map((move) => move.topology),
+  };
+}
+
 // The link's own reading of the game, for replaying on a fresh board the
 // way a visitor's engine will.
 export function rehearsal(history: History): Rehearsal | null {
   const record = decodeRecord(encodeRecord(history));
   if (!record) return null;
   return {
+    routerVersion: ROUTER_VERSION,
     initialNodes: record.initialNodes,
     boardSize: record.boardSize,
     firstPlayer: record.firstPlayer,
@@ -671,6 +712,39 @@ export function demote(history: History, index: number): boolean {
   if (!move?.topology || !drawn(move)) return false;
   delete move.topology;
   return true;
+}
+
+// The engine requests a share needs.
+export interface LinkEngine {
+  classify(plan: Classification): Promise<Classified>;
+  rehearse(plan: Rehearsal): Promise<number | undefined>;
+}
+
+// The game as the link will carry it, worked out on a copy: the engine
+// says which drawn moves the router redraws, then the link is replayed as
+// decoded and any topology move the replay refuses goes as geometry until
+// the whole link applies. A drawn move the replay refuses cannot be helped;
+// its index comes back so the sharer can be told.
+export async function prepareLink(
+  source: History,
+  engine: LinkEngine,
+): Promise<{ history: History; refusedAt?: number }> {
+  const history = source.clone();
+  const plan = classification(history);
+  if (plan) {
+    const { topology } = await engine.classify(plan);
+    topology.forEach((face, i) => {
+      const move = history.moves[i];
+      if (move && face && !move.topology) move.topology = face;
+    });
+  }
+  for (;;) {
+    const link = rehearsal(history);
+    if (!link) return { history };
+    const refused = await engine.rehearse(link);
+    if (refused === undefined) return { history };
+    if (!demote(history, refused)) return { history, refusedAt: refused };
+  }
 }
 
 export function shareUrl(history: History): string {
