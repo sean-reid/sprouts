@@ -474,3 +474,20 @@ export function strokeCells(page: Page): Promise<boolean[]> {
     return cells;
   });
 }
+
+// Pixels in either player's colour: nodes, strokes and the ring. A move
+// adds a line and a node, so the count rises whatever the AI draws.
+export function inkPixels(page: Page): Promise<number> {
+  return page.evaluate(() => {
+    const canvas = document.getElementById("canvas") as HTMLCanvasElement;
+    const { data } = canvas.getContext("2d")!.getImageData(0, 0, canvas.width, canvas.height);
+    let ink = 0;
+    for (let i = 0; i < data.length; i += 4) {
+      const r = data[i]!;
+      const g = data[i + 1]!;
+      const b = data[i + 2]!;
+      if ((b > 180 && r < 120) || (r > 180 && g < 100)) ink++;
+    }
+    return ink;
+  });
+}

@@ -132,9 +132,7 @@ test("AI starts opens with the AI's line and no human input", async ({ page }) =
   await expect(page.locator('button[data-first="ai"]')).toHaveAttribute("aria-pressed", "true");
   await expect(page.locator('button[data-first="human"]')).toHaveAttribute("aria-pressed", "false");
   await shot(page, "toggle");
-
-  await page.locator('button[data-nodes="4"]').click();
-  await expect(page.locator("#status")).toHaveText("AI is thinking");
+  await expect(page.locator("#status")).toHaveText("AI is thinking", { timeout: 20_000 });
   await expect(page.locator("#turnText")).toHaveText("AI's turn");
   await expect(page.locator("#status")).toHaveText("Your turn!", { timeout: 60_000 });
   await expect(page.locator("#turnText")).toHaveText("Your turn");

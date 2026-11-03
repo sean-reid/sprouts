@@ -762,6 +762,17 @@ async function restore(record: GameRecord, fromLink: boolean): Promise<void> {
   }
 }
 
+// A board with no moves restarts with the choice; a game in progress keeps
+// it for the next one.
+function pickFirstPlayer(player: Player): void {
+  chooseFirstPlayer(player);
+  if (timeline.moves.length === 0) {
+    void newGame(lastNodeCount);
+  } else {
+    setStatus(player === "human" ? "You start next game" : "AI starts next game");
+  }
+}
+
 function chooseFirstPlayer(player: Player): void {
   firstPlayer = player;
   for (const button of firstPlayerButtons) {
@@ -839,7 +850,7 @@ function wireInput(): void {
   }
   undoBtn.addEventListener("click", () => void undoMove());
   for (const button of firstPlayerButtons) {
-    button.addEventListener("click", () => chooseFirstPlayer(button.dataset.first as Player));
+    button.addEventListener("click", () => pickFirstPlayer(button.dataset.first as Player));
   }
   backBtn.addEventListener("click", () => void step(-1));
   forwardBtn.addEventListener("click", () => void step(1));
