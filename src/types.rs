@@ -3,7 +3,7 @@ use tsify::Tsify;
 
 use crate::curve::{self, Cubic};
 use crate::embedding;
-use crate::face::FaceModel;
+use crate::face::{FaceModel, Move as FaceMove};
 use crate::validation::Rejection;
 
 pub const BOARD_SIZE: usize = 1000;
@@ -250,9 +250,14 @@ impl GameState {
     /// Fails, changing nothing, when the line cannot be placed in a face.
     pub fn apply_move(&mut self, mov: Move) -> Result<(), Rejection> {
         let topology = embedding::embed(self, &mov)?;
+        self.apply_embedded(mov, &topology)
+    }
+
+    /// Applies a move whose face-model reading is already known.
+    pub fn apply_embedded(&mut self, mov: Move, topology: &FaceMove) -> Result<(), Rejection> {
         self.face
-            .apply(&topology)
-            .expect("the embedding checked the move");
+            .apply(topology)
+            .map_err(|_| Rejection::crossing_somewhere(&mov.polyline))?;
 
         if mov.from_node == mov.to_node {
             // Self-loop: node gets +2 connections

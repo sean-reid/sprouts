@@ -7,6 +7,7 @@ use crate::embedding;
 use crate::face::{self, IllegalMove, Move as ModelMove};
 use crate::geometry;
 use crate::route::{self, Unroutable};
+use crate::settle;
 use crate::types::{self, scale, GameState, Line, Node, Player, Point, MIN_NODE_SPACING};
 use crate::validation::{self, Rejection};
 
@@ -265,6 +266,8 @@ fn topology(state: &GameState, mov: &types::Move) -> Result<face::Move, Rejectio
     embedding::embed(state, mov)
 }
 
+/// The move goes in and the board settles around it, so the snapshot
+/// carries the relaxed geometry.
 pub fn apply(state: &mut GameState, mov: Move) -> Outcome {
     let mov = mov.by(state.current_player, state.board_size);
     match topology(state, &mov) {
@@ -273,13 +276,17 @@ pub fn apply(state: &mut GameState, mov: Move) -> Outcome {
     }
 }
 
-/// Applies a line that has passed every check.
+/// Applies a line that has passed every check and settles the board
+/// around it, so the snapshot carries the relaxed geometry.
 fn commit(state: &mut GameState, line: types::Move) -> Outcome {
     match state.apply_move(line) {
-        Ok(()) => Outcome::Applied {
-            cut_off: cut_off(&state.face),
-            snapshot: snapshot(state),
-        },
+        Ok(()) => {
+            settle::settle(state);
+            Outcome::Applied {
+                cut_off: cut_off(&state.face),
+                snapshot: snapshot(state),
+            }
+        }
         Err(rejection) => Outcome::Rejected { rejection },
     }
 }
@@ -564,6 +571,15 @@ fn unroutable(mv: &face::Move, why: Unroutable) -> Rejection {
         Unroutable::Topology => Rejection::unroutable(mv.a, "the curve reads as another move"),
         Unroutable::Bug(what) => Rejection::unroutable(mv.a, what),
     }
+}
+
+/// Takes the last move back and settles the board without it.
+pub fn undo(state: &mut GameState) -> bool {
+    let undone = state.undo_move();
+    if undone {
+        settle::settle(state);
+    }
+    undone
 }
 
 /// The AI's line is router output, so its face move is read straight back

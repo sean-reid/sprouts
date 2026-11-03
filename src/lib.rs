@@ -12,6 +12,7 @@ pub use abstract_graph::search_rate;
 #[cfg(any(test, feature = "bench"))]
 pub mod replay;
 mod route;
+mod settle;
 mod types;
 mod validation;
 
@@ -96,7 +97,7 @@ impl SproutsGame {
     }
 
     pub fn undo(&mut self) -> bool {
-        self.state.undo_move()
+        protocol::undo(&mut self.state)
     }
 
     #[wasm_bindgen(js_name = aiMove)]
