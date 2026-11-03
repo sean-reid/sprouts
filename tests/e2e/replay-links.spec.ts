@@ -9,7 +9,7 @@ import {
   expectSameStrokes,
   HASH_PREFIX,
   recordNodesOnScreen,
-  ringSamplesAround,
+  colourPixelsNear,
   rowIds,
   savedRecord,
   share,
@@ -83,8 +83,11 @@ for (const file of fixtures) {
       { timeout: 240_000 },
     );
     // The visitor lands on the last move. Pointing at its row keeps the
-    // board pointing the move out, so the rings are read off the move the
-    // page marks current, at the node ids its row names.
+    // board pointing the move out, so the highlight is read off the move
+    // the page marks current, at the node ids its row names. The lines
+    // through an end node cross its ring, so the check counts highlight
+    // pixels in a 40 px box around the node: ring and line outline come to
+    // about 350, the node's own label to about 20.
     await expect(entries(other)).toHaveCount(total);
     const current = other.locator("#moveList [aria-current]");
     const index = Number(await current.getAttribute("data-move"));
@@ -94,8 +97,12 @@ for (const file of fixtures) {
     const nodes = await recordNodesOnScreen(other, record);
     for (const id of [from, to]) {
       await expect
-        .poll(() => ringSamplesAround(other, nodes[id]!, 14, HIGHLIGHT_COLOR))
-        .toBeGreaterThanOrEqual(8);
+        .poll(() => colourPixelsNear(other, nodes[id]!, 20, HIGHLIGHT_COLOR))
+        .toBeGreaterThanOrEqual(60);
+      test.info().annotations.push({
+        type: `highlight-pixels-node-${id}`,
+        description: String(await colourPixelsNear(other, nodes[id]!, 20, HIGHLIGHT_COLOR)),
+      });
     }
     await visitor.close();
   });
