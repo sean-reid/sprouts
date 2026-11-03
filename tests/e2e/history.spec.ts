@@ -5,6 +5,7 @@ import {
   type BrowserContextOptions,
   type Page,
 } from "@playwright/test";
+import { decodeRecord } from "../../web/history";
 import type { Fixture } from "../../web/record";
 
 // Every step here replays moves through the engine, which on the 1000
@@ -35,12 +36,13 @@ function visitorOptions(): BrowserContextOptions {
 }
 const current = (page: Page) => page.locator("#moveList [aria-current]");
 
-// Link lengths in characters: one exchange on the 1000 board, and the
-// nine move game, both measured on the desktop project with headroom.
-const EXCHANGE_LINK_BUDGET = 100;
-const NINE_MOVE_LINK_BUDGET = 450;
+// Link payload lengths in characters, after the hash prefix: one exchange
+// on either board, and the nine move game, measured with headroom.
+const EXCHANGE_LINK_BUDGET = 60;
+const NINE_MOVE_LINK_BUDGET = 500;
+const HASH_PREFIX = "#game=";
 const NINE_MOVES = "fixtures/saved/nine-moves-4n-1000.json";
-// One exchange on the 500 board, shared before links carried cubics.
+// A version 1 link: one exchange on the 500 board.
 const VERSION_1_LINK =
   "#game=AQAEAPQBAgACAAAAAQACABwMxAmvCbAJ8ArwCgIAAAAFAGwHxAn4A88BpgpR3gIe5AGEAvsKMwk";
 
@@ -55,13 +57,16 @@ function expectSameStrokes(before: boolean[], after: boolean[]): void {
   expect(differing).toBeLessThanOrEqual(Math.ceil(drawn * 0.1));
 }
 
-async function share(page: Page, label: string): Promise<string> {
+// Shares the game and returns the link and its payload length.
+async function share(page: Page, label: string): Promise<{ url: string; payload: number }> {
   await page.locator("#shareBtn").click();
   await expect(page.locator("#status")).toHaveText(/Link copied|Copy the link/);
   const url = page.url();
-  expect(url).toContain("#game=");
-  test.info().annotations.push({ type: label, description: String(url.length) });
-  return url;
+  const at = url.indexOf(HASH_PREFIX);
+  expect(at).toBeGreaterThan(0);
+  const payload = url.length - at - HASH_PREFIX.length;
+  test.info().annotations.push({ type: label, description: String(payload) });
+  return { url, payload };
 }
 
 // A stroke that leaves the board on its way between two nodes: the engine
@@ -149,8 +154,8 @@ test("a share link reopens the game in review and steps through it", async ({ pa
   await openBoard(page);
   await playExchange(page);
   const before = await strokeCells(page);
-  const url = await share(page, "share-url-chars");
-  expect(url.length).toBeLessThan(EXCHANGE_LINK_BUDGET);
+  const { url, payload } = await share(page, "share-payload-chars");
+  expect(payload).toBeLessThan(EXCHANGE_LINK_BUDGET);
   await shot(page, "history-shared-source");
 
   const visitor = await browser.newContext(visitorOptions());
@@ -210,8 +215,8 @@ test("a nine move game shares as a short link that rebuilds the same board", asy
   await expect(current(page)).toHaveText(/^9\./);
   await expect(page.locator("#status")).not.toHaveText(/Initializing|Replay/);
   const before = await strokeCells(page);
-  const url = await share(page, "nine-move-url-chars");
-  expect(url.length).toBeLessThan(NINE_MOVE_LINK_BUDGET);
+  const { url, payload } = await share(page, "nine-move-payload-chars");
+  expect(payload).toBeLessThan(NINE_MOVE_LINK_BUDGET);
   await shot(page, "history-nine-source");
 
   const visitor = await browser.newContext(visitorOptions());
@@ -242,7 +247,7 @@ test("a review with moves the engine has not refitted still shares", async ({ pa
   await expect(entries(page)).toHaveCount(9, { timeout: 60_000 });
   await expect(current(page)).toHaveText(/^2\./);
   await expect(page.locator("#forwardBtn")).toBeEnabled();
-  const url = await share(page, "partial-review-url-chars");
+  const { url } = await share(page, "partial-review-payload-chars");
 
   const visitor = await browser.newContext(visitorOptions());
   const other = await visitor.newPage();
@@ -252,6 +257,26 @@ test("a review with moves the engine has not refitted still shares", async ({ pa
   });
   await expect(entries(other)).toHaveText(await entries(page).allTextContents());
   await visitor.close();
+});
+
+// The saved game holds the engine's exact nodes and the link rounds them
+// by up to a quarter unit per axis on this 500 board.
+test("a version 1 link of the saved game reopens the live game", async ({ page }) => {
+  const linked = decodeRecord(VERSION_1_LINK.slice(HASH_PREFIX.length));
+  if (!linked) throw new Error("the version 1 link does not decode");
+  const saved = {
+    ...linked,
+    moves: linked.moves.map((m) => ({
+      ...m,
+      newNode: [m.newNode[0] + 0.24, m.newNode[1] - 0.24],
+    })),
+  };
+  await page.addInitScript((s) => localStorage.setItem("sprouts.game", s), JSON.stringify(saved));
+  await page.goto("/" + VERSION_1_LINK);
+  await expect(page.locator("#status")).toHaveText("Your turn!", { timeout: 20_000 });
+  expect(page.url()).not.toContain("#");
+  await expect(entries(page)).toHaveText(["1. You 0 to 1", "2. AI 2 to 0"]);
+  await expect(page.locator("#undoBtn")).toBeEnabled();
 });
 
 test("a version 1 link opens in review with its moves", async ({ page }) => {
