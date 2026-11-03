@@ -88,6 +88,9 @@ jobs:
       - run: cargo test --release --features bench exported_game_replays
         env:
           SPROUTS_FIXTURE: test-results/fixtures/desktop-game.json
+      - run: cargo test --release --features bench exported_game_replays
+        env:
+          SPROUTS_FIXTURE: test-results/fixtures/desktop-saved.json
       - uses: actions/upload-artifact@v7
         if: always()
         with:

@@ -272,8 +272,6 @@ mod tests {
         assert_eq!(placed.position, a);
     }
 
-    /// The recorded game shape under fixtures/games; a game the page saves
-    /// carries more fields, which serde skips.
     #[derive(Serialize, Deserialize)]
     #[serde(rename_all = "camelCase")]
     struct Recorded {
@@ -319,23 +317,6 @@ mod tests {
         assert_eq!(state.lines.len(), 2);
         assert_eq!(state.lines[1].player, Player::AI);
         assert_eq!(state.current_player, Player::Human);
-    }
-
-    #[test]
-    fn a_game_saved_by_the_page_loads_as_a_fixture() {
-        let saved = include_str!("../fixtures/games/first-exchange.json");
-        let raw: serde_json::Value = serde_json::from_str(saved).unwrap();
-        assert_eq!(raw["version"], json!(1));
-        assert_eq!(raw["firstPlayer"], json!("human"));
-        assert_eq!(raw["cursor"], json!(2));
-
-        let state = replay(serde_json::from_str(saved).unwrap());
-        assert_eq!(state.initial_node_count, 4);
-        assert_eq!(state.board_size, 1000);
-        assert_eq!(state.lines.len(), 2);
-        assert_eq!(state.lines[0].player, Player::Human);
-        assert_eq!(state.lines[1].player, Player::AI);
-        assert_eq!(state.nodes.len(), 6);
     }
 
     #[test]

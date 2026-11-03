@@ -1,13 +1,11 @@
 import type { Move, Player, Point } from "../pkg/sprouts";
+import type { Fixture, FixtureMove } from "./record";
 
-// Same shape as a recorded game under fixtures/games plus the fields a
-// resumed session needs, so a saved game is also a bench fixture.
-export interface GameRecord {
+// A replay fixture plus the fields a resumed session needs, so a saved
+// game loads in the bench unchanged.
+export interface GameRecord extends Fixture {
   version: 1;
-  initialNodes: number;
-  boardSize: number;
   firstPlayer: Player;
-  moves: Move[];
   cursor: number;
 }
 
@@ -38,7 +36,7 @@ export class History {
 
   static from(record: GameRecord): History {
     const history = new History(record.initialNodes, record.boardSize, record.firstPlayer);
-    history.moves = record.moves.map(cloneMove);
+    history.moves = record.moves.map(fromFixtureMove);
     history.cursor = Math.min(Math.max(record.cursor, 0), history.moves.length);
     return history;
   }
@@ -85,7 +83,7 @@ export class History {
       initialNodes: this.initialNodes,
       boardSize: this.boardSize,
       firstPlayer: this.firstPlayer,
-      moves: this.moves.map(cloneMove),
+      moves: this.moves.map(toFixtureMove),
       cursor: this.cursor,
     };
   }
@@ -97,6 +95,24 @@ function cloneMove(move: Move): Move {
     toNode: move.toNode,
     polyline: move.polyline.map((p) => ({ x: p.x, y: p.y })),
     newNodePos: { x: move.newNodePos.x, y: move.newNodePos.y },
+  };
+}
+
+function toFixtureMove(move: Move): FixtureMove {
+  return {
+    from: move.fromNode,
+    to: move.toNode,
+    polyline: move.polyline.map((p): [number, number] => [p.x, p.y]),
+    newNode: [move.newNodePos.x, move.newNodePos.y],
+  };
+}
+
+function fromFixtureMove(move: FixtureMove): Move {
+  return {
+    fromNode: move.from,
+    toNode: move.to,
+    polyline: move.polyline.map(([x, y]) => ({ x, y })),
+    newNodePos: { x: move.newNode[0], y: move.newNode[1] },
   };
 }
 
@@ -136,7 +152,7 @@ function asRecord(value: unknown): GameRecord | null {
   if (v.firstPlayer !== "human" && v.firstPlayer !== "ai") return null;
   if (!Array.isArray(v.moves) || v.moves.length > 3 * v.initialNodes) return null;
   const nodes = v.initialNodes;
-  if (!v.moves.every((m, i) => isMove(m) && m.fromNode < nodes + i && m.toNode < nodes + i)) {
+  if (!v.moves.every((m, i) => isMove(m) && m.from < nodes + i && m.to < nodes + i)) {
     return null;
   }
   if (v.cursor > v.moves.length) return null;
@@ -154,22 +170,25 @@ function isCount(value: unknown): value is number {
   return typeof value === "number" && Number.isInteger(value) && value >= 0;
 }
 
-function isPoint(value: unknown): value is Point {
-  if (typeof value !== "object" || value === null) return false;
-  const p = value as Record<string, unknown>;
-  return Number.isFinite(p.x) && Number.isFinite(p.y);
+function isPair(value: unknown): value is [number, number] {
+  return (
+    Array.isArray(value) &&
+    value.length === 2 &&
+    Number.isFinite(value[0]) &&
+    Number.isFinite(value[1])
+  );
 }
 
-function isMove(value: unknown): value is Move {
+function isMove(value: unknown): value is FixtureMove {
   if (typeof value !== "object" || value === null) return false;
   const m = value as Record<string, unknown>;
   return (
-    isCount(m.fromNode) &&
-    isCount(m.toNode) &&
+    isCount(m.from) &&
+    isCount(m.to) &&
     Array.isArray(m.polyline) &&
     m.polyline.length >= 2 &&
-    m.polyline.every(isPoint) &&
-    isPoint(m.newNodePos)
+    m.polyline.every(isPair) &&
+    isPair(m.newNode)
   );
 }
 
@@ -187,7 +206,7 @@ export function encodeRecord(record: GameRecord): string {
   out.u16(record.moves.length);
   out.u16(record.cursor);
   const tolerance = (LINK_TOLERANCE * record.boardSize) / 1000;
-  for (const move of record.moves) {
+  for (const move of record.moves.map(fromFixtureMove)) {
     const polyline = simplify(move.polyline, tolerance);
     out.u16(move.fromNode);
     out.u16(move.toNode);
@@ -251,7 +270,7 @@ export function decodeRecord(payload: string): GameRecord | null {
       initialNodes,
       boardSize,
       firstPlayer: flags & 1 ? "ai" : "human",
-      moves,
+      moves: moves.map(toFixtureMove),
       cursor,
     });
   } catch {
@@ -317,10 +336,10 @@ export function sameGame(a: GameRecord, b: GameRecord): boolean {
   return true;
 }
 
-function moveKey(move: Move | undefined): string {
+function moveKey(move: FixtureMove | undefined): string {
   if (!move) return "";
-  const n = quantize(move.newNodePos);
-  return [move.fromNode, move.toNode, n.x, n.y].join(",");
+  const n = quantize({ x: move.newNode[0], y: move.newNode[1] });
+  return [move.from, move.to, n.x, n.y].join(",");
 }
 
 function quantize(point: Point): { x: number; y: number } {

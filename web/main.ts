@@ -76,6 +76,9 @@ const state: GameState = watched({ ...freshBoard(), lastInputWasTouch: false }, 
 let timeline = new History(DEFAULT_NODES, view.boardSize);
 // A page opened from a share link reviews that game and leaves the saved one alone.
 let shared = false;
+// A review the player opened, a link, or a finished game stays a review
+// until Undo; one entered by stepping onto an AI-to-move board does not.
+let pinnedReview = false;
 let lastNodeCount = DEFAULT_NODES;
 let thinkingInterval: ReturnType<typeof setInterval> | null = null;
 // Bumped whenever the table is reset so replies and animations from the
@@ -502,13 +505,17 @@ async function seek(target: number): Promise<boolean> {
 // the list no longer has is taken back.
 async function resyncCursor(epoch: number): Promise<void> {
   let snapshot = await engine.call("snapshot");
-  while (epoch === gameEpoch && snapshot.lines.length > timeline.moves.length) {
-    if (!(await engine.call("undo"))) break;
-    snapshot = await engine.call("snapshot");
+  try {
+    while (epoch === gameEpoch && snapshot.lines.length > timeline.moves.length) {
+      if (!(await engine.call("undo"))) break;
+      snapshot = await engine.call("snapshot");
+    }
+  } finally {
+    if (epoch === gameEpoch) {
+      timeline.cursor = Math.min(snapshot.lines.length, timeline.moves.length);
+      applySnapshot(snapshot);
+    }
   }
-  if (epoch !== gameEpoch) return;
-  timeline.cursor = Math.min(snapshot.lines.length, timeline.moves.length);
-  applySnapshot(snapshot);
 }
 
 function messageOf(error: unknown): string {
@@ -532,7 +539,7 @@ function stepTarget(direction: -1 | 1): number {
 // AI-to-move board, enters review rather than letting the AI replace the
 // moves ahead; reaching the end again makes it live.
 function settleAfterSeek(): void {
-  if (!shared && !state.gameOver) {
+  if (!pinnedReview && !state.gameOver) {
     state.reviewing = state.currentPlayer === "ai" && !timeline.atEnd;
   }
   if (state.reviewing) {
@@ -580,6 +587,7 @@ async function undoMove(): Promise<void> {
   const wasReviewing = state.reviewing;
   state.reviewing = false;
   shared = false;
+  pinnedReview = false;
   if (wasReviewing && !state.gameOver && state.currentPlayer === "human") {
     persist();
     setStatus("Your turn!");
@@ -635,6 +643,7 @@ async function newGame(nodeCount: number, fresh = true): Promise<void> {
   lastNodeCount = nodeCount;
   resetTable();
   shared = false;
+  pinnedReview = false;
   if (fresh) {
     dropHash();
     clearSaved();
@@ -661,6 +670,7 @@ async function restore(record: GameRecord, fromLink: boolean): Promise<void> {
   resetTable();
   const epoch = gameEpoch;
   shared = fromLink;
+  pinnedReview = fromLink;
   lastNodeCount = record.initialNodes;
   timeline = History.from(record);
   if (fromLink) timeline.cursor = timeline.moves.length;
@@ -673,7 +683,10 @@ async function restore(record: GameRecord, fromLink: boolean): Promise<void> {
   state.reviewing = fromLink;
   const reached = await seek(target);
   if (epoch !== gameEpoch) return;
-  if (state.gameOver) state.reviewing = true;
+  if (state.gameOver) {
+    state.reviewing = true;
+    pinnedReview = true;
+  }
   if (!reached) {
     if (state.currentPlayer === "ai" && !state.gameOver) state.reviewing = true;
     return;
@@ -752,6 +765,7 @@ function wireInput(): void {
   byId("confirmBtn").addEventListener("click", () => void confirmMove());
   byId("reviewBtn").addEventListener("click", () => {
     state.reviewing = true;
+    pinnedReview = true;
     closeModal();
     updateControls();
   });
@@ -773,6 +787,6 @@ view.onChange(() => {
 });
 trackCanvasSize(canvas, view, invalidate);
 wireInput();
-wireRecording(state, BOARD_SIZE);
+wireRecording(state, () => timeline.boardSize);
 requestAnimationFrame(frame);
 void boot();
