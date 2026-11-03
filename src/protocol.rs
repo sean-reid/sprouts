@@ -250,9 +250,15 @@ fn topology(state: &GameState, mov: &types::Move) -> Result<face::Move, Rejectio
 }
 
 pub fn apply(state: &mut GameState, mov: Move) -> Outcome {
+    apply_drawn(state, mov, true)
+}
+
+/// Applies a drawn move, asking the router whether it redraws the line
+/// only when `with_topology` is set.
+fn apply_drawn(state: &mut GameState, mov: Move, with_topology: bool) -> Outcome {
     let mov = mov.by(state.current_player, state.board_size);
     let applied = topology(state, &mov).and_then(|face| {
-        let topology = redraws(state, &face, &mov).then(|| face.into());
+        let topology = (with_topology && redraws(state, &face, &mov)).then(|| face.into());
         state.apply_move(mov).map(|()| topology)
     });
     match applied {
@@ -264,9 +270,53 @@ pub fn apply(state: &mut GameState, mov: Move) -> Outcome {
     }
 }
 
-/// Whether the router, given the face move, draws the line of `mov`: the
-/// flattenings stay within the fit tolerance of each other and the node
-/// lands in the same place.
+/// A move as a share link carries it: drawn, or routed from its face move
+/// with its node.
+#[derive(Debug, Clone, Deserialize, Tsify)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum LinkMove {
+    Drawn { mov: Move },
+    Routed { face: FaceMove, at: Point },
+}
+
+/// A game as a share link carries it, for replaying before it is shared.
+#[derive(Debug, Clone, Deserialize, Tsify)]
+#[serde(rename_all = "camelCase")]
+pub struct Rehearsal {
+    pub initial_nodes: usize,
+    pub board_size: usize,
+    pub first_player: Player,
+    pub nodes: Option<Vec<Point>>,
+    pub moves: Vec<LinkMove>,
+}
+
+/// Replays a link on a fresh board the way a visitor's engine will, and
+/// names the first move that is refused, if any. Drawn moves arrive with
+/// the link's rounded geometry, so a routed move after them meets a board
+/// that differs a little from the one it was drawn on.
+pub fn rehearse(plan: Rehearsal) -> Result<Option<usize>, String> {
+    let mut state = start(
+        plan.initial_nodes,
+        plan.board_size,
+        plan.first_player,
+        plan.nodes,
+    )?;
+    for (index, mov) in plan.moves.into_iter().enumerate() {
+        let outcome = match mov {
+            LinkMove::Drawn { mov } => apply_drawn(&mut state, mov, false),
+            LinkMove::Routed { face, at } => apply_face_move(&mut state, face, at),
+        };
+        if matches!(outcome, Outcome::Rejected { .. }) {
+            return Ok(Some(index));
+        }
+    }
+    Ok(None)
+}
+
+/// Whether the router, given the face move, draws the curve of `mov`: the
+/// flattenings stay within the fit tolerance of each other. The node is
+/// carried with the move, since the best spot on a curve can jump far for
+/// a small change in it.
 fn redraws(state: &GameState, face: &face::Move, mov: &types::Move) -> bool {
     let tolerance = curve::tolerance(state.board_size);
     let Ok(drawn) = route::route(state, face) else {
@@ -279,21 +329,30 @@ fn redraws(state: &GameState, face: &face::Move, mov: &types::Move) -> bool {
             .iter()
             .all(|p| geometry::closest_point_on_polyline(of, p).1 <= tolerance)
     };
-    drawn.new_node_pos.distance_to(&mov.new_node_pos) <= tolerance
-        && within(&ours, &theirs)
-        && within(&theirs, &ours)
+    within(&ours, &theirs) && within(&theirs, &ours)
 }
 
-/// Draws a move named by its topology with the router and applies it, as
-/// the player to move. The line is router output, so it is its own
-/// topology.
-pub fn apply_face_move(state: &mut GameState, mov: FaceMove) -> Outcome {
+/// Draws a move named by its topology with the router, puts its node at
+/// the point of the curve nearest `at`, and applies it as the player to
+/// move. The line is router output, so it is its own topology.
+pub fn apply_face_move(state: &mut GameState, mov: FaceMove, at: Point) -> Outcome {
     let listed: face::Move = mov.clone().into();
     let drawn = state
         .face
         .check(&listed)
         .map_err(|why| illegal(state, &listed, why))
-        .and_then(|()| route::route(state, &listed).map_err(|why| unroutable(&listed, why)));
+        .and_then(|()| route::route(state, &listed).map_err(|why| unroutable(&listed, why)))
+        .and_then(|routed| {
+            let line = types::Move::from_segments(
+                routed.from_node,
+                routed.to_node,
+                routed.polyline,
+                routed.segments,
+                at,
+                routed.player,
+            );
+            topology(state, &line).map(|_| line)
+        });
     match drawn.and_then(|line| state.apply_move(line)) {
         Ok(()) => Outcome::Applied {
             snapshot: snapshot(state),
@@ -618,7 +677,7 @@ mod tests {
         let Outcome::Applied {
             snapshot: redrawn,
             topology: own,
-        } = apply_face_move(&mut again, face.clone())
+        } = apply_face_move(&mut again, face.clone(), mov.new_node_pos)
         else {
             panic!("the topology did not route");
         };
@@ -665,6 +724,64 @@ mod tests {
         assert_eq!(wire["topology"], json!(null));
     }
 
+    /// A link of a human chord and the AI's routed reply replays whole; the
+    /// same link with the reply's face move pointed at a spoke that does
+    /// not exist stops at the reply.
+    #[test]
+    fn a_rehearsal_names_the_first_move_a_fresh_engine_refuses() {
+        let mut state = start(4, 1000, Player::Human, None).unwrap();
+        let a = state.nodes[0].position;
+        let b = state.nodes[1].position;
+        let polyline = straight(a, b, 10);
+        let chord = Move {
+            from_node: 0,
+            to_node: 1,
+            new_node_pos: polyline[5],
+            polyline,
+        };
+        assert!(matches!(
+            apply(&mut state, chord.clone()),
+            Outcome::Applied { .. }
+        ));
+        let AiReply::Move { mov: reply, .. } = ai_move(&mut state) else {
+            panic!("the AI has a reply");
+        };
+        let Outcome::Applied { topology, .. } = apply(&mut state, reply.clone()) else {
+            panic!("the AI's own move was rejected");
+        };
+        let face = topology.expect("a routed line reports its topology");
+        let plan = |face: FaceMove| Rehearsal {
+            initial_nodes: 4,
+            board_size: 1000,
+            first_player: Player::Human,
+            nodes: None,
+            moves: vec![
+                LinkMove::Drawn { mov: chord.clone() },
+                LinkMove::Routed {
+                    face,
+                    at: reply.new_node_pos,
+                },
+            ],
+        };
+        assert_eq!(rehearse(plan(face.clone())), Ok(None));
+        let wrong = FaceMove {
+            at_a: Some(1),
+            ..face.clone()
+        };
+        assert_eq!(rehearse(plan(wrong)), Ok(Some(1)));
+        let wire = serde_json::json!({
+            "initialNodes": 4, "boardSize": 1000, "firstPlayer": "human", "nodes": null,
+            "moves": [{ "kind": "drawn", "mov": chord }],
+        });
+        let parsed: Rehearsal = serde_json::from_value(wire).unwrap();
+        assert_eq!(rehearse(parsed), Ok(None));
+        assert!(rehearse(Rehearsal {
+            nodes: Some(vec![a]),
+            ..plan(face)
+        })
+        .is_err());
+    }
+
     #[test]
     fn a_face_move_that_does_not_fit_is_rejected_without_a_panic() {
         let mut state = GameState::new(4);
@@ -675,12 +792,13 @@ mod tests {
             at_b: None,
             enclosed: Vec::new(),
         };
-        let missing = apply_face_move(&mut state, face(9, None, 0));
+        let at = state.nodes[0].position;
+        let missing = apply_face_move(&mut state, face(9, None, 0), at);
         let Outcome::Rejected { rejection } = missing else {
             panic!("node 9 does not exist");
         };
         assert_eq!(rejection.kind, validation::RejectionKind::MissingNode);
-        let Outcome::Rejected { rejection } = apply_face_move(&mut state, face(0, Some(3), 1))
+        let Outcome::Rejected { rejection } = apply_face_move(&mut state, face(0, Some(3), 1), at)
         else {
             panic!("node 0 has no spoke 3");
         };

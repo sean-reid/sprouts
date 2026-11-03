@@ -4,17 +4,20 @@ import { describe, expect, it } from "vitest";
 import type { Cubic, FaceMove, Line, Point } from "../../pkg/sprouts";
 import {
   decodeRecord,
+  demote,
   encodeRecord,
   hasStroke,
   History,
   LINK_QUANTUM,
   loadSaved,
   pendingFace,
+  rehearsal,
   sameGame,
   STROKE_TOLERANCE,
   type GameRecord,
   type RecordedMove,
   type RecordMove,
+  type TopologyMove,
 } from "../../web/history";
 import { circleLayout, openingLayout } from "../../web/layout";
 import type { Fixture, FixtureMove } from "../../web/record";
@@ -35,8 +38,9 @@ const VERSION_2_PAYLOAD = "AgAEAOgDAgACAAABAALYCegH7wHwAXh3AgAAA_gF6AeaAyVGJkUl"
 const VERSION_3_PAYLOAD =
   "AwIEAOgDAgACANgJ6AfvAfAB7wHvAfAB7wEAAQAC2AnoB-8B8AF4dwIAAAP4BegHmgMlRiZFJQ";
 // A version 4 link of two moves: a stroke from 0 to 1, then a loop on 2
-// carried as its face move, leaving spoke 3 and enclosing nodes 0 and 4.
-const VERSION_4_PAYLOAD = "BAAEAOgDAgACAAABAALYBOgHoAYAjwMAAgICBAQCAAQ";
+// carried as its face move, leaving spoke 3 and enclosing nodes 0 and 4,
+// with its node at (620, 500).
+const VERSION_4_PAYLOAD = "BAAEAOgDAgACAAABAALYBOgHoAYAjwMAAgICBAQCAATYCegH";
 const LOOP_FACE: FaceMove = { a: 2, atA: 3, b: 2, atB: 3, enclosed: [0, 4] };
 
 function bytesOf(payload: string): Uint8Array {
@@ -230,7 +234,7 @@ describe("the share link codec", () => {
     };
     const payload = encodeRecord(game(move));
     expect(bytesOf(payload)[SHAPE_OFFSET]).toBe(SHAPE_FACE);
-    expect(payload.length).toBeLessThanOrEqual(24);
+    expect(payload.length).toBeLessThanOrEqual(30);
     expect(faceOf(decodeRecord(payload)?.moves[0])).toEqual(move.topology);
   });
 
@@ -264,10 +268,11 @@ describe("the share link codec", () => {
 
   it("refuses a face move that names what does not exist yet", () => {
     const bytes = bytesOf(VERSION_4_PAYLOAD);
-    // The second move's eight bytes: from, to, shape, two spokes one above
-    // their half-edge ids, the count and two ids. One move before it made
+    // The second move: from, to, shape, two spokes one above
+    // their half-edge ids, the count, two ids and the node as four bytes.
+    // One move before it made
     // four half-edges and one node.
-    const second = bytes.length - 8;
+    const second = bytes.length - 12;
     expect(bytes[second + 2]).toBe(SHAPE_FACE);
     expect(bytes[second + 3]).toBe(4);
     const lateSpoke = bytes.slice();
@@ -336,18 +341,18 @@ describe("sameGame", () => {
     expect(sameGame(other, linked)).toBe(false);
   });
 
-  it("matches a move carried as topology by its endpoints", () => {
-    const topology: GameRecord = {
-      ...linked,
-      moves: linked.moves.map((m) => ({
-        from: m.from,
-        to: m.to,
-        face: { a: m.from, atA: undefined, b: m.to, atB: undefined, enclosed: [] },
-      })),
-    };
-    expect(sameGame(linked, topology)).toBe(true);
-    const other = { ...topology, moves: topology.moves.map((m) => ({ ...m, to: m.to + 1 })) };
-    expect(sameGame(linked, other)).toBe(false);
+  it("matches a move carried as topology by its endpoints and node", () => {
+    const faces: TopologyMove[] = linked.moves.map(stroke).map((m) => ({
+      from: m.from,
+      to: m.to,
+      face: { a: m.from, atA: undefined, b: m.to, atB: undefined, enclosed: [] },
+      node: [m.newNode[0] + 0.2, m.newNode[1]],
+    }));
+    expect(sameGame(linked, { ...linked, moves: faces })).toBe(true);
+    const other = faces.map((m) => ({ ...m, to: m.to + 1 }));
+    expect(sameGame(linked, { ...linked, moves: other })).toBe(false);
+    const moved = faces.map((m): TopologyMove => ({ ...m, node: [m.node[0] + 2, m.node[1]] }));
+    expect(sameGame(linked, { ...linked, moves: moved })).toBe(false);
   });
 });
 
@@ -361,8 +366,13 @@ describe("a move that arrives as topology", () => {
     if (!loop) throw new Error("no second move");
     expect(pendingFace(history.moves[0]!)).toBeUndefined();
     expect(pendingFace(loop)).toEqual(LOOP_FACE);
-    expect(history.positionOf(5)).toBeNull();
-    expect(history.record().moves[1]).toEqual({ from: 2, to: 2, face: LOOP_FACE });
+    expect(history.positionOf(5)).toEqual(at(620, 500));
+    expect(history.record().moves[1]).toEqual({
+      from: 2,
+      to: 2,
+      face: LOOP_FACE,
+      node: [620, 500],
+    });
     expect(encodeRecord(history)).toBe(VERSION_4_PAYLOAD);
 
     const line: Line = {
@@ -381,6 +391,25 @@ describe("a move that arrives as topology", () => {
     expect(saved.polyline).toHaveLength(4);
     expect(saved.newNode).toEqual([620, 500]);
     expect(encodeRecord(history)).toBe(VERSION_4_PAYLOAD);
+  });
+
+  it("reads the link back as a rehearsal and demotes a drawn move to geometry", () => {
+    const history = History.from(record);
+    const plan = rehearsal(history);
+    expect(plan?.moves.map((m) => m.kind)).toEqual(["drawn", "routed"]);
+    expect(plan?.moves[1]).toEqual({ kind: "routed", face: LOOP_FACE, at: at(620, 500) });
+    expect(demote(history, 1)).toBe(false);
+    expect(demote(history, 0)).toBe(false);
+
+    const drawnWithTopology = new History(4, 1000);
+    drawnWithTopology.push(
+      { fromNode: 0, toNode: 1, polyline: [at(300, 500), at(700, 500)], newNodePos: at(500, 500) },
+      { a: 0, atA: undefined, b: 1, atB: undefined, enclosed: [] },
+    );
+    expect(bytesOf(encodeRecord(drawnWithTopology))[SHAPE_OFFSET]).toBe(SHAPE_FACE);
+    expect(demote(drawnWithTopology, 0)).toBe(true);
+    expect(bytesOf(encodeRecord(drawnWithTopology))[SHAPE_OFFSET]).toBe(SHAPE_STROKE);
+    expect(rehearsal(drawnWithTopology)?.moves[0]?.kind).toBe("drawn");
   });
 
   it("takes the topology the engine reports for a drawn move", () => {

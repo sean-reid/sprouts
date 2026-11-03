@@ -4,11 +4,13 @@ import { Dialog } from "./dialog";
 import { Engine, StaleRequest } from "./engine";
 import {
   clearSaved,
+  demote,
   dropHash,
   History,
   loadSaved,
   pendingFace,
   recordFromHash,
+  rehearsal,
   sameGame,
   save,
   shareUrl,
@@ -674,7 +676,7 @@ async function seek(target: number): Promise<boolean> {
       try {
         const face = pendingFace(move);
         outcome = face
-          ? await engine.call("applyFaceMove", face)
+          ? await engine.call("applyFaceMove", face, move.newNodePos)
           : await engine.call("applyMove", toMove(move));
       } catch (error) {
         if (epoch === gameEpoch) setStatus("Replay failed: " + describe(error), "lose");
@@ -800,7 +802,25 @@ async function undoMove(): Promise<void> {
   }
 }
 
+// A move the visitor's engine would refuse as topology goes as geometry
+// instead; the link is replayed as decoded until every move applies or a
+// drawn move is the one refused.
+async function rehearseLink(): Promise<void> {
+  for (;;) {
+    const plan = rehearsal(timeline);
+    if (!plan) return;
+    const refused = await engine.call("rehearse", plan);
+    if (refused === undefined || !demote(timeline, refused)) return;
+  }
+}
+
 async function share(): Promise<void> {
+  try {
+    await rehearseLink();
+  } catch (error) {
+    setStatus("Could not check the link: " + describe(error), "lose");
+    return;
+  }
   const url = shareUrl(timeline);
   window.history.replaceState(null, "", url);
   try {

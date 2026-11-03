@@ -1,13 +1,24 @@
-import type { Cubic, FaceMove, Line, Move, Outcome, Player, Point } from "../pkg/sprouts";
+import type {
+  Cubic,
+  FaceMove,
+  Line,
+  Move,
+  Outcome,
+  Player,
+  Point,
+  Rehearsal,
+} from "../pkg/sprouts";
 import { circleLayout, openingLayout, sameLayout, type Position } from "./layout";
 import type { Fixture, FixtureMove } from "./record";
 import { enclosedCount, shapeText } from "./shape";
 
-// A move a link carried as its face move alone; the engine draws it on load.
+// A move a link carried as its face move and node; the engine draws the
+// curve on load.
 export interface TopologyMove {
   from: number;
   to: number;
   face: FaceMove;
+  node: [number, number];
 }
 
 export type RecordMove = FixtureMove | TopologyMove;
@@ -175,7 +186,7 @@ export class History {
       return start ? { x: start[0], y: start[1] } : null;
     }
     const move = this.moves[id - this.initialNodes];
-    return move && drawn(move) ? move.newNodePos : null;
+    return move?.newNodePos ?? null;
   }
 
   label(index: number): string {
@@ -245,7 +256,12 @@ function toRecordMove(move: RecordedMove): RecordMove {
       newNode: [move.newNodePos.x, move.newNodePos.y],
     };
   }
-  return { from: move.fromNode, to: move.toNode, face: move.topology };
+  return {
+    from: move.fromNode,
+    to: move.toNode,
+    face: move.topology,
+    node: [move.newNodePos.x, move.newNodePos.y],
+  };
 }
 
 function fromRecordMove(move: RecordMove): RecordedMove {
@@ -261,7 +277,7 @@ function fromRecordMove(move: RecordMove): RecordedMove {
     fromNode: move.from,
     toNode: move.to,
     polyline: [],
-    newNodePos: { x: 0, y: 0 },
+    newNodePos: { x: move.node[0], y: move.node[1] },
     topology: move.face,
   };
 }
@@ -345,7 +361,7 @@ function isRecordMove(value: unknown, nodes: number, halfEdges: number): value i
   if (typeof value !== "object" || value === null) return false;
   const m = value as Record<string, unknown>;
   if (!isCount(m.from) || !isCount(m.to) || m.from >= nodes || m.to >= nodes) return false;
-  if ("face" in m) return isFace(m.face, m.from, m.to, nodes, halfEdges);
+  if ("face" in m) return isPair(m.node) && isFace(m.face, m.from, m.to, nodes, halfEdges);
   return (
     Array.isArray(m.polyline) &&
     m.polyline.length >= 2 &&
@@ -389,8 +405,9 @@ function scaleOf(boardSize: number): number {
 // point in link quanta, starting at the origin; a stroke counts its
 // points, cubics count segments and carry the first start then the other
 // three control points of each. Shape 2 carries the face move: the spoke
-// at each end as a varint one above the half-edge id with 0 for none, then
-// the enclosed node ids as a varint count and varints. A move travels as
+// at each end as a varint one above the half-edge id with 0 for none, the
+// enclosed node ids as a varint count and varints, then the new node as a
+// point. A move travels as
 // whichever encodes shorter. A version 1 link has from, to and point
 // count as u16, the first point as two u16 tenths, later points as zigzag
 // varint deltas in tenths, and the new node as two u16 tenths.
@@ -416,7 +433,7 @@ export function encodeRecord(history: History): string {
   for (const move of history.moves) {
     out.varint(move.fromNode);
     out.varint(move.toNode);
-    const shapes = [encodeFace(move), encodeCubics(move, scale), encodeStroke(move, scale)];
+    const shapes = [encodeFace(move, scale), encodeCubics(move, scale), encodeStroke(move, scale)];
     const shortest = shapes.reduce((best, shape) =>
       shape && (!best || shape.length < best.length) ? shape : best,
     );
@@ -426,7 +443,7 @@ export function encodeRecord(history: History): string {
   return base64url(out.bytes());
 }
 
-function encodeFace(move: RecordedMove): Uint8Array | null {
+function encodeFace(move: RecordedMove, scale: number): Uint8Array | null {
   const face = move.topology;
   if (!face || face.a !== move.fromNode || face.b !== move.toNode) return null;
   const out = new ByteWriter();
@@ -435,6 +452,7 @@ function encodeFace(move: RecordedMove): Uint8Array | null {
   out.varint(face.atB === undefined ? 0 : face.atB + 1);
   out.varint(face.enclosed.length);
   for (const id of face.enclosed) out.varint(id);
+  deltaWriter(out, LINK_QUANTUM * scale)(move.newNodePos);
   return out.bytes();
 }
 
@@ -535,7 +553,8 @@ function readCurveMove(reader: ByteReader, boardSize: number, faces: boolean): R
     const atA = spoke();
     const atB = spoke();
     const enclosed = Array.from({ length: reader.varint() }, () => reader.varint());
-    return { from, to, face: { a: from, atA, b: to, atB, enclosed } };
+    const node = deltaReader(reader, LINK_QUANTUM * scaleOf(boardSize))();
+    return { from, to, face: { a: from, atA, b: to, atB, enclosed }, node: [node.x, node.y] };
   }
   const count = reader.varint();
   const scale = scaleOf(boardSize);
@@ -628,6 +647,32 @@ function pointAt(c: Cubic, t: number): Point {
   };
 }
 
+// The link's own reading of the game, for replaying on a fresh board the
+// way a visitor's engine will.
+export function rehearsal(history: History): Rehearsal | null {
+  const record = decodeRecord(encodeRecord(history));
+  if (!record) return null;
+  return {
+    initialNodes: record.initialNodes,
+    boardSize: record.boardSize,
+    firstPlayer: record.firstPlayer,
+    nodes: record.nodes?.map(([x, y]) => ({ x, y })),
+    moves: record.moves.map((move) =>
+      hasStroke(move)
+        ? { kind: "drawn", mov: fromRecordMove(move) }
+        : { kind: "routed", face: move.face, at: { x: move.node[0], y: move.node[1] } },
+    ),
+  };
+}
+
+// Sends a move the visitor's engine refused as geometry from now on.
+export function demote(history: History, index: number): boolean {
+  const move = history.moves[index];
+  if (!move?.topology || !drawn(move)) return false;
+  delete move.topology;
+  return true;
+}
+
 export function shareUrl(history: History): string {
   return (
     location.origin + location.pathname + location.search + HASH_PREFIX + encodeRecord(history)
@@ -678,8 +723,7 @@ function distanceToSegment(p: Point, a: Point, b: Point): number {
 // True when one game is the other played further, so a link to my own game
 // reopens the live game rather than a review of it. Endpoints and the new
 // node identify a move; a link of either version rounds the node by less
-// than one quantum. A move carried as topology has no node yet, so its
-// endpoints alone have to do.
+// than one quantum.
 export function sameGame(a: GameRecord, b: GameRecord): boolean {
   if (a.initialNodes !== b.initialNodes || a.boardSize !== b.boardSize) return false;
   if (a.firstPlayer !== b.firstPlayer) return false;
@@ -695,8 +739,13 @@ export function sameGame(a: GameRecord, b: GameRecord): boolean {
 function sameMove(a: RecordMove | undefined, b: RecordMove | undefined, quantum: number): boolean {
   if (!a || !b) return false;
   if (a.from !== b.from || a.to !== b.to) return false;
-  if (!hasStroke(a) || !hasStroke(b)) return true;
-  return Math.hypot(a.newNode[0] - b.newNode[0], a.newNode[1] - b.newNode[1]) <= quantum;
+  const [ax, ay] = nodeOf(a);
+  const [bx, by] = nodeOf(b);
+  return Math.hypot(ax - bx, ay - by) <= quantum;
+}
+
+function nodeOf(move: RecordMove): [number, number] {
+  return hasStroke(move) ? move.newNode : move.node;
 }
 
 function zigzag(n: number): number {

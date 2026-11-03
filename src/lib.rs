@@ -16,10 +16,10 @@ mod validation;
 
 use protocol::{
     AiReply, AutoPlacement, AutoPlacementQuery, Curve, FaceMove, FitQuery, Layout, Move, MovesFrom,
-    Outcome, Placement, PlacementQuery, RouteReply, Snapshot,
+    Outcome, Placement, PlacementQuery, Rehearsal, RouteReply, Snapshot,
 };
 use tsify::{Ts, Tsify};
-use types::{GameState, Player};
+use types::{GameState, Player, Point};
 use wasm_bindgen::prelude::*;
 
 #[wasm_bindgen]
@@ -52,8 +52,17 @@ impl SproutsGame {
     }
 
     #[wasm_bindgen(js_name = applyFaceMove)]
-    pub fn apply_face_move(&mut self, mov: Ts<FaceMove>) -> Result<Ts<Outcome>, JsError> {
-        Ok(protocol::apply_face_move(&mut self.state, mov.to_rust()?).into_ts()?)
+    pub fn apply_face_move(
+        &mut self,
+        mov: Ts<FaceMove>,
+        at: Ts<Point>,
+    ) -> Result<Ts<Outcome>, JsError> {
+        Ok(protocol::apply_face_move(&mut self.state, mov.to_rust()?, at.to_rust()?).into_ts()?)
+    }
+
+    /// The index of the first move of a link a fresh engine refuses, if any.
+    pub fn rehearse(&self, plan: Ts<Rehearsal>) -> Result<Option<usize>, JsError> {
+        protocol::rehearse(plan.to_rust()?).map_err(|e| JsError::new(&e))
     }
 
     pub fn undo(&mut self) -> bool {
