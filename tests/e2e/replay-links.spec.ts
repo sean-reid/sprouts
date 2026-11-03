@@ -10,6 +10,7 @@ import {
   HASH_PREFIX,
   recordNodesOnScreen,
   ringSamplesAround,
+  rowIds,
   savedRecord,
   share,
   shot,
@@ -28,12 +29,14 @@ const fixtures = [
 ];
 
 // Games played on the page against the current AI, the human strokes
-// wobbly, so every AI move travels as its face move and every human move
-// as geometry. Payload budgets in characters: measured at 231 and 440 on
-// the desktop project, with headroom.
-const routed: [string, number][] = [
-  ["fixtures/saved/eight-moves-4n-1000.json", 250],
-  ["fixtures/saved/ten-moves-9n-1000.json", 480],
+// wobbly, so AI moves travel as face moves and human moves as geometry.
+// Per game: the payload budget in characters (231 and 440 measured, with
+// headroom) and how many of the AI's moves go as topology; the nine-node
+// game has one the visitor's engine cannot route, which the share's
+// rehearsal sends as geometry instead.
+const routed: [string, number, number][] = [
+  ["fixtures/saved/eight-moves-4n-1000.json", 250, 4],
+  ["fixtures/saved/ten-moves-9n-1000.json", 480, 4],
 ];
 
 const entries = (page: Page) => page.locator("#moveList li");
@@ -79,21 +82,26 @@ for (const file of fixtures) {
       new RegExp(`^Reviewing: move ${total} of ${total}\\.`),
       { timeout: 240_000 },
     );
-    // The visitor lands on the last move, which the board points out for
-    // two seconds from the end of the seek.
-    const last = record.moves[total - 1]!;
+    // The visitor lands on the last move. Pointing at its row keeps the
+    // board pointing the move out, so the rings are read off the move the
+    // page marks current, at the node ids its row names.
+    await expect(entries(other)).toHaveCount(total);
+    const current = other.locator("#moveList [aria-current]");
+    const index = Number(await current.getAttribute("data-move"));
+    expect(index).toBe(total - 1);
+    await entries(other).nth(index).locator("button").hover();
+    const [from, to] = await rowIds(other, index);
     const nodes = await recordNodesOnScreen(other, record);
-    for (const id of [last.from, last.to]) {
+    for (const id of [from, to]) {
       await expect
         .poll(() => ringSamplesAround(other, nodes[id]!, 14, HIGHLIGHT_COLOR))
         .toBeGreaterThanOrEqual(8);
     }
-    await expect(entries(other)).toHaveCount(total);
     await visitor.close();
   });
 }
 
-for (const [file, budget] of routed) {
+for (const [file, budget, topologyMoves] of routed) {
   const name = basename(file, ".json");
   test(`${name} shares its AI moves as topology and rebuilds the same board`, async ({
     page,
@@ -105,23 +113,17 @@ for (const [file, budget] of routed) {
     const before = await strokeCells(page);
     const { url, payload } = await share(page, `${name}-payload-chars`);
     expect(payload).toBeLessThan(budget);
+    await expect(page.locator("#status")).not.toHaveText(/replay may stop/);
     await shot(page, `${name}-source`);
 
     const linked = decodeRecord(url.slice(url.indexOf(HASH_PREFIX) + HASH_PREFIX.length));
     if (!linked) throw new Error("the link does not decode");
     expect(linked.moves).toHaveLength(total);
-    // The human moves first, and strokes stay geometry. AI lines travel as
-    // topology unless the share's rehearsal found the visitor's engine
-    // would refuse one.
+    // The human moves first, and strokes stay geometry.
     const humanMoves = linked.moves.filter((_, i) => i % 2 === 0);
     expect(humanMoves.every(hasStroke)).toBe(true);
     const aiMoves = linked.moves.filter((_, i) => i % 2 === 1);
-    const asTopology = aiMoves.filter((move) => !hasStroke(move)).length;
-    test.info().annotations.push({
-      type: `${name}-topology-moves`,
-      description: `${asTopology} of ${aiMoves.length}`,
-    });
-    expect(asTopology).toBeGreaterThan(0);
+    expect(aiMoves.filter((move) => !hasStroke(move))).toHaveLength(topologyMoves);
 
     const visitor = await browser.newContext(visitorOptions());
     const other = await visitor.newPage();
@@ -146,3 +148,17 @@ for (const [file, budget] of routed) {
     await visitor.close();
   });
 }
+
+// A version 4 link of two moves, the second a face move, with its router
+// byte set to a version this page does not have.
+const OTHER_ROUTER_LINK = "#game=BAIABADoAwIAAgAAAQAC2AToB6AGAI8DAAICAgQEAgAE2AnoBw";
+
+test("a link from another router opens a fresh game and says so", async ({ page }) => {
+  await page.goto("/" + OTHER_ROUTER_LINK);
+  await expect(page.locator("#status")).toHaveText(/another version of the game/, {
+    timeout: 20_000,
+  });
+  expect(page.url()).not.toContain("#");
+  await expect(entries(page)).toHaveCount(0);
+  await expect(page.locator("#canvas")).toBeVisible();
+});
