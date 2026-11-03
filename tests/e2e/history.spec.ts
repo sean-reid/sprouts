@@ -39,11 +39,31 @@ test("a reload restores the game and New Game clears it", async ({ page }) => {
 
   await page.locator("button[data-nodes='4']").click();
   await expect(page.locator("#status")).toHaveText("Draw a line between two nodes");
+  expect(await page.evaluate(() => localStorage.getItem("sprouts.game"))).toBeNull();
   await page.reload();
   await openBoard(page);
   await expect(page.locator("#history")).toBeHidden();
   await expect(page.locator("#undoBtn")).toBeDisabled();
-  expect(await page.evaluate(() => localStorage.getItem("sprouts.game"))).toBeNull();
+});
+
+test("jumping to a board where the AI is to move enters review and keeps the tail", async ({
+  page,
+}) => {
+  await playFirstExchange(page);
+  await entries(page).nth(0).locator("button").click();
+  await expect(page.locator("#status")).toHaveText(/^Reviewing: move 1 of 2/);
+  await expect(entries(page)).toHaveCount(2);
+  await expect(current(page)).toHaveText("1. You 0 to 1");
+
+  await page.locator("#undoBtn").click();
+  await expect(page.locator("#status")).toHaveText("Move undone: your turn");
+  await expect(page.locator("#undoBtn")).toBeDisabled();
+  await expect(entries(page)).toHaveCount(2);
+  await expect(current(page)).toHaveCount(0);
+
+  await page.locator("#forwardBtn").click();
+  await expect(page.locator("#status")).toHaveText("Your turn!");
+  await expect(current(page)).toHaveText(/^2\. AI/);
 });
 
 test("a share link reopens the game in review and steps through it", async ({ page, browser }) => {
@@ -89,6 +109,16 @@ test("a share link reopens the game in review and steps through it", async ({ pa
   await entries(other).nth(1).locator("button").click();
   await expect(current(other)).toHaveText(/^2\. AI/);
   await expect(other.locator("#forwardBtn")).toBeDisabled();
+
+  await other.locator("#undoBtn").click();
+  await expect(other.locator("#status")).toHaveText("Your turn!");
+  await expect(entries(other)).toHaveCount(2);
+  expect(other.url()).not.toContain("#");
+
+  await page.locator("#backBtn").click();
+  await expect(page.locator("#status")).toHaveText("Your turn!");
+  await expect(page.locator("#backBtn")).toBeDisabled();
+  expect(page.url()).not.toContain("#");
 
   await other.locator("button[data-nodes='4']").click();
   await expect(other.locator("#status")).toHaveText("Draw a line between two nodes");
