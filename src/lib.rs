@@ -1,14 +1,10 @@
 mod abstract_graph;
 mod ai;
-mod components;
 mod curve;
 mod embedding;
 pub mod face;
 mod geometry;
-mod morphology;
 mod nimber;
-mod node_classifier;
-mod pathfinding;
 mod protocol;
 #[cfg(feature = "bench")]
 pub use abstract_graph::search_rate;

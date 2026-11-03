@@ -151,11 +151,9 @@ pub fn snapshot(state: &GameState) -> Snapshot {
     }
 }
 
-// The AI generator keeps a move that passes either check, so apply must too.
 pub fn check(state: &GameState, mov: &types::Move) -> Result<(), Rejection> {
     match state.current_player {
-        Player::AI => validation::validate_ai_move(state, mov)
-            .or_else(|_| validation::validate_ai_move_tight(state, mov)),
+        Player::AI => validation::validate_ai_move(state, mov),
         Player::Human => validation::validate_move(state, mov),
     }?;
     embedding::embed(state, mov).map(drop)
@@ -322,13 +320,15 @@ mod tests {
         };
         assert!(!snap.game_over);
         assert_eq!(snap.active_nodes, vec![0, 1]);
+        // The chord is the AI's, so it leaves and arrives clear of the
+        // ring's tangents rather than along them.
         let over = vec![
             a,
-            Point::new(a.x, a.y - 100.0),
-            Point::new(far.x, far.y - 100.0),
+            Point::new(a.x - 40.0, a.y - 100.0),
+            Point::new(far.x + 40.0, far.y - 100.0),
             far,
         ];
-        let Outcome::Applied { snapshot: snap } = apply(
+        let outcome = apply(
             &mut state,
             Move {
                 from_node: 0,
@@ -336,8 +336,9 @@ mod tests {
                 polyline: over.clone(),
                 new_node_pos: over[1],
             },
-        ) else {
-            panic!("the closing chord was rejected");
+        );
+        let Outcome::Applied { snapshot: snap } = outcome else {
+            panic!("the closing chord was rejected: {outcome:?}");
         };
         assert!(snap.game_over);
         assert_eq!(snap.active_nodes, Vec::<usize>::new());

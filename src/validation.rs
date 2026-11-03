@@ -176,47 +176,12 @@ fn nearest_segment(path: &[Point], target: &Point) -> usize {
     best.0
 }
 
-macro_rules! debug_log {
-    ($($arg:tt)*) => {
-        #[cfg(feature = "debug_validation")]
-        {
-            web_sys::console::log_1(&format!($($arg)*).into());
-        }
-    };
-}
-
 pub fn validate_move(state: &GameState, mov: &Move) -> Result<(), Rejection> {
-    debug_log!("[VALIDATION] Starting HUMAN move validation");
-    debug_log!(
-        "  From node: {} (connections: {})",
-        mov.from_node,
-        state
-            .find_node(mov.from_node)
-            .map(|n| n.connection_count)
-            .unwrap_or(99)
-    );
-    debug_log!(
-        "  To node: {} (connections: {})",
-        mov.to_node,
-        state
-            .find_node(mov.to_node)
-            .map(|n| n.connection_count)
-            .unwrap_or(99)
-    );
-    debug_log!("  Path points: {}", mov.polyline.len());
     validate_move_internal(state, mov, false)
 }
 
 pub fn validate_ai_move(state: &GameState, mov: &Move) -> Result<(), Rejection> {
-    debug_log!("[VALIDATION] Starting AI move validation");
     validate_move_internal(state, mov, true)
-}
-
-/// Last-resort AI validation with further reduced clearances for tight corridors.
-/// Only used when normal AI validation fails for all candidate moves.
-pub fn validate_ai_move_tight(state: &GameState, mov: &Move) -> Result<(), Rejection> {
-    debug_log!("[VALIDATION] Starting TIGHT AI move validation");
-    validate_move_internal_tight(state, mov)
 }
 
 fn validate_move_internal(
@@ -224,8 +189,6 @@ fn validate_move_internal(
     mov: &Move,
     is_ai_move: bool,
 ) -> Result<(), Rejection> {
-    #[cfg(feature = "debug_validation")]
-    let mode = if is_ai_move { "AI" } else { "HUMAN" };
     let s = scale(state.board_size);
     let from_node = state
         .find_node(mov.from_node)
@@ -237,41 +200,27 @@ fn validate_move_internal(
     // Self-loop: need 2 free connections on the same node
     if mov.from_node == mov.to_node {
         if from_node.connection_count > 1 {
-            debug_log!(
-                "[{}] FAIL: Self-loop node has {} connections (need <= 1)",
-                mode,
-                from_node.connection_count
-            );
             return Err(Rejection::self_loop_full(mov.from_node));
         }
     } else {
         if from_node.connection_count >= 3 {
-            debug_log!("[{}] FAIL: Source node has 3 connections", mode);
             return Err(Rejection::node_full(mov.from_node, "Source"));
         }
         if to_node.connection_count >= 3 {
-            debug_log!("[{}] FAIL: Target node has 3 connections", mode);
             return Err(Rejection::node_full(mov.to_node, "Target"));
         }
     }
-    debug_log!("[{}] Check 1 passed: Connection limits OK", mode);
 
     let path = mov.flatten(curve::tolerance(state.board_size));
     let scaled_min_path = MIN_PATH_LENGTH * s;
     let path_length = polyline_length(&path);
     if path_length < scaled_min_path {
-        debug_log!("[{}] FAIL: Path too short: {:.1}px", mode, path_length);
         return Err(Rejection::too_short(
             &mov.polyline,
             path_length,
             scaled_min_path,
         ));
     }
-    debug_log!(
-        "[{}] Check 2 passed: Path length {:.1}px OK",
-        mode,
-        path_length
-    );
 
     let min_spacing = if is_ai_move {
         MIN_NODE_SPACING_AI
@@ -281,12 +230,6 @@ fn validate_move_internal(
     for node in &state.nodes {
         let dist = mov.new_node_pos.distance_to(&node.position);
         if dist < min_spacing {
-            debug_log!(
-                "[{}] FAIL: New node too close to node {}: {:.1}px",
-                mode,
-                node.id,
-                dist
-            );
             return Err(Rejection::node_too_close(
                 mov.new_node_pos,
                 dist,
@@ -294,7 +237,6 @@ fn validate_move_internal(
             ));
         }
     }
-    debug_log!("[{}] Check 3 passed: Node spacing OK", mode);
 
     let min_clearance = if is_ai_move {
         MIN_PATH_CLEARANCE_AI
@@ -308,21 +250,9 @@ fn validate_move_internal(
         let dist =
             curve::nearest(&mov.segments, &node.position).map_or(f64::INFINITY, |hit| hit.distance);
         if dist < min_clearance {
-            debug_log!(
-                "[{}] FAIL: Path too close to node {}: {:.1}px",
-                mode,
-                node.id,
-                dist
-            );
             return Err(Rejection::path_too_close(node.id));
         }
     }
-    debug_log!("[{}] Check 4 passed: Path clearance OK", mode);
-    debug_log!(
-        "[{}] Check 5: Intersection testing ({} existing lines)",
-        mode,
-        state.lines.len()
-    );
 
     let geom_share_dist = MIN_PATH_CLEARANCE * s;
     for line in &state.lines {
@@ -339,14 +269,6 @@ fn validate_move_internal(
                     closest_point_on_polyline(&line.flat, &node.position).1 < geom_share_dist;
                 if on_move_path && on_line_path {
                     geometrically_shares_node = true;
-                    debug_log!(
-                        "[{}]   Line {}: geometrically shares node {} at ({:.1},{:.1})",
-                        mode,
-                        line.id,
-                        node.id,
-                        node.position.x,
-                        node.position.y
-                    );
                     break;
                 }
             }
@@ -360,7 +282,6 @@ fn validate_move_internal(
                 if !segments_intersect(seg_start, seg_end, line_seg_start, line_seg_end) {
                     continue;
                 }
-                debug_log!("[{}]   Line {}: INTERSECTION DETECTED", mode, line.id);
                 let crossing =
                     segment_intersection(seg_start, seg_end, line_seg_start, line_seg_end);
                 if geometrically_shares_node {
@@ -380,135 +301,8 @@ fn validate_move_internal(
                         } else {
                             HUMAN_INTERSECTION_TOLERANCE
                         } * s;
-                        debug_log!(
-                            "    Min dist to node: {:.1}px, tolerance: {:.1}px",
-                            min_dist_to_any_node,
-                            tolerance
-                        );
 
                         if min_dist_to_any_node >= tolerance {
-                            debug_log!("    FAIL: Intersection not at node");
-                            return Err(Rejection::crossing(&mov.polyline, &intersection));
-                        } else {
-                            debug_log!(
-                                "    PASS: Intersection at node (within {:.1}px)",
-                                tolerance
-                            );
-                        }
-                    }
-                } else {
-                    debug_log!("    FAIL: Lines don't share nodes, any intersection invalid");
-                    return Err(Rejection::crossing(
-                        &mov.polyline,
-                        &crossing.unwrap_or(*seg_start),
-                    ));
-                }
-            }
-        }
-    }
-    debug_log!("[{}] Check 5 passed: No invalid intersections", mode);
-    Ok(())
-}
-
-/// Tight validation for last-resort AI moves in narrow corridors.
-/// Reduces clearance and spacing proportionally, with further reductions.
-fn validate_move_internal_tight(state: &GameState, mov: &Move) -> Result<(), Rejection> {
-    let s = scale(state.board_size);
-    let from_node = state
-        .find_node(mov.from_node)
-        .ok_or_else(|| Rejection::missing_node(mov.from_node, "Source"))?;
-    let to_node = state
-        .find_node(mov.to_node)
-        .ok_or_else(|| Rejection::missing_node(mov.to_node, "Target"))?;
-
-    if mov.from_node == mov.to_node {
-        if from_node.connection_count > 1 {
-            return Err(Rejection::self_loop_full(mov.from_node));
-        }
-    } else {
-        if from_node.connection_count >= 3 {
-            return Err(Rejection::node_full(mov.from_node, "Source"));
-        }
-        if to_node.connection_count >= 3 {
-            return Err(Rejection::node_full(mov.to_node, "Target"));
-        }
-    }
-
-    let path = mov.flatten(curve::tolerance(state.board_size));
-    let path_length = polyline_length(&path);
-    if path_length < MIN_PATH_LENGTH * s {
-        return Err(Rejection::too_short(
-            &mov.polyline,
-            path_length,
-            MIN_PATH_LENGTH * s,
-        ));
-    }
-
-    // Tight node spacing: 12px scaled
-    let tight_spacing = 12.0 * s;
-    for node in &state.nodes {
-        let dist = mov.new_node_pos.distance_to(&node.position);
-        if dist < tight_spacing {
-            return Err(Rejection::node_too_close(
-                mov.new_node_pos,
-                dist,
-                tight_spacing,
-            ));
-        }
-    }
-
-    // Tight path clearance: 3px scaled
-    let tight_clearance = 3.0 * s;
-    for node in &state.nodes {
-        if node.id == mov.from_node || node.id == mov.to_node {
-            continue;
-        }
-        let dist =
-            curve::nearest(&mov.segments, &node.position).map_or(f64::INFINITY, |hit| hit.distance);
-        if dist < tight_clearance {
-            return Err(Rejection::path_too_close(node.id));
-        }
-    }
-
-    // Intersection check with 12px scaled tolerance
-    let tight_tolerance = 12.0 * s;
-    let geom_dist = tight_clearance;
-    for line in &state.lines {
-        let shares_node = line.from_node == mov.from_node
-            || line.from_node == mov.to_node
-            || line.to_node == mov.from_node
-            || line.to_node == mov.to_node;
-        let mut geometrically_shares_node = shares_node;
-        if !shares_node {
-            for node in &state.nodes {
-                let on_move_path = closest_point_on_polyline(&path, &node.position).1 < geom_dist;
-                let on_line_path =
-                    closest_point_on_polyline(&line.flat, &node.position).1 < geom_dist;
-                if on_move_path && on_line_path {
-                    geometrically_shares_node = true;
-                    break;
-                }
-            }
-        }
-        for i in 1..path.len() {
-            let seg_start = &path[i - 1];
-            let seg_end = &path[i];
-            for j in 1..line.flat.len() {
-                let line_seg_start = &line.flat[j - 1];
-                let line_seg_end = &line.flat[j];
-                if !segments_intersect(seg_start, seg_end, line_seg_start, line_seg_end) {
-                    continue;
-                }
-                let crossing =
-                    segment_intersection(seg_start, seg_end, line_seg_start, line_seg_end);
-                if geometrically_shares_node {
-                    if let Some(intersection) = crossing {
-                        let mut min_dist_to_any_node = f64::INFINITY;
-                        for node in &state.nodes {
-                            let dist = intersection.distance_to(&node.position);
-                            min_dist_to_any_node = min_dist_to_any_node.min(dist);
-                        }
-                        if min_dist_to_any_node >= tight_tolerance {
                             return Err(Rejection::crossing(&mov.polyline, &intersection));
                         }
                     }
@@ -541,10 +335,6 @@ pub fn validate_new_node_placement(
     }
     let (closest, dist_to_path) = closest_point_on_polyline(polyline, new_node_pos);
     if dist_to_path > 5.0 * s {
-        debug_log!(
-            "[PLACEMENT] FAIL: New node not on path (distance: {:.1}px)",
-            dist_to_path
-        );
         return Err(Rejection::point(
             RejectionKind::NodeOffPath,
             *new_node_pos,
@@ -565,10 +355,6 @@ pub fn validate_new_node_placement(
         accumulated_length += seg_len;
     }
     if !(0.1..=0.9).contains(&position_ratio) {
-        debug_log!(
-            "[PLACEMENT] FAIL: Node at {:.0}% (must be 10-90%)",
-            position_ratio * 100.0
-        );
         return Err(Rejection::point(
             RejectionKind::NodeNotInMiddle,
             *new_node_pos,
@@ -582,11 +368,6 @@ pub fn validate_new_node_placement(
     for node in existing_nodes {
         let dist = new_node_pos.distance_to(&node.position);
         if dist < scaled_spacing {
-            debug_log!(
-                "[PLACEMENT] FAIL: Too close to node {}: {:.1}px",
-                node.id,
-                dist
-            );
             return Err(Rejection::node_too_close(
                 *new_node_pos,
                 dist,
@@ -594,10 +375,6 @@ pub fn validate_new_node_placement(
             ));
         }
     }
-    debug_log!(
-        "[PLACEMENT] Placement valid at {:.0}%",
-        position_ratio * 100.0
-    );
     Ok(())
 }
 
@@ -781,7 +558,6 @@ mod tests {
         match tier {
             Tier::Human => validate_move(gs, mov),
             Tier::Ai => validate_ai_move(gs, mov),
-            Tier::Tight => validate_ai_move_tight(gs, mov),
         }
     }
 
@@ -799,7 +575,7 @@ mod tests {
         ];
         let player = match tier {
             Tier::Human => Player::Human,
-            Tier::Ai | Tier::Tight => Player::AI,
+            Tier::Ai => Player::AI,
         };
         let mov = Move::new(2, 3, polyline, p(350.0, 700.0), player, 1000);
         let rejection = validate_at(tier, &gs, &mov).unwrap_err();
@@ -819,7 +595,7 @@ mod tests {
         ];
         let player = match tier {
             Tier::Human => Player::Human,
-            Tier::Ai | Tier::Tight => Player::AI,
+            Tier::Ai => Player::AI,
         };
         let mov = Move::new(0, 3, polyline, p(300.0, 620.0), player, 1000);
         let rejection = validate_at(tier, &gs, &mov).unwrap_err();
@@ -837,12 +613,6 @@ mod tests {
     fn crossing_past_a_shared_node_names_the_segment_of_the_submitted_path() {
         crossing_with_a_shared_node(Tier::Human);
         crossing_with_a_shared_node(Tier::Ai);
-    }
-
-    #[test]
-    fn the_tight_tier_names_the_segment_of_the_submitted_path() {
-        crossing_without_a_shared_node(Tier::Tight);
-        crossing_with_a_shared_node(Tier::Tight);
     }
 
     #[test]
@@ -922,7 +692,6 @@ mod tests {
     enum Tier {
         Human,
         Ai,
-        Tight,
     }
 
     fn departing_from_a_mid_line_node(curved: bool, tier: Tier) -> Result<(), Rejection> {
@@ -956,13 +725,12 @@ mod tests {
             .collect();
         let player = match tier {
             Tier::Human => Player::Human,
-            Tier::Ai | Tier::Tight => Player::AI,
+            Tier::Ai => Player::AI,
         };
         let departure = Move::new(3, 2, path.clone(), path[10], player, 1000);
         match tier {
             Tier::Human => validate_move(&gs, &departure),
             Tier::Ai => validate_ai_move(&gs, &departure),
-            Tier::Tight => validate_ai_move_tight(&gs, &departure),
         }
     }
 
@@ -984,15 +752,5 @@ mod tests {
     #[test]
     fn the_ai_may_leave_a_node_placed_on_a_curved_line() {
         assert_eq!(departing_from_a_mid_line_node(true, Tier::Ai), Ok(()));
-    }
-
-    #[test]
-    fn the_tight_tier_lets_the_ai_leave_a_node_placed_on_a_straight_line() {
-        assert_eq!(departing_from_a_mid_line_node(false, Tier::Tight), Ok(()));
-    }
-
-    #[test]
-    fn the_tight_tier_lets_the_ai_leave_a_node_placed_on_a_curved_line() {
-        assert_eq!(departing_from_a_mid_line_node(true, Tier::Tight), Ok(()));
     }
 }

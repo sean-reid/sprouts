@@ -1,6 +1,6 @@
 # Sprouts Game
 
-Browser-based Sprouts with AI opponent using morphological skeleton pathfinding.
+Browser-based Sprouts with an AI opponent that plans on a planar face model and routes its lines through a triangulation of the face.
 
 ## About
 
@@ -9,9 +9,9 @@ Sprouts is a pen-and-paper game where players draw lines between nodes. Each lin
 **Features:**
 
 - HTML5 Canvas with touch/mouse support
-- AI using Zhang-Suen thinning + A* pathfinding on morphological skeleton
+- AI routing by constrained Delaunay triangulation of the target face, funnel path, and clearance push
 - Exact play from solved regions of the board, and a time-boxed alpha-beta search over an exact planar model where the position is too big to solve
-- Dynamic clearance and adaptive border margins for tight endgames
+- Legality and game over come from the face model
 - Rust/WASM core, Web Worker for async AI
 
 ## Build
@@ -38,7 +38,7 @@ Web Worker (game state)
 Rust/WASM (logic, AI, validation)
 ```
 
-**Modules:** `curve.rs` (spline fit, flatten, nearest point), `morphology.rs` (skeleton), `pathfinding.rs` (A*), `abstract_graph.rs` (move choice and time-boxed search), `nimber.rs` (region outcomes and nimbers), `face/region.rs` (regions), `face/live.rs` (live form), `ai.rs` (candidate moves), `validation.rs` (collision), `node_classifier.rs` (reachability), `components.rs` (union-find), `geometry.rs` (segment and polyline helpers)
+**Modules:** `curve.rs` (spline fit, flatten, nearest point), `face.rs` (planar model, move enumeration), `face/region.rs` (regions), `face/live.rs` (live form), `embedding.rs` (drawn line to face move), `route.rs` (face routing), `abstract_graph.rs` (move choice and time-boxed search), `nimber.rs` (region outcomes and nimbers), `ai.rs` (move choice and drawing), `validation.rs` (collision), `geometry.rs` (segment and polyline helpers)
 
 ## How to Play
 
