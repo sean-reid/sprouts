@@ -66,13 +66,14 @@ impl Region {
     }
 
     /// The region's moves, one per class as `FaceModel::search_moves`,
-    /// and a split never encloses a piece with no live node, since the
-    /// side such a piece lands on makes no difference to the game.
+    /// and a split never encloses a piece with no live node in the
+    /// region's own faces, since the side such a piece lands on makes no
+    /// difference to the game.
     pub fn moves(&self) -> Vec<Move> {
         let (piece_of_node, count) = pieces(&self.model);
         let mut dead = vec![true; count];
         for v in 0..self.model.node_count() {
-            if self.model.degree(v) < 3 {
+            if self.plays(v) {
                 dead[piece_of_node[v]] = false;
             }
         }
@@ -406,6 +407,42 @@ mod tests {
         for mv in outer.moves() {
             assert_eq!(outer.model().corner_face(mv.a, mv.at_a), Ok(2));
         }
+    }
+
+    /// Three nodes after four listed moves (by index in `search_moves`),
+    /// where a region borrows a piece whose only live node is in the
+    /// other region and could be enclosed from the region's own face.
+    #[test]
+    fn a_borrowed_piece_is_never_enclosed() {
+        let mut m = FaceModel::new(3);
+        for pick in [0, 0, 9, 13] {
+            let mv = m.search_moves()[pick].clone();
+            m.apply(&mv).unwrap();
+        }
+        let mut seen = 0;
+        for region in m.regions() {
+            let (piece_of_node, _) = pieces(region.model());
+            let borrowed: Vec<usize> = (0..region.model().node_count())
+                .filter(|&v| !region.plays(v) && region.model().degree(v) < 3)
+                .collect();
+            let reaches = |mv: &Move| {
+                mv.enclosed.iter().any(|&r| {
+                    borrowed
+                        .iter()
+                        .any(|&b| piece_of_node[b] == piece_of_node[r])
+                })
+            };
+            let own =
+                |mv: &Move| region.model().corner_face(mv.a, mv.at_a).unwrap() >= region.frozen;
+            seen += region
+                .model()
+                .search_moves()
+                .into_iter()
+                .filter(|mv| own(mv) && reaches(mv))
+                .count();
+            assert!(!region.moves().iter().any(reaches));
+        }
+        assert!(seen > 0);
     }
 
     #[test]
