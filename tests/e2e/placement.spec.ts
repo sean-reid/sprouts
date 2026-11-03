@@ -281,8 +281,13 @@ test("a stroke that leaves the board gets its dot on the board", async ({ page }
   await expect(page.locator("#status")).toHaveText(PLACING_HINT);
   await expect.poll(() => findDot(page)).not.toBeNull();
   const dot = (await findDot(page))!;
-  expect(dot.x).toBeGreaterThanOrEqual(frame.left);
-  expect(dot.x).toBeLessThanOrEqual(frame.left + frame.width);
+  // MIN_NODE_SPACING in src/types.rs, scaled to the board and the screen.
+  const margin = 20 * (frame.board / 1000) * fit(frame).scale - 1;
+  expect(dot.x).toBeGreaterThanOrEqual(frame.left + margin);
+  expect(dot.x).toBeLessThanOrEqual(frame.left + frame.width - margin);
+  expect(dot.y).toBeGreaterThanOrEqual(frame.top + margin);
+  expect(dot.y).toBeLessThanOrEqual(frame.top + frame.height - margin);
+  expect(Math.hypot(dot.x - via.x, dot.y - via.y)).toBeGreaterThan(20);
   await shot(page, "placement-detour");
   await clickAway(page);
   await expect(page.locator("#status")).toHaveText("Your turn!", { timeout: 60_000 });
