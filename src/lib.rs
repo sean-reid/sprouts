@@ -7,7 +7,6 @@ pub mod face;
 mod geometry;
 mod morphology;
 mod node_classifier;
-mod opening_book;
 mod pathfinding;
 mod protocol;
 #[cfg(feature = "bench")]

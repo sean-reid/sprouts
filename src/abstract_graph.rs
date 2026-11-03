@@ -1,9 +1,49 @@
-//! Fixed-depth alpha-beta search over the face model.
+//! Time-boxed alpha-beta search over the face model.
 
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 
 use crate::face::{FaceModel, Move};
+
+/// Thinking time per move.
+pub const SEARCH_BUDGET_MS: f64 = 800.0;
+/// Searched positions between two reads of the clock.
+pub const CHECK_EVERY: usize = 128;
+
+/// Milliseconds since the clock started.
+pub trait Clock {
+    fn elapsed_ms(&mut self) -> f64;
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub struct WallClock(std::time::Instant);
+
+#[cfg(target_arch = "wasm32")]
+pub struct WallClock(f64);
+
+impl WallClock {
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn start() -> Self {
+        Self(std::time::Instant::now())
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub fn start() -> Self {
+        Self(js_sys::Date::now())
+    }
+}
+
+impl Clock for WallClock {
+    #[cfg(not(target_arch = "wasm32"))]
+    fn elapsed_ms(&mut self) -> f64 {
+        self.0.elapsed().as_secs_f64() * 1000.0
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn elapsed_ms(&mut self) -> f64 {
+        js_sys::Date::now() - self.0
+    }
+}
 
 #[derive(Clone)]
 pub struct AbstractState {
@@ -38,28 +78,39 @@ impl TranspositionTable {
     }
 }
 
-/// Work the search may do, counted in positions whose moves it lists, so
-/// a run is repeatable. Once spent, the search returns junk and inserts
-/// nothing.
-pub struct NodeBudget {
+/// Thinking time, charged in positions whose moves are listed and checked
+/// against the clock every `CHECK_EVERY` of them while armed. Once over,
+/// it stays over: the search returns junk and inserts nothing.
+pub struct Budget<C: Clock> {
+    clock: C,
+    limit_ms: f64,
     spent: usize,
-    limit: usize,
+    armed: bool,
+    over: bool,
 }
 
-impl NodeBudget {
-    pub fn new(limit: usize) -> Self {
-        Self { spent: 0, limit }
+impl<C: Clock> Budget<C> {
+    pub fn new(clock: C, limit_ms: f64) -> Self {
+        Self {
+            clock,
+            limit_ms,
+            spent: 0,
+            armed: false,
+            over: false,
+        }
     }
 
-    pub fn unlimited() -> Self {
-        Self::new(usize::MAX)
+    fn spend(&mut self) {
+        self.spent += 1;
+        if self.armed && !self.over && self.spent.is_multiple_of(CHECK_EVERY) {
+            self.over = self.clock.elapsed_ms() >= self.limit_ms;
+        }
     }
 
     pub fn exhausted(&self) -> bool {
-        self.spent > self.limit
+        self.over
     }
 
-    #[cfg(test)]
     pub fn spent(&self) -> usize {
         self.spent
     }
@@ -72,28 +123,29 @@ pub struct Pick {
     /// Depth of the last iteration that finished within the budget.
     pub depth: usize,
     pub cut_off: bool,
-    /// Positions charged to the budget past depth 1.
+    /// Positions charged to the budget over the whole search.
     pub spent: usize,
 }
 
 /// Index into `candidates` of the move the search prefers from `root`:
-/// iterative deepening to `choose_depth`, keeping the pick of the last
-/// depth that finished. Depth 1 always finishes; the deeper iterations
-/// share one budget of `cap` positions.
-pub fn best_candidate(root: AbstractState, candidates: &[Move], cap: usize) -> Pick {
-    let max_depth = root.choose_depth().max(1);
-    best_candidate_to(root, candidates, cap, max_depth)
+/// iterative deepening as far as the game can last, keeping the pick of
+/// the last depth that finished. Depth 1 always finishes.
+pub fn best_candidate<C: Clock>(
+    root: AbstractState,
+    candidates: &[Move],
+    budget: &mut Budget<C>,
+) -> Pick {
+    let max_depth = root.max_depth();
+    best_candidate_to(root, candidates, budget, max_depth)
 }
 
-pub fn best_candidate_to(
+pub fn best_candidate_to<C: Clock>(
     mut root: AbstractState,
     candidates: &[Move],
-    cap: usize,
+    budget: &mut Budget<C>,
     max_depth: usize,
 ) -> Pick {
     let mut tt = TranspositionTable::new();
-    let mut opening = NodeBudget::unlimited();
-    let mut deeper = NodeBudget::new(cap);
     let mut pick = Pick {
         index: 0,
         depth: 0,
@@ -101,11 +153,7 @@ pub fn best_candidate_to(
         spent: 0,
     };
     for depth in 1..=max_depth {
-        let budget = if depth == 1 {
-            &mut opening
-        } else {
-            &mut deeper
-        };
+        budget.armed = depth > 1;
         let mut best_score = f64::NEG_INFINITY;
         let mut best_at_depth = 0;
         for (idx, mov) in candidates.iter().enumerate() {
@@ -135,7 +183,7 @@ pub fn best_candidate_to(
         pick.index = best_at_depth;
         pick.depth = depth;
     }
-    pick.spent = deeper.spent;
+    pick.spent = budget.spent();
     pick
 }
 
@@ -144,9 +192,10 @@ impl AbstractState {
         Self { face, is_ai_turn }
     }
 
-    /// Lists every legal move, so it costs what `FaceModel::moves` costs.
+    /// One move per class of isomorphic moves, at `FaceModel::search_moves`
+    /// cost.
     pub fn generate_moves(&self) -> Vec<Move> {
-        self.face.moves()
+        self.face.search_moves()
     }
 
     pub fn apply_move(&mut self, mov: &Move) {
@@ -192,26 +241,14 @@ impl AbstractState {
             .sum()
     }
 
-    pub fn choose_depth(&self) -> usize {
-        let max_remaining = (self.lives() - 1).max(0) as usize;
-        let num_moves = self.generate_moves().len();
-
-        if max_remaining <= 16 {
-            max_remaining
-        } else if num_moves <= 4 {
-            12
-        } else if num_moves <= 8 {
-            10
-        } else if num_moves <= 15 {
-            8
-        } else {
-            6
-        }
+    /// Plies left in the game at most: every move spends one life net.
+    pub fn max_depth(&self) -> usize {
+        (self.lives() - 1).max(1) as usize
     }
 
     /// Lists this position's moves and, when there are ten or fewer, each
     /// reply's, charging `budget` for every list after the first.
-    pub fn evaluate(&self, budget: &mut NodeBudget) -> f64 {
+    pub fn evaluate<C: Clock>(&self, budget: &mut Budget<C>) -> f64 {
         let moves = self.generate_moves();
         let move_count = moves.len();
 
@@ -270,7 +307,7 @@ impl AbstractState {
             let mut total_opp_moves = 0usize;
             for mov in &moves {
                 sim.apply_move(mov);
-                budget.spent += 1;
+                budget.spend();
                 total_opp_moves += sim.generate_moves().len();
                 sim.undo_move();
             }
@@ -288,20 +325,20 @@ impl AbstractState {
 
 /// Alpha-beta minimax with transposition table. Leaves `state` as it found
 /// it. The result means nothing once `budget` is exhausted.
-pub fn abstract_minimax(
+pub fn abstract_minimax<C: Clock>(
     state: &mut AbstractState,
     depth: usize,
     mut alpha: f64,
     mut beta: f64,
     is_maximizing: bool,
     tt: &mut TranspositionTable,
-    budget: &mut NodeBudget,
+    budget: &mut Budget<C>,
 ) -> f64 {
     let hash = state.hash_key();
     if let Some(score) = tt.get(hash, depth) {
         return score;
     }
-    budget.spent += 1;
+    budget.spend();
     if budget.exhausted() {
         return 0.0;
     }
@@ -376,8 +413,47 @@ pub fn abstract_minimax(
 mod tests {
     use super::*;
 
+    /// Stands still, so a budget on it never runs out.
+    struct Frozen;
+
+    impl Clock for Frozen {
+        fn elapsed_ms(&mut self) -> f64 {
+            0.0
+        }
+    }
+
+    /// One millisecond per searched position, read on the check cadence.
+    struct NodeClock {
+        reads: usize,
+    }
+
+    impl Clock for NodeClock {
+        fn elapsed_ms(&mut self) -> f64 {
+            self.reads += 1;
+            (self.reads * CHECK_EVERY) as f64
+        }
+    }
+
+    fn unlimited() -> Budget<Frozen> {
+        Budget::new(Frozen, f64::INFINITY)
+    }
+
+    fn nodes(limit: usize) -> Budget<NodeClock> {
+        Budget::new(NodeClock { reads: 0 }, limit as f64)
+    }
+
     fn fresh(n: usize) -> AbstractState {
         AbstractState::new(FaceModel::new(n), true)
+    }
+
+    /// `n` nodes after `played` moves, the first listed each time.
+    fn after(n: usize, played: usize) -> AbstractState {
+        let mut s = fresh(n);
+        for _ in 0..played {
+            let mov = s.generate_moves()[0].clone();
+            s.apply_move(&mov);
+        }
+        s
     }
 
     /// One node played out: a loop, then the last chord. Nobody can move.
@@ -389,9 +465,47 @@ mod tests {
         s
     }
 
+    /// Plain minimax to a fixed depth with the same evaluation, no table
+    /// and no pruning.
+    fn plain_minimax(state: &mut AbstractState, depth: usize, maximizing: bool) -> f64 {
+        let moves = state.generate_moves();
+        if depth == 0 || moves.is_empty() {
+            return state.evaluate(&mut unlimited());
+        }
+        let mut best = if maximizing {
+            f64::NEG_INFINITY
+        } else {
+            f64::INFINITY
+        };
+        for mov in &moves {
+            state.apply_move(mov);
+            let score = plain_minimax(state, depth - 1, !maximizing);
+            state.undo_move();
+            best = if maximizing {
+                best.max(score)
+            } else {
+                best.min(score)
+            };
+        }
+        best
+    }
+
+    fn plain_best(mut root: AbstractState, candidates: &[Move], depth: usize) -> usize {
+        let mut best = (f64::NEG_INFINITY, 0);
+        for (idx, mov) in candidates.iter().enumerate() {
+            root.apply_move(mov);
+            let score = plain_minimax(&mut root, depth - 1, false);
+            root.undo_move();
+            if score > best.0 {
+                best = (score, idx);
+            }
+        }
+        best.1
+    }
+
     #[test]
     fn generate_moves_2_fresh_nodes() {
-        assert_eq!(fresh(2).generate_moves().len(), 3);
+        assert_eq!(fresh(2).generate_moves().len(), 2);
     }
 
     #[test]
@@ -433,11 +547,10 @@ mod tests {
     fn evaluate_terminal_depends_on_whose_turn_it_is() {
         let mut s = finished();
         assert!(s.generate_moves().is_empty());
-        let mut budget = NodeBudget::unlimited();
         s.is_ai_turn = true;
-        assert!(s.evaluate(&mut budget) < 0.0);
+        assert!(s.evaluate(&mut unlimited()) < 0.0);
         s.is_ai_turn = false;
-        assert!(s.evaluate(&mut budget) > 0.0);
+        assert!(s.evaluate(&mut unlimited()) > 0.0);
     }
 
     #[test]
@@ -465,7 +578,7 @@ mod tests {
     fn minimax_2_node_game() {
         let mut s = fresh(2);
         let mut tt = TranspositionTable::new();
-        let depth = s.choose_depth();
+        let depth = s.max_depth();
         let before = s.face.clone();
         let score = abstract_minimax(
             &mut s,
@@ -474,7 +587,7 @@ mod tests {
             f64::INFINITY,
             true,
             &mut tt,
-            &mut NodeBudget::unlimited(),
+            &mut unlimited(),
         );
         assert!(score.is_finite());
         assert_eq!(s.face, before);
@@ -483,18 +596,30 @@ mod tests {
     #[test]
     fn evaluate_charges_the_budget_for_each_reply_it_lists() {
         let s = fresh(2);
-        let mut budget = NodeBudget::new(1);
+        let mut budget = unlimited();
         s.evaluate(&mut budget);
-        assert_eq!(budget.spent(), 3);
-        assert!(budget.exhausted());
+        assert_eq!(budget.spent(), 2);
+    }
+
+    #[test]
+    fn the_clock_is_read_once_per_check_interval_and_the_cut_lands_in_it() {
+        let root = after(20, 3);
+        assert_eq!(root.face.node_count(), 23);
+        let candidates = root.generate_moves();
+        let limit = 5000;
+        let pick = best_candidate(root, &candidates, &mut nodes(limit));
+        assert!(pick.cut_off);
+        assert!(pick.depth >= 1);
+        assert!(pick.spent >= limit, "{pick:?}");
+        assert!(pick.spent <= limit + CHECK_EVERY, "{pick:?}");
     }
 
     #[test]
     fn a_cut_off_search_keeps_the_last_finished_depth_and_repeats_itself() {
         let root = fresh(6);
-        let candidates: Vec<Move> = root.generate_moves().into_iter().take(12).collect();
-        let first = best_candidate(root.clone(), &candidates, 200);
-        let second = best_candidate(root.clone(), &candidates, 200);
+        let candidates: Vec<Move> = root.face.moves().into_iter().take(12).collect();
+        let first = best_candidate(root.clone(), &candidates, &mut nodes(200));
+        let second = best_candidate(root.clone(), &candidates, &mut nodes(200));
         assert_eq!(first, second);
         assert!(first.cut_off);
         assert_eq!(first.depth, 1);
@@ -503,7 +628,7 @@ mod tests {
         let mut probe = root.clone();
         for (idx, mov) in candidates.iter().enumerate() {
             probe.apply_move(mov);
-            let score = probe.evaluate(&mut NodeBudget::unlimited());
+            let score = probe.evaluate(&mut unlimited());
             probe.undo_move();
             if score > by_eval.0 {
                 by_eval = (score, idx);
@@ -513,52 +638,77 @@ mod tests {
 
         let small = fresh(2);
         let all = small.generate_moves();
-        let roomy = best_candidate(small, &all, usize::MAX);
+        let roomy = best_candidate(small, &all, &mut unlimited());
         assert!(!roomy.cut_off);
         assert!(roomy.depth > 1);
     }
 
     #[test]
-    fn a_cut_off_at_depth_three_keeps_the_depth_two_pick() {
-        let root = fresh(3);
+    fn a_cut_off_search_keeps_the_pick_of_the_depth_it_finished() {
+        let root = fresh(5);
         let candidates = root.generate_moves();
-        let two = best_candidate_to(root.clone(), &candidates, usize::MAX, 2);
+        let two = best_candidate_to(root.clone(), &candidates, &mut unlimited(), 2);
         assert_eq!(two.depth, 2);
-        let cut = best_candidate_to(root.clone(), &candidates, two.spent, 8);
+        let cut = best_candidate(root.clone(), &candidates, &mut nodes(two.spent + 1));
         assert!(cut.cut_off);
-        assert_eq!(cut.depth, 2);
-        assert_eq!(cut.index, two.index);
-        let three = best_candidate_to(root, &candidates, usize::MAX, 3);
-        assert_eq!(three.depth, 3);
-        assert!(three.spent > two.spent);
+        assert!(cut.depth >= 2);
+        let same = best_candidate_to(root, &candidates, &mut unlimited(), cut.depth);
+        assert_eq!(cut.index, same.index);
     }
 
     #[test]
-    fn depth_one_finishes_under_any_cap() {
+    fn depth_one_finishes_under_any_budget() {
         let root = fresh(4);
-        let candidates = root.generate_moves();
-        let pick = best_candidate(root, &candidates, 0);
+        let candidates = root.face.moves();
+        let pick = best_candidate(root, &candidates, &mut nodes(0));
         assert_eq!(pick.depth, 1);
         assert!(pick.cut_off);
+        assert!(pick.spent > 0);
     }
 
     #[test]
-    fn an_exhausted_budget_stops_the_search_and_poisons_nothing() {
-        let mut s = fresh(4);
-        let mut tt = TranspositionTable::new();
-        let mut budget = NodeBudget::new(5);
-        abstract_minimax(
-            &mut s,
-            6,
-            f64::NEG_INFINITY,
-            f64::INFINITY,
-            true,
-            &mut tt,
-            &mut budget,
-        );
-        assert!(budget.exhausted());
-        assert_eq!(budget.spent(), 6);
-        assert!(tt.table.is_empty());
+    fn a_search_that_reaches_the_end_of_the_game_is_not_cut_off() {
+        let root = fresh(2);
+        let candidates = root.face.moves();
+        let pick = best_candidate(root.clone(), &candidates, &mut nodes(1 << 20));
+        assert!(!pick.cut_off);
+        assert_eq!(pick.depth, root.max_depth());
+    }
+
+    #[test]
+    fn the_time_boxed_search_agrees_with_plain_minimax_at_depth_four() {
+        for played in [0, 1] {
+            let root = after(4, played);
+            let candidates = root.generate_moves();
+            let boxed = best_candidate_to(root.clone(), &candidates, &mut unlimited(), 4);
+            assert_eq!(boxed.depth, 4);
+            assert_eq!(
+                boxed.index,
+                plain_best(root, &candidates, 4),
+                "after {played}"
+            );
+        }
+    }
+
+    #[test]
+    fn twenty_nodes_answer_within_the_budget_on_the_wall_clock() {
+        let root = after(20, 3);
+        let candidates = root.generate_moves();
+        let mut times = Vec::new();
+        for _ in 0..10 {
+            let started = std::time::Instant::now();
+            let mut budget = Budget::new(WallClock::start(), SEARCH_BUDGET_MS);
+            let pick = best_candidate(root.clone(), &candidates, &mut budget);
+            let took = started.elapsed().as_secs_f64() * 1000.0;
+            println!(
+                "{took:.1} ms, depth {}, {} positions",
+                pick.depth, pick.spent
+            );
+            times.push(took);
+        }
+        for took in times {
+            assert!(took <= SEARCH_BUDGET_MS * 1.1, "{took:.1} ms");
+        }
     }
 
     #[test]
@@ -573,7 +723,7 @@ mod tests {
             f64::INFINITY,
             true,
             &mut tt,
-            &mut NodeBudget::unlimited(),
+            &mut unlimited(),
         );
         assert!(score < 0.0);
     }
@@ -583,17 +733,19 @@ mod tests {
         let mut open = fresh(3);
         let mut walled = fresh(3);
         let lp = walled
-            .generate_moves()
+            .face
+            .moves()
             .into_iter()
             .find(|m| m.a == 0 && m.b == 0 && !m.enclosed.is_empty())
             .unwrap();
         walled.apply_move(&lp);
         let plain = open
-            .generate_moves()
+            .face
+            .moves()
             .into_iter()
             .find(|m| m.a == 0 && m.b == 0 && m.enclosed.is_empty())
             .unwrap();
         open.apply_move(&plain);
-        assert!(open.generate_moves().len() > walled.generate_moves().len());
+        assert!(open.face.moves().len() > walled.face.moves().len());
     }
 }
