@@ -1,13 +1,18 @@
+import { readdirSync, readFileSync } from "node:fs";
+import { basename, join } from "node:path";
 import { describe, expect, it } from "vitest";
 import type { Cubic, Point } from "../../pkg/sprouts";
 import {
   decodeRecord,
   encodeRecord,
   History,
+  LINK_QUANTUM,
   sameGame,
+  STROKE_TOLERANCE,
   type GameRecord,
   type RecordedMove,
 } from "../../web/history";
+import type { Fixture, FixtureMove } from "../../web/record";
 
 // Header: version, flags, initial nodes, board size, move count and cursor,
 // then each move's from and to as one-byte varints before its shape byte.
@@ -231,4 +236,76 @@ describe("sameGame", () => {
     const other = { ...linked, moves: linked.moves.map((m) => ({ ...m, to: m.to + 1 })) };
     expect(sameGame(other, linked)).toBe(false);
   });
+});
+
+function distanceToSegment(p: [number, number], a: [number, number], b: [number, number]): number {
+  const dx = b[0] - a[0];
+  const dy = b[1] - a[1];
+  const length2 = dx * dx + dy * dy;
+  const t =
+    length2 === 0
+      ? 0
+      : Math.min(1, Math.max(0, ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / length2));
+  return Math.hypot(p[0] - (a[0] + t * dx), p[1] - (a[1] + t * dy));
+}
+
+function distanceToPolyline(p: [number, number], polyline: [number, number][]): number {
+  let best = Infinity;
+  for (let i = 0; i + 1 < polyline.length; i++) {
+    const a = polyline[i];
+    const b = polyline[i + 1];
+    if (a && b) best = Math.min(best, distanceToSegment(p, a, b));
+  }
+  return best;
+}
+
+const fixtures = ["fixtures/games", "fixtures/saved"].flatMap((dir) =>
+  readdirSync(dir)
+    .filter((f) => f.endsWith(".json"))
+    .map((f) => join(dir, f)),
+);
+
+// A link rounds each point to the quantum and thins a stroke to the
+// tolerance, so a decoded stroke stays within both of the original and
+// the original within both of it.
+describe("every recorded game through the link", () => {
+  for (const file of fixtures) {
+    it(`${basename(file, ".json")} keeps its geometry`, () => {
+      const fixture = JSON.parse(readFileSync(file, "utf8")) as Fixture;
+      const history = History.from({
+        firstPlayer: "human",
+        cursor: fixture.moves.length,
+        ...fixture,
+        version: 1,
+      });
+      const decoded = decodeRecord(encodeRecord(history));
+      expect(decoded).not.toBeNull();
+      expect(decoded?.moves).toHaveLength(fixture.moves.length);
+      const scale = fixture.boardSize / 1000;
+      const quantum = LINK_QUANTUM * scale;
+      const slack = STROKE_TOLERANCE * scale + quantum;
+      const rounded = (p: [number, number]): [number, number] => [
+        Math.round(p[0] / quantum) * quantum,
+        Math.round(p[1] / quantum) * quantum,
+      ];
+      fixture.moves.forEach((move: FixtureMove, i) => {
+        const got = decoded?.moves[i];
+        if (!got) throw new Error(`move ${i + 1} missing`);
+        expect(got.from).toBe(move.from);
+        expect(got.to).toBe(move.to);
+        expect(got.newNode).toEqual(rounded(move.newNode));
+        const first = move.polyline[0];
+        const last = move.polyline[move.polyline.length - 1];
+        if (!first || !last) throw new Error(`move ${i + 1} has no stroke`);
+        expect(got.polyline[0]).toEqual(rounded(first));
+        expect(got.polyline[got.polyline.length - 1]).toEqual(rounded(last));
+        for (const p of got.polyline) {
+          expect(distanceToPolyline(p, move.polyline)).toBeLessThanOrEqual(slack);
+        }
+        for (const p of move.polyline) {
+          expect(distanceToPolyline(p, got.polyline)).toBeLessThanOrEqual(slack);
+        }
+      });
+    });
+  }
 });

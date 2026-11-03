@@ -29,12 +29,12 @@ const TENTHS = 10;
 // engine already accepts. A stroke point closer than STROKE_TOLERANCE to
 // the chord of its neighbours is left out of the link.
 const CURVE_TOLERANCE = 1.5;
-const STROKE_TOLERANCE = 1.5;
+export const STROKE_TOLERANCE = 1.5;
 // Per move shape in the link; 2 is reserved for the face-model move.
 const SHAPE_STROKE = 0;
 const SHAPE_CUBICS = 1;
 // Points travel in whole units, which moves one by at most 0.71.
-const LINK_QUANTUM = 1;
+export const LINK_QUANTUM = 1;
 // A link can claim any control point; the subdivision is capped so a
 // hostile one costs at most this many points per cubic.
 const MAX_SUBDIVISIONS = 256;

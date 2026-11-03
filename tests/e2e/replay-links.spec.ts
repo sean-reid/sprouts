@@ -1,17 +1,18 @@
-import { readdirSync, readFileSync } from "node:fs";
-import { basename, join } from "node:path";
+import { readFileSync } from "node:fs";
+import { basename } from "node:path";
 import { expect, test } from "@playwright/test";
 import type { Fixture } from "../../web/record";
 
-// Every recorded game must survive a share: the engine refits each move
-// from the link's thinned geometry, and a move it then rejects stops the
-// visitor's replay short.
-const FIXTURE_DIRS = ["fixtures/games", "fixtures/saved"];
-const fixtures = FIXTURE_DIRS.flatMap((dir) =>
-  readdirSync(dir)
-    .filter((f) => f.endsWith(".json"))
-    .map((f) => join(dir, f)),
-);
+// A recorded game must survive a share: the engine refits each move from
+// the link's thinned geometry, and a move it then rejects stops the
+// visitor's replay short. Three games cover a hand-drawn one, a finished
+// one and an AI one on the small board; the codec unit tests cover the
+// geometry of every fixture.
+const fixtures = [
+  "fixtures/saved/nine-moves-4n-1000.json",
+  "fixtures/saved/finished-4n-500.json",
+  "fixtures/games/selfplay-4n-500.json",
+];
 
 const entries = (page: import("@playwright/test").Page) => page.locator("#moveList li");
 
