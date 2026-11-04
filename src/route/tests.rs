@@ -619,8 +619,9 @@ fn record_shared_game(nodes: usize, moves: usize, pick: usize, path: &std::path:
 /// `cargo test --release record_shared_games -- --ignored`. The pick,
 /// from SPROUTS_PICK_4 and SPROUTS_PICK_9 when set, is which chord the
 /// human opens with; the spec needs games whose AI moves the visitor's
-/// rounded board reroutes within a unit, which most picks do not give, so
-/// a new router may need another pick. The record is deterministic.
+/// rounded board reroutes within the drift tolerance, which most picks
+/// do not give, so a new router may need another pick. The record is
+/// deterministic.
 #[test]
 #[ignore]
 fn record_shared_games() {
@@ -634,13 +635,13 @@ fn record_shared_games() {
     record_shared_game(
         4,
         8,
-        pick("SPROUTS_PICK_4", 5),
+        pick("SPROUTS_PICK_4", 15),
         &dir.join("eight-moves-4n-1000.json"),
     );
     record_shared_game(
         9,
         10,
-        pick("SPROUTS_PICK_9", 36),
+        pick("SPROUTS_PICK_9", 5),
         &dir.join("ten-moves-9n-1000.json"),
     );
 }

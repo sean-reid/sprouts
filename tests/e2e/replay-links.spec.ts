@@ -34,11 +34,11 @@ const fixtures = [
 // face moves and human moves as geometry. Per game: the payload budget in
 // characters and how many of the AI's moves go as topology. The budget
 // belongs to the recording: it is the payload measured when the game was
-// recorded (298 and 322) with about 10 percent headroom, and a new
+// recorded (348 and 390) with about 10 percent headroom, and a new
 // recording brings its own.
 const routed: [string, number, number][] = [
-  ["fixtures/saved/eight-moves-4n-1000.json", 330, 4],
-  ["fixtures/saved/ten-moves-9n-1000.json", 355, 4],
+  ["fixtures/saved/eight-moves-4n-1000.json", 385, 4],
+  ["fixtures/saved/ten-moves-9n-1000.json", 430, 4],
 ];
 
 const entries = (page: Page) => page.locator("#moveList li");
@@ -173,7 +173,7 @@ for (const [file, budget, topologyMoves] of routed) {
 
 // A version 4 link of two moves, the second a face move, with its router
 // byte set to a version this page does not have.
-const OTHER_ROUTER_LINK = "#game=BAMABADoAwIAAgAAAQAC2AToB6AGAI8DAAICAgQEAgAE2AnoBw";
+const OTHER_ROUTER_LINK = "#game=BP8ABADoAwIAAgAAAQAC2AToB6AGAI8DAAICAgQEAgAE2AnoBw";
 
 test("a link from another router opens a fresh game and says so", async ({ page }) => {
   await page.goto("/" + OTHER_ROUTER_LINK);
