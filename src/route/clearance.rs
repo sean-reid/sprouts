@@ -5,6 +5,9 @@ use crate::geometry::{closest_point_on_segment, segments_intersect};
 use crate::types::Point;
 
 const ROUNDS: usize = 40;
+/// How near a wall vertex or node a moved segment may pass, in board
+/// units, before it counts as crossing there.
+const GRAZE: f64 = 1e-6;
 /// Share of the shortfall a point moves per round, so two walls closer than
 /// twice the clearance settle the point between them instead of bouncing.
 const STEP: f64 = 0.35;
@@ -279,7 +282,8 @@ impl<'a> Obstacles<'a> {
         {
             return true;
         }
-        let graze = self.clearance / 2.0;
+        // A segment through a wall vertex or a node crosses nothing
+        // properly; the hard step keeps the clearance from them.
         let corners = self
             .segments
             .iter()
@@ -287,7 +291,7 @@ impl<'a> Obstacles<'a> {
             .chain(self.nodes.iter());
         if corners
             .into_iter()
-            .any(|v| closest_point_on_segment(&a, &b, v).1 < graze)
+            .any(|v| closest_point_on_segment(&a, &b, v).1 < GRAZE)
         {
             return true;
         }
