@@ -95,7 +95,7 @@ const TENTHS = 10;
 // the stroke, so a curve flattened at it refits inside the error the
 // engine already accepts. A stroke point closer than STROKE_TOLERANCE to
 // the chord of its neighbours is left out of the link.
-const CURVE_TOLERANCE = 1.5;
+export const CURVE_TOLERANCE = 1.5;
 export const STROKE_TOLERANCE = 1.5;
 // Per move shape in the link.
 const SHAPE_STROKE = 0;

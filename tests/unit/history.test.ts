@@ -3,6 +3,7 @@ import { basename, join } from "node:path";
 import { describe, expect, it } from "vitest";
 import type { Cubic, FaceMove, Line, Point, Rehearsal } from "../../pkg/sprouts";
 import {
+  CURVE_TOLERANCE,
   decodeRecord,
   demote,
   DRIFT_TOLERANCE,
@@ -753,7 +754,9 @@ const fixtures = ["fixtures/games", "fixtures/saved"].flatMap((dir) =>
 
 // A link rounds each point to the quantum and thins a stroke to the
 // tolerance, so a decoded stroke stays within both of the original and
-// the original within both of it.
+// the original within both of it. A settled record travels as its spline,
+// exact on the link grid, and the decoded stroke is that spline flattened
+// at the fit tolerance, so the original stroke sits within twice it.
 describe("every recorded game through the link", () => {
   for (const file of fixtures) {
     it(`${basename(file, ".json")} keeps its geometry`, () => {
@@ -770,7 +773,10 @@ describe("every recorded game through the link", () => {
       expect(decoded?.moves).toHaveLength(fixture.moves.length);
       const scale = fixture.boardSize / 1000;
       const quantum = LINK_QUANTUM * scale;
-      const slack = STROKE_TOLERANCE * scale + quantum;
+      const settled = (fixture.settleVersion ?? 0) > 0;
+      const slack = settled
+        ? 2 * CURVE_TOLERANCE * scale + quantum
+        : STROKE_TOLERANCE * scale + quantum;
       const rounded = (p: [number, number]): [number, number] => [
         Math.round(p[0] / quantum) * quantum,
         Math.round(p[1] / quantum) * quantum,
@@ -780,6 +786,7 @@ describe("every recorded game through the link", () => {
         expect(got.from).toBe(move.from);
         expect(got.to).toBe(move.to);
         expect(got.newNode).toEqual(rounded(move.newNode));
+        if (settled) expect(got.segments).toEqual(move.segments);
         const first = move.polyline[0];
         const last = move.polyline[move.polyline.length - 1];
         if (!first || !last) throw new Error(`move ${i + 1} has no stroke`);
