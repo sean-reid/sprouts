@@ -7,6 +7,13 @@ export class StaleRequest extends Error {
   }
 }
 
+export class CallTimeout extends Error {
+  constructor(method: Method) {
+    super(`Worker call '${method}' timed out`);
+    this.name = "CallTimeout";
+  }
+}
+
 interface Pending {
   method: Method;
   lane: string | null;
@@ -54,7 +61,7 @@ export class Engine {
     return new Promise<Result<M>>((resolve, reject) => {
       const id = ++this.nextId;
       const timer = setTimeout(() => {
-        this.take(id)?.reject(new Error(`Worker call '${method}' timed out`));
+        this.take(id)?.reject(new CallTimeout(method));
       }, CALL_TIMEOUT_MS);
       this.pending.set(id, {
         method,
