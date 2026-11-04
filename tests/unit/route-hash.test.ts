@@ -11,14 +11,18 @@ describe("the wasm router", () => {
     const source = readFileSync("src/route/tests.rs", "utf8");
     const golden = /const ROUTING_HASH: u64 = (0x[0-9a-f_]+);/.exec(source)?.[1]?.replace(/_/g, "");
     const count = Number(/const ROUTING_HASH_FIXTURES: usize = (\d+);/.exec(source)?.[1]);
+    const sweep = /const SWEEP_FIXTURE: &str = "(.+)";/.exec(source)?.[1];
     expect(golden).toBeDefined();
     expect(count).toBeGreaterThan(0);
+    expect(sweep).toBeDefined();
     const files = readdirSync("fixtures/routing")
       .filter((f) => f.endsWith(".json"))
       .sort()
-      .slice(0, count);
+      .slice(0, count)
+      .map((f) => `fixtures/routing/${f}`)
+      .concat([sweep as string]);
     const plans: RouteHashPlan["plans"] = files.map((f) => {
-      const fixture = JSON.parse(readFileSync(`fixtures/routing/${f}`, "utf8"));
+      const fixture = JSON.parse(readFileSync(f, "utf8"));
       const point = ([x, y]: number[]) => ({ x, y });
       return {
         initialNodes: fixture.initialNodes,

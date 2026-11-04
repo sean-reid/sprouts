@@ -205,6 +205,7 @@ pub enum RouteReply {
 }
 
 /// FNV-1a over the node positions and the line flattenings, as hex.
+#[cfg(any(test, feature = "hash"))]
 pub fn hash_board(state: &GameState) -> String {
     let mut fnv = crate::exact::Fnv::default();
     fnv.points(&state.nodes.iter().map(|n| n.position).collect::<Vec<_>>());
@@ -398,6 +399,7 @@ pub fn classify(plan: Classification) -> Result<Classified, String> {
 }
 
 /// Positions whose routes are hashed together.
+#[cfg(feature = "hash")]
 #[derive(Debug, Clone, Deserialize, Tsify)]
 pub struct RouteHashPlan {
     pub plans: Vec<Classification>,
@@ -407,6 +409,7 @@ pub struct RouteHashPlan {
 /// with the AI to move, then every search move routed and its flattening
 /// and node fed to one FNV-1a. The native test records the value a
 /// platform must match.
+#[cfg(feature = "hash")]
 pub fn route_hash(plan: RouteHashPlan) -> Result<String, String> {
     let mut fnv = crate::exact::Fnv::default();
     for plan in plan.plans {

@@ -15,10 +15,12 @@ mod route;
 mod types;
 mod validation;
 
+#[cfg(feature = "hash")]
+use protocol::RouteHashPlan;
 use protocol::{
     AiReply, AutoPlacement, AutoPlacementQuery, Classification, Classified, Curve, FaceMove,
-    FitQuery, Layout, Move, MovesFrom, Outcome, Placement, PlacementQuery, Rehearsal,
-    RouteHashPlan, RouteReply, Snapshot,
+    FitQuery, Layout, Move, MovesFrom, Outcome, Placement, PlacementQuery, Rehearsal, RouteReply,
+    Snapshot,
 };
 use tsify::{Ts, Tsify};
 use types::{GameState, Player, Point};

@@ -712,17 +712,43 @@ fn recorded_topology_positions_stay_bounded() {
     assert!(tally.topology <= RECORDED_TOPOLOGY, "{tally}");
 }
 
+/// The first seeded sweep game played out six moves by the recorder's
+/// rule, a position the hand-made fixtures do not reach.
+fn sweep_position() -> GameState {
+    let (nodes, picks) = sweep::games(SEED, 1).remove(0);
+    let mut state = GameState::with_board_size(nodes, 1000);
+    state.current_player = Player::AI;
+    for pick in picks.iter().take(6) {
+        let moves = state.face.search_moves();
+        if moves.is_empty() {
+            break;
+        }
+        let first = *pick as usize % moves.len();
+        let drawn = (0..moves.len())
+            .map(|k| (first + k) % moves.len())
+            .find_map(|k| draws(&state, &moves[k]).ok());
+        let Some(mov) = drawn else { break };
+        state.apply_move(mov).unwrap();
+        state.current_player = Player::AI;
+    }
+    state
+}
+
 /// Hashes of each routing stage over every search move of the first
-/// `ROUTING_HASH_FIXTURES` routing fixtures, in path order: arena
-/// vertices, taut path, relaxed path, fitted cubics, and the flattening
-/// with the node. A platform that disagrees shows where it diverged.
+/// `ROUTING_HASH_FIXTURES` routing fixtures and one seeded sweep game, in
+/// path order: arena vertices, taut path, relaxed path, fitted cubics,
+/// and the flattening with the node or the refusal. A platform that
+/// disagrees shows where it diverged.
 fn routing_hashes() -> [u64; 5] {
     let mut stages: [Fnv; 5] = Default::default();
-    for path in fixture_paths("fixtures/routing")
+    let positions = fixture_paths("fixtures/routing")
         .into_iter()
         .take(ROUTING_HASH_FIXTURES)
-    {
-        let state = position(&path);
+        .chain(std::iter::once(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(SWEEP_FIXTURE),
+        ))
+        .map(|path| position(&path));
+    for state in positions {
         let want = rules(&state);
         for mv in state.face.search_moves() {
             if mv.a != mv.b || !mv.enclosed.is_empty() {
@@ -747,11 +773,14 @@ fn routing_hashes() -> [u64; 5] {
 
 /// Routing fixtures the hash covers; five keep the debug run short.
 const ROUTING_HASH_FIXTURES: usize = 5;
+/// The first seeded sweep game after six moves, recorded by
+/// `record_sweep_position` so the wasm test hashes the same position.
+const SWEEP_FIXTURE: &str = "fixtures/routing/sweep-6n-6m.json";
 
 /// The final routing hash a Mac records; the Linux runner and the wasm
 /// build (tests/unit/route-hash.test.ts) have to produce the same one,
 /// since a share link is redrawn on the visitor's device.
-const ROUTING_HASH: u64 = 0x1ddc_ba1e_f5d3_5c8c;
+const ROUTING_HASH: u64 = 0xaaef_97a6_92ff_3032;
 
 #[test]
 fn routing_hashes_the_same_on_every_platform() {
@@ -760,4 +789,66 @@ fn routing_hashes_the_same_on_every_platform() {
         flat, ROUTING_HASH,
         "routing hashes: arena {arena:#018x} taut {taut:#018x} relaxed {relaxed:#018x} cubics {cubics:#018x} flat {flat:#018x}"
     );
+}
+
+/// A routed move stored as its polyline and node refits to the same bytes
+/// through Move::new, which is how a record and a share link rebuild it.
+#[test]
+fn a_routed_move_refits_to_itself() {
+    let mut checked = 0;
+    for path in fixture_paths("fixtures/routing")
+        .into_iter()
+        .take(ROUTING_HASH_FIXTURES)
+    {
+        let state = position(&path);
+        for mv in state.face.search_moves() {
+            let Ok(drawn) = route(&state, &mv) else {
+                continue;
+            };
+            let again = Move::new(
+                drawn.from_node,
+                drawn.to_node,
+                drawn.polyline.clone(),
+                drawn.new_node_pos,
+                drawn.player,
+                state.board_size,
+            );
+            assert_eq!(again.segments, drawn.segments, "{}: {mv:?}", path.display());
+            assert_eq!(
+                again.new_node_pos,
+                drawn.new_node_pos,
+                "{}: {mv:?}",
+                path.display()
+            );
+            checked += 1;
+        }
+    }
+    assert!(checked > 50, "{checked} routes checked");
+}
+
+/// Writes `SWEEP_FIXTURE`: `cargo test --release record_sweep_position --
+/// --ignored`.
+#[test]
+#[ignore]
+fn record_sweep_position() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(SWEEP_FIXTURE);
+    std::fs::write(path, sweep::fixture_json(&sweep_position())).unwrap();
+}
+
+/// The recorded sweep position replays to the position it was recorded
+/// from, node for node and segment for segment, so the fixture hashes
+/// what the recorder saw.
+#[test]
+fn the_sweep_fixture_replays_to_its_position() {
+    let live = sweep_position();
+    let loaded = position(&std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(SWEEP_FIXTURE));
+    assert_eq!(live.nodes.len(), loaded.nodes.len());
+    for (a, b) in live.nodes.iter().zip(&loaded.nodes) {
+        assert_eq!(a.position, b.position);
+    }
+    assert_eq!(live.lines.len(), loaded.lines.len());
+    for (a, b) in live.lines.iter().zip(&loaded.lines) {
+        assert_eq!(a.segments, b.segments, "line {}", a.id);
+        assert_eq!(a.new_node_pos, b.new_node_pos, "line {}", a.id);
+    }
 }

@@ -122,7 +122,7 @@ pub struct Forfeit {
 
 impl std::fmt::Display for Forfeit {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.why)
+        write!(f, "{} after {}", self.why, self.tally)
     }
 }
 
@@ -204,6 +204,7 @@ pub fn games(seed: u64, games: usize) -> Vec<(usize, Vec<u32>)> {
 
 /// The seeded games drawn as `player` and tallied together, a forfeited
 /// game by the routes it tried plus one bug.
+#[cfg(feature = "bench")]
 pub fn sweep(seed: u64, count: usize, player: Player) -> Tally {
     let mut total = Tally::default();
     for (nodes, picks) in games(seed, count) {
