@@ -71,7 +71,7 @@ fn parity_summary(parity: &[(u32, u32, bool)]) -> String {
 fn print_rows(title: &str, rows: &[Row]) {
     eprintln!("\n{title}");
     eprintln!(
-        "{:>4} {:>9} {:>6} {:>5} {:>9} {:>9} {:>8} {:>7} {:>9} {:>5} {:>6} {:>6} {:>5} {:>5}",
+        "{:>4} {:>9} {:>6} {:>5} {:>9} {:>9} {:>8} {:>7} {:>9} {:>8} {:>5} {:>6} {:>6} {:>5} {:>5}",
         "move",
         "total ms",
         "search",
@@ -81,6 +81,7 @@ fn print_rows(title: &str, rows: &[Row]) {
         "attempts",
         "arenas",
         "arena ms",
+        "call ms",
         "room",
         "nospot",
         "shape",
@@ -90,7 +91,7 @@ fn print_rows(title: &str, rows: &[Row]) {
     for r in rows {
         let s = &r.stats;
         eprintln!(
-            "{:>4} {:>9.0} {:>6.0} {:>5.0} {:>9} {:>9} {:>8} {:>7} {:>9.0} {:>5} {:>6} {:>6} {:>5} {:>5}{}",
+            "{:>4} {:>9.0} {:>6.0} {:>5.0} {:>9} {:>9} {:>8} {:>7} {:>9.0} {:>8.0} {:>5} {:>6} {:>6} {:>5} {:>5}{}",
             r.index,
             r.total_ms(),
             r.search_ms,
@@ -100,6 +101,7 @@ fn print_rows(title: &str, rows: &[Row]) {
             s.attempts,
             s.arenas,
             s.arena_ms,
+            s.call_ms_max,
             s.refused.room,
             s.refused.no_spot,
             s.refused.shape.values().sum::<usize>(),
@@ -117,7 +119,11 @@ fn print_rows(title: &str, rows: &[Row]) {
         );
     }
     let worst = rows.iter().map(Row::total_ms).fold(0.0, f64::max);
-    eprintln!("worst reply {worst:.0} ms over {} replies", rows.len());
+    let longest_call = rows.iter().map(|r| r.stats.call_ms_max).fold(0.0, f64::max);
+    eprintln!(
+        "worst reply {worst:.0} ms over {} replies; longest route call {longest_call:.0} ms against DRAW_LIMIT_MS {DRAW_LIMIT_MS:.0}",
+        rows.len()
+    );
 }
 
 /// A clock that already reads `ms`.
@@ -553,7 +559,7 @@ fn probe_live_room_position() {
         let draw_ms = t.elapsed().as_secs_f64() * 1000.0;
         let s = stats::take();
         eprintln!(
-            "run {run}: {} after {passed} passed, search {search_ms:.0} ms, draw {draw_ms:.0} ms, {} attempts, {} arenas, {} memo hits, room {}, bugs {:?}, first ranked {:?}",
+            "run {run}: {} after {passed} passed, search {search_ms:.0} ms, draw {draw_ms:.0} ms, {} attempts, {} arenas, {} memo hits, longest call {:.0} ms, room {}, bugs {:?}, first ranked {:?}",
             match &drawn {
                 Ok(m) => format!("drew {}-{}", m.from_node, m.to_node),
                 Err(why) => format!("{why:?}"),
@@ -561,6 +567,7 @@ fn probe_live_room_position() {
             s.attempts,
             s.arenas,
             s.memo_hits,
+            s.call_ms_max,
             s.refused.room,
             s.refused.bugs,
             candidates[order[0]]

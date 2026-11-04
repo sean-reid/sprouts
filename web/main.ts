@@ -33,6 +33,7 @@ import { healPath } from "./path";
 import { startingNodes, wireRecording } from "./record";
 import { draw } from "./render";
 import { NodeTargets } from "./targets";
+import { undrawnStatus } from "./undrawn";
 import {
   freshBoard,
   watched,
@@ -146,7 +147,6 @@ let suggestion: Promise<void> = Promise.resolve();
 let dotUpdate: Promise<void> = Promise.resolve();
 
 const engine = new Engine(() => setStatus("Failed to load game engine", "lose"));
-const UNDRAWN_STATUS = "The AI could not draw a move here. Undo or start a new game.";
 const targets = new NodeTargets(targetsEl, boardEl, state, view, {
   activate: (id) => void keys.activate(id),
   focus: (id) => {
@@ -747,7 +747,7 @@ async function performAIMove(): Promise<void> {
       return;
     }
     if (reply.kind === "undrawn") {
-      setStatus(UNDRAWN_STATUS, "lose");
+      setStatus(undrawnStatus(reply.reason), "lose");
       state.mode = "idle";
       updateControls();
       return;
@@ -776,7 +776,7 @@ async function performAIMove(): Promise<void> {
     logReply(error instanceof CallTimeout ? "undrawn (timeout)" : "error", since);
     // A reply that never came leaves the board as an undrawn one does:
     // the engine never applies the AI's move itself, so Undo still works.
-    if (error instanceof CallTimeout) setStatus(UNDRAWN_STATUS, "lose");
+    if (error instanceof CallTimeout) setStatus(undrawnStatus("timeout"), "lose");
     else setStatus("AI error: " + describe(error), "lose");
     state.mode = "idle";
     updateControls();

@@ -45,6 +45,8 @@ pub(crate) mod stats {
         pub attempts: usize,
         pub arenas: usize,
         pub arena_ms: f64,
+        /// Longest `route` or `route_cheap` call, its arena build included.
+        pub call_ms_max: f64,
         /// Most states a corridor search that found its path held.
         pub states_ok_max: usize,
         /// Each parity search: bits to flip, bits in play, and whether it
@@ -65,6 +67,11 @@ pub(crate) mod stats {
 
     pub fn take() -> Stats {
         STATS.with(|s| std::mem::take(&mut *s.borrow_mut()))
+    }
+
+    pub fn note_call(started: std::time::Instant) {
+        let ms = started.elapsed().as_secs_f64() * 1000.0;
+        with(|s| s.call_ms_max = s.call_ms_max.max(ms));
     }
 }
 
@@ -198,6 +205,8 @@ impl Router {
     /// The curve for `mv`, drawn to the clearances of the player to move,
     /// validated as that player and read back as `mv`.
     pub fn route(&mut self, state: &GameState, mv: &FaceMove) -> Result<Move, Unroutable> {
+        #[cfg(test)]
+        let started = std::time::Instant::now();
         let want = rules(state);
         let drawn = self.route_at(state, mv, &want, Parity::Search);
         // The disc clearance is what the AI aims for; a line that cannot
@@ -206,10 +215,14 @@ impl Router {
             drawn,
             Err(Unroutable::Room | Unroutable::NoSpot | Unroutable::Shape(_))
         );
-        if !worth_retrying || want.node_clearance <= want.fallback {
-            return drawn;
-        }
-        self.route_cheap(state, mv)
+        let drawn = if !worth_retrying || want.node_clearance <= want.fallback {
+            drawn
+        } else {
+            self.route_cheap(state, mv)
+        };
+        #[cfg(test)]
+        stats::note_call(started);
+        drawn
     }
 
     /// `route` at the clearance a human line gets, one attempt.
@@ -225,8 +238,10 @@ impl Router {
         mv: &FaceMove,
         parity: Parity,
     ) -> Result<Move, Unroutable> {
+        #[cfg(test)]
+        let started = std::time::Instant::now();
         let want = rules(state);
-        self.route_at(
+        let drawn = self.route_at(
             state,
             mv,
             &Rules {
@@ -234,7 +249,10 @@ impl Router {
                 ..want
             },
             parity,
-        )
+        );
+        #[cfg(test)]
+        stats::note_call(started);
+        drawn
     }
 
     fn route_at(

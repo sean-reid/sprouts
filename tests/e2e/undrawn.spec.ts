@@ -22,7 +22,7 @@ test("a reply the worker never sends in time is undrawn, and the human can undo"
   await holdNext(page, "aiMove", 31_000);
   await clickAway(page);
   const status = page.locator("#status");
-  await expect(status).toHaveText(/could not draw a move/, { timeout: 40_000 });
+  await expect(status).toHaveText(/ran out of time/, { timeout: 40_000 });
   await expect(page.locator("#gameOverModal")).not.toHaveClass(/visible/);
   await expect(page.locator("#undoBtn")).toBeEnabled();
   await page.locator("#undoBtn").click();
