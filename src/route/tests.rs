@@ -705,3 +705,41 @@ fn recorded_topology_positions_stay_bounded() {
     eprintln!("{tally}");
     assert!(tally.topology <= RECORDED_TOPOLOGY, "{tally}");
 }
+
+/// FNV-1a over the bits of the flattening and the node of every routed
+/// search move of every routing fixture, in path order.
+fn routing_hash() -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut feed = |x: f64| {
+        for byte in x.to_bits().to_le_bytes() {
+            hash ^= byte as u64;
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    };
+    for path in fixture_paths("fixtures/routing") {
+        let state = position(&path);
+        for mv in state.face.search_moves() {
+            if let Ok(drawn) = route(&state, &mv) {
+                for p in drawn
+                    .flatten(curve::tolerance(state.board_size))
+                    .iter()
+                    .chain(std::iter::once(&drawn.new_node_pos))
+                {
+                    feed(p.x);
+                    feed(p.y);
+                }
+            }
+        }
+    }
+    hash
+}
+
+/// The routing hash a Mac records; the Linux runner has to produce the
+/// same one, since a share link is redrawn on the visitor's device.
+const ROUTING_HASH: u64 = 0xc4cb_8e68_94a2_1296;
+
+#[test]
+fn routing_hashes_the_same_on_every_platform() {
+    let hash = routing_hash();
+    assert_eq!(hash, ROUTING_HASH, "routing hash {hash:#018x}");
+}
