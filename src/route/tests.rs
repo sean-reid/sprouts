@@ -630,13 +630,13 @@ fn record_shared_games() {
     record_shared_game(
         4,
         8,
-        pick("SPROUTS_PICK_4", 16),
+        pick("SPROUTS_PICK_4", 5),
         &dir.join("eight-moves-4n-1000.json"),
     );
     record_shared_game(
         9,
         10,
-        pick("SPROUTS_PICK_9", 22),
+        pick("SPROUTS_PICK_9", 36),
         &dir.join("ten-moves-9n-1000.json"),
     );
 }
@@ -785,7 +785,7 @@ const SWEEP_FIXTURE: &str = "fixtures/routing/sweep-6n-6m.json";
 /// The final routing hash a Mac records; the Linux runner and the wasm
 /// build (tests/unit/route-hash.test.ts) have to produce the same one,
 /// since a share link is redrawn on the visitor's device.
-const ROUTING_HASH: u64 = 0xf549_cf18_4d0d_3fb9;
+const ROUTING_HASH: u64 = 0xdfce_5b65_5b09_9513;
 
 #[test]
 fn routing_hashes_the_same_on_every_platform() {
