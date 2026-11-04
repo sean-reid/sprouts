@@ -813,7 +813,10 @@ export interface LinkEngine {
 // replay settles as the visitor's will, so when `settled`, the
 // board on screen, is given and a node of the rehearsed board sits
 // more than DRIFT_TOLERANCE from it, the latest topology move goes
-// as geometry too. A refused drawn move is blamed on the latest
+// as geometry too, and when none is left `mismatch` says the
+// visitor's board may differ. A share from a review position gives
+// no board, since the rehearsal replays the whole record, and runs
+// the record check only. A refused drawn move is blamed on the latest
 // topology move before it, whose redraw shifted the board under
 // it; when none precedes it the index comes back so the sharer can
 // be told. A history the engine refuses to classify, as one left
@@ -823,7 +826,7 @@ export async function prepareLink(
   source: History,
   engine: LinkEngine,
   settled?: Point[],
-): Promise<{ history: History; refusedAt?: number }> {
+): Promise<{ history: History; refusedAt?: number; mismatch?: boolean }> {
   const history = source.clone();
   const plan = classification(history);
   if (plan) {
@@ -857,12 +860,12 @@ export async function prepareLink(
       if (drifted) continue;
       const apart =
         settled !== undefined &&
-        settled.length === rehearsed.settled.length &&
-        settled.some((node, i) => distance(node, rehearsed.settled[i]!) > tolerance);
+        (settled.length !== rehearsed.settled.length ||
+          settled.some((node, i) => distance(node, rehearsed.settled[i]!) > tolerance));
       if (!apart) return { history };
       let latest = history.moves.length - 1;
       while (latest >= 0 && !demote(history, latest)) latest--;
-      if (latest < 0) return { history };
+      if (latest < 0) return { history, mismatch: true };
       continue;
     }
     if (demote(history, refused)) continue;

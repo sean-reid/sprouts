@@ -984,16 +984,21 @@ async function share(): Promise<void> {
         classify: (plan) => engine.call("classify", plan),
         rehearse: (plan) => engine.call("rehearse", plan),
       },
+      // A review position is not the record's last board, which the rehearsal settles to.
       timeline.atEnd ? state.nodes.map((node) => node.position) : undefined,
     );
     const copied = copyLater(prepared.then(({ history }) => shareUrl(history)));
-    const { history, refusedAt } = await prepared;
+    const { history, refusedAt, mismatch } = await prepared;
     const url = shareUrl(history);
     window.history.replaceState(null, "", url);
     const warning =
-      refusedAt === undefined ? "" : ` A visitor's replay may stop at move ${refusedAt + 1}.`;
+      refusedAt !== undefined
+        ? ` A visitor's replay may stop at move ${refusedAt + 1}.`
+        : mismatch
+          ? " A visitor's board may differ from this one."
+          : "";
     if (await copied) {
-      setStatus("Link copied." + warning, refusedAt === undefined ? "win" : "");
+      setStatus("Link copied." + warning, warning ? "" : "win");
     } else {
       shareUrlEl.hidden = false;
       shareUrlEl.value = url;

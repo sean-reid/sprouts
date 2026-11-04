@@ -495,6 +495,16 @@ describe("a move that arrives as topology", () => {
     expect(rehearsal(drawnWithTopology)?.moves[0]?.kind).toBe("drawn");
   });
 
+  // The settled board of twoDrawnMoves as the engine reports it.
+  const board = [
+    at(100, 100),
+    at(900, 100),
+    at(900, 900),
+    at(100, 900),
+    at(500, 500),
+    at(500, 650),
+  ];
+
   // An engine that answers from a script: the face moves it would report
   // for the classification, and the refusals for successive rehearsals.
   function scripted(faces: (FaceMove | undefined)[], refusals: (number | undefined)[]) {
@@ -506,7 +516,7 @@ describe("a move that arrives as topology", () => {
         return Promise.resolve({ topology: faces });
       },
       rehearse: () =>
-        Promise.resolve({ refused: refusals[seen.rehearsed++], nodes: [], settled: [] }),
+        Promise.resolve({ refused: refusals[seen.rehearsed++], nodes: [], settled: board }),
     };
     return { engine, seen };
   }
@@ -524,7 +534,7 @@ describe("a move that arrives as topology", () => {
         return Promise.resolve({
           refused: undefined,
           nodes: [undefined, routed ? node : undefined],
-          settled: [],
+          settled: board,
         });
       },
     };
@@ -603,15 +613,6 @@ describe("a move that arrives as topology", () => {
     return { engine, seen };
   }
 
-  const board = [
-    at(100, 100),
-    at(900, 100),
-    at(900, 900),
-    at(100, 900),
-    at(500, 500),
-    at(500, 650),
-  ];
-
   it("demotes the latest topology move when the rehearsed board settles apart", async () => {
     const apart = board.map((p, i) => (i === 4 ? at(p.x, p.y + DRIFT_TOLERANCE + 0.5) : p));
     const { engine, seen } = settling([apart, board]);
@@ -619,6 +620,33 @@ describe("a move that arrives as topology", () => {
     expect(refusedAt).toBeUndefined();
     expect(seen.rehearsed).toBe(2);
     expect(history.moves.map((m) => m.topology)).toEqual([chord, undefined]);
+  });
+
+  it("reports a mismatch when no demotion brings the rehearsed board within the tolerance", async () => {
+    const apart = board.map((p, i) => (i === 4 ? at(p.x, p.y + DRIFT_TOLERANCE + 0.5) : p));
+    const { engine, seen } = settling([apart, apart, apart]);
+    const { history, refusedAt, mismatch } = await prepareLink(twoDrawnMoves(), engine, board);
+    expect(refusedAt).toBeUndefined();
+    expect(mismatch).toBe(true);
+    expect(seen.rehearsed).toBe(3);
+    expect(history.moves.map((m) => m.topology)).toEqual([undefined, undefined]);
+  });
+
+  it("treats a rehearsed board with another node count as apart", async () => {
+    const { engine, seen } = settling([board.slice(0, -1), board]);
+    const { history, mismatch } = await prepareLink(twoDrawnMoves(), engine, board);
+    expect(mismatch).toBeUndefined();
+    expect(seen.rehearsed).toBe(2);
+    expect(history.moves.map((m) => m.topology)).toEqual([chord, undefined]);
+  });
+
+  it("runs only the record check when no settled board is given", async () => {
+    const apart = board.map((p, i) => (i === 4 ? at(p.x, p.y + DRIFT_TOLERANCE + 0.5) : p));
+    const { engine, seen } = settling([apart]);
+    const { history, mismatch } = await prepareLink(twoDrawnMoves(), engine);
+    expect(mismatch).toBeUndefined();
+    expect(seen.rehearsed).toBe(1);
+    expect(history.moves.map((m) => m.topology)).toEqual([chord, second]);
   });
 
   it("keeps the topology moves when the rehearsed board settles within the tolerance", async () => {
