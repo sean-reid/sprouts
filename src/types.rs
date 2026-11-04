@@ -98,7 +98,7 @@ impl Node {
     pub fn new(id: usize, position: Point) -> Self {
         Self {
             id,
-            position,
+            position: curve::snap_to_grid(position),
             connection_count: 0,
         }
     }
@@ -147,8 +147,9 @@ impl Move {
         board_size: usize,
     ) -> Self {
         let segments = curve::fit(&polyline, curve::tolerance(board_size));
-        let new_node_pos =
-            curve::nearest(&segments, &new_node_pos).map_or(new_node_pos, |hit| hit.point);
+        let new_node_pos = curve::snap_to_grid(
+            curve::nearest(&segments, &new_node_pos).map_or(new_node_pos, |hit| hit.point),
+        );
         Self {
             from_node,
             to_node,
@@ -168,8 +169,9 @@ impl Move {
         new_node_pos: Point,
         player: Player,
     ) -> Self {
-        let new_node_pos =
-            curve::nearest(&segments, &new_node_pos).map_or(new_node_pos, |hit| hit.point);
+        let new_node_pos = curve::snap_to_grid(
+            curve::nearest(&segments, &new_node_pos).map_or(new_node_pos, |hit| hit.point),
+        );
         Self {
             from_node,
             to_node,

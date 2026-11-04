@@ -173,7 +173,10 @@ impl Arrangement {
 
     fn add_closed(&mut self, pts: &[Point], wall: bool) {
         for i in 0..pts.len() {
-            let (p, q) = (pts[i], pts[(i + 1) % pts.len()]);
+            let (p, q) = (
+                curve::snap_to_grid(pts[i]),
+                curve::snap_to_grid(pts[(i + 1) % pts.len()]),
+            );
             if p.distance_to(&q) < SAME_POINT {
                 continue;
             }
@@ -655,6 +658,12 @@ impl Arena {
 
     pub(super) fn walls(&self) -> &[(Point, Point)] {
         &self.walls.segments
+    }
+
+    /// Every vertex of the triangulation, in insertion order.
+    #[cfg(test)]
+    pub(super) fn vertex_points(&self) -> Vec<Point> {
+        self.cdt.vertices().map(|v| point(v.position())).collect()
     }
 
     pub(super) fn vertex_point(&self, v: FixedVertexHandle) -> Point {

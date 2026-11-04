@@ -223,9 +223,10 @@ fn relax(
     // The relaxation settles a little short of its room, so the room sits a
     // line clearance above what the validator demands.
     let room = (NODE_ROOM * want.spacing).max(want.node_clearance + want.clearance);
+    // The fit may move the curve a tolerance toward a node as well.
     let rooms = clearance::Rooms {
         clearance: eroded_by(state, want),
-        node_clearance: want.node_clearance,
+        node_clearance: want.node_clearance + curve::tolerance(state.board_size),
         node_room: room,
         end_room: want.spacing,
     };
@@ -271,9 +272,10 @@ pub(crate) fn finish(
     // Wiggles under the fit tolerance are relaxation noise, not shape;
     // dropping them first gives the fit a few long, even cubics. The fit
     // measures its error at the points alone, so a long straight run gets
-    // points along it to hold the cubic down.
-    let path = densify(&decimate_polyline(&path, tolerance), clearance);
-    let segments = curve::fit(&path, tolerance);
+    // points along it to hold the cubic down. The face is eroded by one
+    // tolerance, so the decimation and the fit share it.
+    let path = densify(&decimate_polyline(&path, tolerance / 2.0), clearance);
+    let segments = curve::fit(&path, tolerance / 2.0);
     let flat = curve::flatten(&segments, tolerance);
     let node = place_node(state, &segments, &flat, spacing).ok_or(Unroutable::NoSpot)?;
     let ends = [state.nodes[mv.a].position, state.nodes[mv.b].position];
@@ -282,6 +284,15 @@ pub(crate) fn finish(
     if self_crossing(&flat) || self_touching(&flat, ends, clearance) {
         return Err(Unroutable::Shape("touching"));
     }
+    let segments: Vec<curve::Cubic> = segments
+        .iter()
+        .map(|c| curve::Cubic {
+            p0: curve::snap_to_grid(c.p0),
+            p1: curve::snap_to_grid(c.p1),
+            p2: curve::snap_to_grid(c.p2),
+            p3: curve::snap_to_grid(c.p3),
+        })
+        .collect();
     let mov = Move::from_segments(mv.a, mv.b, path, segments, node, state.current_player);
     match state.current_player {
         Player::AI => validate_ai_move(state, &mov),
