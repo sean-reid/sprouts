@@ -1233,3 +1233,238 @@ fn a_shortcut_into_an_end_has_to_arrive_through_its_corner() {
     assert_ne!(arrives(&corners[0], below), arrives(&corners[1], below));
     assert_ne!(arrives(&corners[0], above), arrives(&corners[0], below));
 }
+
+/// The flattenings of every line at node `v`, the node's own spokes.
+fn spokes_at(state: &GameState, v: NodeId) -> Vec<Vec<Point>> {
+    state
+        .face
+        .rotation(v)
+        .iter()
+        .map(|&h| crate::embedding::half_edge_path(state, h))
+        .collect()
+}
+
+/// Every position of the seeded AI sweep games plus the routing
+/// fixtures, with the AI to move.
+fn probe_positions() -> Vec<GameState> {
+    let mut out: Vec<GameState> = fixture_paths("fixtures/routing")
+        .iter()
+        .map(|path| position(path))
+        .collect();
+    for (nodes, picks) in sweep::games(SEED, CASES as usize) {
+        let mut state =
+            GameState::with_nodes_at(crate::types::opening_layout(nodes, 1000), 1000, 0);
+        state.current_player = Player::AI;
+        for &pick in &picks {
+            let moves = state.face.search_moves();
+            if moves.is_empty() {
+                break;
+            }
+            let first = pick as usize % moves.len();
+            let drawn = (0..moves.len())
+                .map(|k| (first + k) % moves.len())
+                .find_map(|k| draws(&state, &moves[k]).ok());
+            let Some(mov) = drawn else { break };
+            out.push(state.clone());
+            state.apply_move(mov).unwrap();
+            state.current_player = Player::AI;
+        }
+    }
+    out
+}
+
+/// Measures the relaxation at the ends over every search move of the
+/// probe positions: how many routes leave the first or last interior
+/// point where the taut path put it while the next point moved, split by
+/// whether that end has spokes, and how close the first point sits to
+/// the end's own spokes: `cargo test --release probe_end_pins -- --ignored
+/// --nocapture`.
+#[test]
+#[ignore]
+fn probe_end_pins() {
+    let mut routes = 0;
+    let mut relaxed_routes = 0;
+    let mut pinned = [0usize; 2];
+    let mut ends_seen = [0usize; 2];
+    let mut gaps: Vec<f64> = Vec::new();
+    for state in probe_positions() {
+        let want = rules(&state);
+        for mv in state.face.search_moves() {
+            if mv.a == mv.b && mv.enclosed.is_empty() {
+                continue;
+            }
+            routes += 1;
+            let Ok((arena, taut)) = plan(&mut Router::new(), &state, &mv, &want, Parity::Search)
+            else {
+                continue;
+            };
+            let Some(relaxed) = relax(&state, &mv, &want, &arena, &taut) else {
+                continue;
+            };
+            relaxed_routes += 1;
+            let before =
+                clearance::resample(&taut, clearance::SPACING * super::eroded_by(&state, &want));
+            assert_eq!(before.len(), relaxed.len());
+            let n = relaxed.len();
+            if n < 5 {
+                continue;
+            }
+            let same = |i: usize| before[i].distance_to(&relaxed[i]) < 1e-9;
+            for (end, first, second) in [(mv.a, 1, 2), (mv.b, n - 2, n - 3)] {
+                let spokes = spokes_at(&state, end);
+                let has = usize::from(!spokes.is_empty());
+                ends_seen[has] += 1;
+                if same(first) && !same(second) {
+                    pinned[has] += 1;
+                }
+                if !spokes.is_empty() {
+                    let gap = spokes
+                        .iter()
+                        .map(|s| closest_point_on_polyline(s, &relaxed[first]).1)
+                        .fold(f64::INFINITY, f64::min);
+                    gaps.push(gap / want.clearance);
+                }
+            }
+        }
+    }
+    gaps.sort_by(f64::total_cmp);
+    let pct = |q: f64| gaps[((gaps.len() - 1) as f64 * q) as usize];
+    eprintln!(
+        "{routes} routes planned, {relaxed_routes} relaxed; ends with spokes {}, pinned {}; bare ends {}, pinned {}",
+        ends_seen[1], pinned[1], ends_seen[0], pinned[0]
+    );
+    eprintln!(
+        "first point to own spoke, in line clearances: min {:.3} p10 {:.3} median {:.3} p90 {:.3} over {} ends",
+        pct(0.0),
+        pct(0.1),
+        pct(0.5),
+        pct(0.9),
+        gaps.len()
+    );
+}
+
+const SPOKES_FIXTURE: &str = "fixtures/routing/spokes-4n-2m.json";
+
+/// Node 0 at the right with chords to nodes 1 and 3, which sit 100
+/// degrees apart on its left, so its last move, to node 2 in between,
+/// leaves through the corner between its two spokes.
+fn spokes_position() -> GameState {
+    let nodes = vec![
+        p(700.0, 500.0),
+        p(500.0, 262.0),
+        p(250.0, 500.0),
+        p(500.0, 738.0),
+    ];
+    let mut state = GameState::with_nodes_at(nodes, 1000, 0);
+    state.current_player = Player::AI;
+    for b in [1, 3] {
+        let mov = listed(&state, 0, b)
+            .iter()
+            .find_map(|m| draws(&state, m).ok())
+            .unwrap();
+        state.apply_move(mov).unwrap();
+        state.current_player = Player::AI;
+    }
+    state
+}
+
+/// Writes `SPOKES_FIXTURE`: `cargo test --release record_spokes_position
+/// -- --ignored`.
+#[test]
+#[ignore]
+fn record_spokes_position() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(SPOKES_FIXTURE);
+    std::fs::write(path, sweep::fixture_json(&spokes_position())).unwrap();
+}
+
+/// A route out of an end node with two spokes leaves between them instead
+/// of hugging one: the relaxation moves the first point after the end to
+/// the line clearance from both spokes, and the drawn curve stays in the
+/// corner, a clearance off both spokes by the time it is a node room out.
+#[test]
+fn a_route_out_of_an_end_with_two_spokes_leaves_between_them() {
+    let state = position(&std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(SPOKES_FIXTURE));
+    let live = spokes_position();
+    assert_eq!(
+        bits_of(&live),
+        bits_of(&state),
+        "the fixture is the recorded position"
+    );
+    let want = rules(&state);
+    let spokes = spokes_at(&state, 0);
+    assert_eq!(spokes.len(), 2);
+    let end = state.nodes[0].position;
+    // Node 0 has two corners; the move through the one between the spokes
+    // heads left, within 50 degrees of the chord to node 2.
+    let between = |q: &Point| q.x < end.x && (q.y - end.y).abs() < (end.x - q.x) * 1.19;
+    let mv = listed(&state, 0, 2)
+        .into_iter()
+        .find(|m| {
+            plan(&mut Router::new(), &state, m, &want, Parity::Search)
+                .is_ok_and(|(_, taut)| between(&taut[1]))
+        })
+        .expect("a move leaving between the spokes");
+    let gap = |q: &Point| {
+        spokes
+            .iter()
+            .map(|s| closest_point_on_polyline(s, q).1)
+            .fold(f64::INFINITY, f64::min)
+    };
+
+    let (arena, taut) = plan(&mut Router::new(), &state, &mv, &want, Parity::Search).unwrap();
+    let relaxed = relax(&state, &mv, &want, &arena, &taut).unwrap();
+    let before = clearance::resample(&taut, clearance::SPACING * super::eroded_by(&state, &want));
+    assert_eq!(relaxed[0], end);
+    assert!(
+        before[1].distance_to(&relaxed[1]) > 1e-9,
+        "the first point after the end did not move"
+    );
+    assert!(
+        between(&relaxed[1]),
+        "the first point left the corner: {:?}",
+        relaxed[1]
+    );
+    assert!(
+        gap(&relaxed[1]) >= want.clearance,
+        "first point {:.2} from a spoke, clearance {:.2}",
+        gap(&relaxed[1]),
+        want.clearance
+    );
+
+    let drawn = route(&state, &mv).unwrap();
+    let room = NODE_ROOM * want.spacing;
+    let mut along = 0.0;
+    let mut checked = 0;
+    let mut last = end;
+    // The curve sampled about every unit of arc length over the first
+    // node room, so a straight route still gives points to check.
+    'curve: for w in drawn.flatten(curve::tolerance(state.board_size)).windows(2) {
+        let length = w[0].distance_to(&w[1]);
+        let steps = length.ceil().max(1.0) as usize;
+        for k in 1..=steps {
+            let t = k as f64 / steps as f64;
+            last = p(
+                w[0].x + (w[1].x - w[0].x) * t,
+                w[0].y + (w[1].y - w[0].y) * t,
+            );
+            if along + length * t > room {
+                break 'curve;
+            }
+            assert!(between(&last), "{last:?} left the corner");
+            checked += 1;
+        }
+        along += length;
+    }
+    assert!(checked >= 20, "{checked} points checked");
+    assert!(
+        gap(&last) >= want.clearance,
+        "{:.2} from a spoke one node room out",
+        gap(&last)
+    );
+}
+
+/// Every coordinate of a position, for comparing a fixture with the
+/// position it was recorded from.
+fn bits_of(state: &GameState) -> Vec<u64> {
+    crate::settle::golden::bits(state)
+}
