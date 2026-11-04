@@ -721,7 +721,8 @@ fn recorded_topology_positions_stay_bounded() {
 /// rule, a position the hand-made fixtures do not reach.
 fn sweep_position() -> GameState {
     let (nodes, picks) = sweep::games(SEED, 1).remove(0);
-    let mut state = GameState::with_board_size(nodes, 1000);
+    // Sweep positions are recorded as drawn, with no settle.
+    let mut state = GameState::with_nodes_at(crate::types::opening_layout(nodes, 1000), 1000, 0);
     state.current_player = Player::AI;
     for pick in picks.iter().take(6) {
         let moves = state.face.search_moves();

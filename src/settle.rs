@@ -997,6 +997,7 @@ fn relax(
     undo
 }
 
+#[cfg(any(test, feature = "hash"))]
 pub mod golden;
 
 #[cfg(test)]

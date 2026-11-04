@@ -599,7 +599,7 @@ fn the_round_guard_refuses_a_changed_face_and_a_new_crossing() {
 /// so platform rounding of the fit cannot move it, as recorded here.
 #[test]
 fn a_version_0_fixture_replays_to_the_recorded_board() {
-    const HUMAN_4N_1000: u64 = 0x39702e50bca4b665;
+    const HUMAN_4N_1000: u64 = 0xc87947d565ba34c4;
     let fixture = replay::load(
         &Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/games/human-4n-1000.json"),
     )

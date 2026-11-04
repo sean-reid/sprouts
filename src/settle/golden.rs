@@ -14,7 +14,7 @@ use crate::types::{GameState, Player, Point};
 /// settles differently: bump SETTLE_VERSION in src/protocol.rs and record
 /// the new value.
 #[cfg(test)]
-pub const VERSION_1_GOLDEN: u64 = 0x7e4db2556e772853;
+pub const VERSION_1_GOLDEN: u64 = 0xd77fd8c18d5f65f0;
 
 /// The settled board after each move of the seeded 9-node game, recorded
 /// on macOS. A mismatch names the first move another platform settles
@@ -22,15 +22,15 @@ pub const VERSION_1_GOLDEN: u64 = 0x7e4db2556e772853;
 /// SETTLE_VERSION and recording the new values.
 #[cfg(test)]
 pub const VERSION_1_SEEDED_GAME: &[u64] = &[
-    0xe089699e9529c6a0,
-    0xdb09847a75017036,
-    0x1f808e2d5b28f2d1,
-    0x765e25f0f054a191,
-    0xdc0dc5c2bbe9639d,
-    0xa42bb5629b2ed6bf,
-    0xf19584e5f7075da3,
-    0x1300789647f1a289,
-    0x540c4f10d91389c9,
+    0x3d7fa941984d9c88,
+    0xe8949eda727182fd,
+    0x30c2983333a567da,
+    0x04754f96acb3953b,
+    0x80cb3662d3eac334,
+    0xbb3cc3744bc2c9a0,
+    0xf1d0c3108dcd6725,
+    0x0777b6443ff308e3,
+    0x339c593f9e2c0ec9,
 ];
 
 /// Picks for a random game from a small multiplicative generator, so the

@@ -54,7 +54,7 @@ const VERSION_3_PAYLOAD =
 const VERSION_4_PAYLOAD = "BAIABADoAwIAAgAAAQAC2AToB6AGAI8DAAICAgQEAgAE2AnoBw";
 // The same two moves as a version 5 link, with settle version 0 after the
 // router byte.
-const VERSION_5_PAYLOAD = "BAIAAAQA6AMCAAIAAAEAAtgE6AegBgCPAwACAgIEBAIABNgJ6Ac";
+const VERSION_5_PAYLOAD = "BQIAAAQA6AMCAAIAAAEAAtgE6AegBgCPAwACAgIEBAIABNgJ6Ac";
 const LOOP_FACE: FaceMove = { a: 2, atA: 3, b: 2, atB: 3, enclosed: [0, 4] };
 
 function bytesOf(payload: string): Uint8Array {

@@ -197,11 +197,6 @@ pub fn resample_polyline(points: &[Point], target_spacing: f64) -> Vec<Point> {
     result
 }
 
-/// The dot product of two vectors.
-pub fn dot(a: Point, b: Point) -> f64 {
-    a.x * b.x + a.y * b.y
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

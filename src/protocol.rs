@@ -310,6 +310,7 @@ pub fn snapshot(state: &GameState) -> Snapshot {
     }
 }
 
+#[cfg(any(test, feature = "bench", feature = "hash"))]
 pub(crate) fn check(state: &GameState, mov: &types::Move) -> Result<(), Rejection> {
     topology(state, mov).map(drop)
 }
@@ -483,11 +484,19 @@ pub struct RouteHashPlan {
 pub fn route_hash(plan: RouteHashPlan) -> Result<String, String> {
     let mut fnv = crate::exact::Fnv::default();
     for plan in plan.plans {
-        let mut state = start(plan.initial_nodes, plan.board_size, Player::AI, plan.nodes)?;
+        // Recorded positions, replayed as drawn with no settle.
+        let mut state = start(
+            plan.initial_nodes,
+            plan.board_size,
+            Player::AI,
+            plan.nodes,
+            0,
+        )?;
         for (index, mov) in plan.moves.into_iter().enumerate() {
             state.current_player = Player::AI;
+            let mov = enter(mov, &state).map_err(|e| format!("move {index}: {}", e.message))?;
             state
-                .apply_move(mov.by(Player::AI, state.board_size))
+                .apply_move(mov)
                 .map_err(|e| format!("move {index}: {}", e.message))?;
         }
         state.current_player = Player::AI;
@@ -1948,7 +1957,7 @@ mod tests {
             nodes: None,
             moves: vec![LinkMove::Drawn { mov }],
         };
-        assert_eq!(rehearse(plan), Ok(None));
+        assert_eq!(rehearse(plan).map(|r| r.refused), Ok(None));
         assert_eq!(state.settles.len(), records.len());
         assert!(state
             .settles

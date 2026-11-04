@@ -132,7 +132,8 @@ impl std::fmt::Display for Forfeit {
 /// fail as a bug; otherwise the game is forfeited with the position as a
 /// fixture and the reason.
 pub fn game(nodes: usize, picks: &[u32], player: Player) -> Result<Tally, Forfeit> {
-    let mut state = GameState::with_board_size(nodes, 1000);
+    // Sweep positions are recorded and hashed as drawn, with no settle.
+    let mut state = GameState::with_nodes_at(crate::types::opening_layout(nodes, 1000), 1000, 0);
     state.current_player = player;
     let mut tally = Tally::default();
     for &pick in picks {
