@@ -11,7 +11,7 @@ function at(x: number, y: number): Point {
 const SQUARE = [at(100, 100), at(200, 100), at(200, 200), at(100, 200), at(100, 100)];
 
 // The count is joined to "cuts off" with non-breaking spaces.
-const cutsOff = (n: number) => `cuts off ${n}`;
+const cutsOff = (n: number) => `cuts\u00a0off\u00a0${n}`;
 
 // An Applied outcome with the count and no lines, as the engine reports it
 // for a move the page already holds the stroke of.
