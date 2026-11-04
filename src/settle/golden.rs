@@ -14,7 +14,7 @@ use crate::types::{GameState, Player, Point};
 /// settles differently: bump SETTLE_VERSION in src/protocol.rs and record
 /// the new value.
 #[cfg(test)]
-pub const VERSION_1_GOLDEN: u64 = 0xa032cb53618d8318;
+pub const VERSION_1_GOLDEN: u64 = 0x7e4db2556e772853;
 
 /// The settled board after each move of the seeded 9-node game, recorded
 /// on macOS. A mismatch names the first move another platform settles
@@ -22,15 +22,15 @@ pub const VERSION_1_GOLDEN: u64 = 0xa032cb53618d8318;
 /// SETTLE_VERSION and recording the new values.
 #[cfg(test)]
 pub const VERSION_1_SEEDED_GAME: &[u64] = &[
-    0x7bb01be736536569,
-    0x7a06061ba002b013,
-    0xa9fe3221b9b96035,
-    0x475be4ad2b1b4a3e,
-    0xa19c5ada51285ec,
-    0x98127e76221c6345,
-    0x3d62a2f5e2c6e0bc,
-    0x56516138c9de2925,
-    0x759c44b36b8bcc5a,
+    0xe089699e9529c6a0,
+    0xdb09847a75017036,
+    0x1f808e2d5b28f2d1,
+    0x765e25f0f054a191,
+    0xdc0dc5c2bbe9639d,
+    0xa42bb5629b2ed6bf,
+    0xf19584e5f7075da3,
+    0x1300789647f1a289,
+    0x540c4f10d91389c9,
 ];
 
 /// Picks for a random game from a small multiplicative generator, so the
@@ -161,11 +161,13 @@ pub fn bits(state: &GameState) -> Vec<u64> {
     out
 }
 
-/// A 64-bit fold of every coordinate on the board.
+/// FNV-1a over every coordinate on the board, through the shared hasher.
 pub fn hash(state: &GameState) -> u64 {
-    bits(state).iter().fold(0xcbf29ce484222325u64, |h, b| {
-        (h ^ b).wrapping_mul(0x100000001b3)
-    })
+    let mut fnv = crate::exact::Fnv::default();
+    for b in bits(state) {
+        fnv.feed(f64::from_bits(b));
+    }
+    fnv.0
 }
 
 /// The settled board after each move of the seeded game of `nodes` nodes,

@@ -11,7 +11,6 @@ pub const BOARD_SIZE: usize = 1000;
 
 // All spatial constants are tuned for a 1000px board.
 // Use scale(board_size) to adapt them to smaller boards (e.g. 500px mobile).
-pub use crate::geometry::on_grid;
 
 /// The grid every coordinate a settled game stores sits on: one unit of
 /// the 1000 board, the link quantum, so a link carries it exactly.
@@ -217,23 +216,23 @@ impl Move {
     /// the rounded curve and then on the grid.
     pub fn on_grid(mut self, grid: f64) -> Self {
         for p in &mut self.polyline {
-            *p = on_grid(*p, grid);
+            *p = crate::exact::snap_to_unit(*p, grid);
         }
         for c in &mut self.segments {
             *c = Cubic {
-                p0: on_grid(c.p0, grid),
-                p1: on_grid(c.p1, grid),
-                p2: on_grid(c.p2, grid),
-                p3: on_grid(c.p3, grid),
+                p0: crate::exact::snap_to_unit(c.p0, grid),
+                p1: crate::exact::snap_to_unit(c.p1, grid),
+                p2: crate::exact::snap_to_unit(c.p2, grid),
+                p3: crate::exact::snap_to_unit(c.p3, grid),
             };
         }
         let node = self.new_node_pos;
-        let kept = on_grid(node, grid) == node
+        let kept = crate::exact::snap_to_unit(node, grid) == node
             && curve::nearest(&self.segments, &node)
                 .is_some_and(|hit| hit.distance <= grid * std::f64::consts::FRAC_1_SQRT_2);
         if !kept {
             let near = curve::nearest(&self.segments, &node).map_or(node, |hit| hit.point);
-            self.new_node_pos = on_grid(near, grid);
+            self.new_node_pos = crate::exact::snap_to_unit(near, grid);
         }
         self
     }
@@ -290,7 +289,7 @@ impl GameState {
                 Node::new(
                     i,
                     if settle_version > 0 {
-                        on_grid(position, g)
+                        crate::exact::snap_to_unit(position, g)
                     } else {
                         position
                     },
@@ -538,7 +537,10 @@ mod tests {
         let gs = GameState::with_board_size(2, 500);
         assert_eq!(gs.board_size, 500);
         for (node, expected) in gs.nodes.iter().zip(opening_layout(2, 500)) {
-            assert_eq!(node.position, on_grid(expected, grid(500)));
+            assert_eq!(
+                node.position,
+                crate::exact::snap_to_unit(expected, grid(500))
+            );
             assert!(node.position.x > 0.0 && node.position.x < 500.0);
             assert!(node.position.y > 0.0 && node.position.y < 500.0);
         }

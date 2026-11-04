@@ -583,8 +583,6 @@ async function executeMove(): Promise<void> {
   else startAITurn();
 }
 
-type Applied = Extract<Outcome, { kind: "applied" }>;
-
 // The curve and node a move was drawn with, where the settle animation
 // starts from for the line the move added.
 interface Drawn {

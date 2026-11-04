@@ -8,9 +8,7 @@ use crate::face::{self, IllegalMove, Move as ModelMove};
 use crate::geometry;
 use crate::route::{self, Unroutable};
 use crate::settle;
-use crate::types::{
-    self, grid, on_grid, scale, GameState, Line, Node, Player, Point, MIN_NODE_SPACING,
-};
+use crate::types::{self, grid, scale, GameState, Line, Node, Player, Point, MIN_NODE_SPACING};
 use crate::validation::{self, Rejection};
 
 /// A move as proposed to the engine. The mover is whoever is to play, so a
@@ -761,10 +759,10 @@ fn as_stored(state: &GameState, segments: &[Cubic]) -> Vec<Cubic> {
     segments
         .iter()
         .map(|c| Cubic {
-            p0: on_grid(c.p0, g),
-            p1: on_grid(c.p1, g),
-            p2: on_grid(c.p2, g),
-            p3: on_grid(c.p3, g),
+            p0: crate::exact::snap_to_unit(c.p0, g),
+            p1: crate::exact::snap_to_unit(c.p1, g),
+            p2: crate::exact::snap_to_unit(c.p2, g),
+            p3: crate::exact::snap_to_unit(c.p3, g),
         })
         .collect()
 }
@@ -773,7 +771,7 @@ fn node_as_stored(state: &GameState, at: Point) -> Point {
     if state.settle_version == 0 {
         at
     } else {
-        on_grid(at, grid(state.board_size))
+        crate::exact::snap_to_unit(at, grid(state.board_size))
     }
 }
 
@@ -831,7 +829,7 @@ mod tests {
             Point::new(525.8608781260419, 205.32863223151458),
             Point::new(712.9536013426019, 777.7602629520936),
         ];
-        let state = start(4, 1000, Player::Human, Some(nodes)).unwrap();
+        let state = start(4, 1000, Player::Human, Some(nodes), 0).unwrap();
         assert_eq!(hash_board(&state), BOARD_HASH);
     }
 
@@ -989,7 +987,7 @@ mod tests {
         let gridded = start(3, 500, Player::Human, None, SETTLE_VERSION).unwrap();
         assert_eq!(
             gridded.nodes[0].position,
-            types::on_grid(types::opening_layout(3, 500)[0], grid(500))
+            crate::exact::snap_to_unit(types::opening_layout(3, 500)[0], grid(500))
         );
     }
 
@@ -2004,13 +2002,15 @@ mod tests {
     /// round nothing set nothing apart; a second chord 0 to 1 with the
     /// two-node piece {3, 6} on its new side sets 3 and 6 apart from 2
     /// and 4, with node 5 on both arcs and so on the wall.
+    // These boards take several routed moves in turn, so they run
+    // unsettled, as the fixtures they stand for were recorded.
     #[test]
     fn cut_off_counts_the_smaller_side_by_hand() {
-        let mut state = GameState::new(6);
+        let mut state = start(6, 1000, Player::Human, None, 0).unwrap();
         assert_eq!(routed(&mut state, bare(1, 1, vec![2])), 1);
         assert_eq!(routed(&mut state, bare(0, 0, vec![1])), 3);
 
-        let mut state = GameState::new(5);
+        let mut state = start(5, 1000, Player::Human, None, 0).unwrap();
         assert_eq!(routed(&mut state, bare(0, 1, vec![])), 0);
         assert_eq!(routed(&mut state, bare(3, 3, vec![])), 0);
         let split = listed(&state, |m| m.a == 0 && m.b == 1 && m.enclosed == vec![3]);
@@ -2023,7 +2023,7 @@ mod tests {
     /// so it reads 1 from the smaller side although four nodes sit inside.
     #[test]
     fn a_loop_round_the_larger_side_reads_the_smaller() {
-        let mut state = GameState::new(6);
+        let mut state = start(6, 1000, Player::Human, None, 0).unwrap();
         assert_eq!(routed(&mut state, bare(0, 0, vec![1, 2, 3, 4])), 1);
     }
 
@@ -2033,7 +2033,7 @@ mod tests {
     /// counted with the new side it would read 3.
     #[test]
     fn a_node_behind_the_split_boundary_counts_for_neither_side() {
-        let mut state = GameState::new(7);
+        let mut state = start(7, 1000, Player::Human, None, 0).unwrap();
         assert_eq!(routed(&mut state, bare(2, 2, vec![3])), 1);
         let chord = moves_from(&state, 2)
             .moves
@@ -2054,18 +2054,20 @@ mod tests {
             to_node: mv.b,
             polyline: path.clone(),
             new_node_pos: at,
+            segments: None,
         };
         let back = Move {
             from_node: mv.b,
             to_node: mv.a,
             polyline: path.into_iter().rev().collect(),
             new_node_pos: at,
+            segments: None,
         };
         (forward, back)
     }
 
     fn count(state: &mut GameState, mov: Move) -> (usize, FaceMove) {
-        let line = mov.clone().by(state.current_player, state.board_size);
+        let line = enter(mov.clone(), state).unwrap();
         let face = embedding::embed(state, &line).expect("the curve embeds");
         match apply(state, mov) {
             Outcome::Applied { cut_off, .. } => (cut_off, face.into()),
@@ -2078,7 +2080,7 @@ mod tests {
     /// Both read the same count.
     #[test]
     fn cut_off_does_not_depend_on_the_drawing_direction() {
-        let mut state = GameState::new(5);
+        let mut state = start(5, 1000, Player::Human, None, 0).unwrap();
         assert_eq!(routed(&mut state, bare(0, 1, vec![])), 0);
         assert_eq!(routed(&mut state, bare(3, 3, vec![])), 0);
         let split = listed(&state, |m| m.a == 0 && m.b == 1 && m.enclosed == vec![3]);
@@ -2089,7 +2091,7 @@ mod tests {
         assert_eq!(face_back.enclosed, vec![2, 4]);
         assert_eq!((there, and_back), (2, 2));
 
-        let state = GameState::new(6);
+        let state = start(6, 1000, Player::Human, None, 0).unwrap();
         let (forward, back) = both_ways(&state, bare(1, 1, vec![2]));
         let (there, face_there) = count(&mut state.clone(), forward);
         let (and_back, face_back) = count(&mut state.clone(), back);
@@ -2117,12 +2119,14 @@ mod tests {
                         .map(|p| Point::new(p[0], p[1]))
                         .collect(),
                     new_node_pos: Point::new(recorded.new_node[0], recorded.new_node[1]),
+                    segments: None,
                 };
                 let back = Move {
                     from_node: mov.to_node,
                     to_node: mov.from_node,
                     polyline: mov.polyline.iter().rev().copied().collect(),
                     new_node_pos: mov.new_node_pos,
+                    segments: None,
                 };
                 let (reversed, _) = count(&mut state.clone(), back);
                 let Outcome::Applied {

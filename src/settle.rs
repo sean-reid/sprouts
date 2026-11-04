@@ -14,10 +14,10 @@
 use crate::curve::{self, Cubic};
 use crate::embedding;
 use crate::face::Move as FaceMove;
-use crate::geometry::{self, closest_point_on_segment, segment_intersection, segments_intersect};
+use crate::geometry::{closest_point_on_segment, segment_intersection, segments_intersect};
 use crate::types::{
-    ai_node_clearance, grid, node_disc, on_grid, scale, GameState, Line, Move, Point,
-    MIN_NODE_SPACING, MIN_PATH_CLEARANCE,
+    ai_node_clearance, grid, node_disc, scale, GameState, Line, Move, Point, MIN_NODE_SPACING,
+    MIN_PATH_CLEARANCE,
 };
 
 /// Rounds per settle at most; a round that moves nothing ends it early.
@@ -164,7 +164,7 @@ fn mul(a: Point, k: f64) -> Point {
 }
 
 fn norm(a: Point) -> f64 {
-    geometry::distance(&a, &Point::new(0.0, 0.0))
+    crate::exact::length(a.x, a.y)
 }
 
 fn bernstein(t: f64) -> [f64; 4] {
@@ -685,11 +685,11 @@ impl Layout {
     /// so a step too short to change a cell changes nothing.
     fn quantise(&mut self, grid: f64, targets: &Targets) {
         for p in &mut self.nodes {
-            *p = on_grid(*p, grid);
+            *p = crate::exact::snap_to_unit(*p, grid);
         }
         for chain in &mut self.lines {
             for p in &mut chain.pts {
-                *p = on_grid(*p, grid);
+                *p = crate::exact::snap_to_unit(*p, grid);
             }
             chain.resample(targets);
         }
