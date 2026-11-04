@@ -7,7 +7,9 @@ function wasmPack(): Plugin {
   return {
     name: "sprouts:wasm-pack",
     buildStart() {
-      execFileSync("wasm-pack", ["build", "--target", "web", "--release"], { stdio: "inherit" });
+      execFileSync("wasm-pack", ["build", "--target", "web", "--release", "--features", "hash"], {
+        stdio: "inherit",
+      });
     },
   };
 }
