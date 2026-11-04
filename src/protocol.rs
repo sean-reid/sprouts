@@ -286,9 +286,10 @@ fn commit(state: &mut GameState, line: types::Move) -> Outcome {
 /// Nodes the last move set apart, read off the model after it is applied.
 /// The line and the boundary it left from are a wall; a node whose faces
 /// all sit with the new face is on one side, one whose faces all sit
-/// with the old face on the other, and the smaller side is the count.
-/// The ends and the new node are on the wall, and a move that merged two
-/// boundaries sets nothing apart.
+/// with the old face on the other, and the smaller count is returned.
+/// The ends and the new node are on the wall, a node beyond the boundary
+/// the line attaches to is reached from neither face and counts for
+/// neither side, and a move that merged two boundaries sets nothing apart.
 fn cut_off(model: &face::FaceModel) -> usize {
     let half_edges = 2 * model.edge_count();
     let h_am = half_edges - 4;
@@ -1625,13 +1626,12 @@ mod tests {
             .expect("the move is listed")
     }
 
-    // The node goes a third of the way along the curve, clear of the centre
-    // where an earlier node may sit.
     fn routed(state: &mut GameState, mv: FaceMove) -> usize {
-        match drawn(state, mv.clone()) {
+        let shown = format!("{mv:?}");
+        match drawn(state, mv) {
             Outcome::Applied { cut_off, .. } => cut_off,
             Outcome::Rejected { rejection } => {
-                panic!("{mv:?} did not route: {}", rejection.message)
+                panic!("{shown} did not route: {}", rejection.message)
             }
         }
     }
@@ -1643,6 +1643,8 @@ mod tests {
         apply_face_move(state, mv, third_along(&path))
     }
 
+    // The node goes a third of the way along the curve, clear of the centre
+    // where an earlier node may sit.
     fn third_along(path: &[Point]) -> Point {
         let total: f64 = path.windows(2).map(|w| w[0].distance_to(&w[1])).sum();
         let mut left = total / 3.0;
@@ -1689,6 +1691,30 @@ mod tests {
         let wire = serde_json::to_value(drawn(&mut state, split)).unwrap();
         assert_eq!(wire["kind"], json!("applied"));
         assert_eq!(wire["cutOff"], json!(2));
+    }
+
+    /// Six nodes: a loop on 0 round 1, 2, 3 and 4 leaves 5 alone outside,
+    /// so it reads 1 from the smaller side although four nodes sit inside.
+    #[test]
+    fn a_loop_round_the_larger_side_reads_the_smaller() {
+        let mut state = GameState::new(6);
+        assert_eq!(routed(&mut state, bare(0, 0, vec![1, 2, 3, 4])), 1);
+    }
+
+    /// Seven nodes: a loop on 2 round 3 puts 3 behind the piece {2, 7}. A
+    /// chord from 2 to 7 outside the loop with 0 and 1 on its new side
+    /// sets them apart from 4, 5 and 6, and 3 counts for neither side;
+    /// counted with the new side it would read 3.
+    #[test]
+    fn a_node_behind_the_split_boundary_counts_for_neither_side() {
+        let mut state = GameState::new(7);
+        assert_eq!(routed(&mut state, bare(2, 2, vec![3])), 1);
+        let chord = moves_from(&state, 2)
+            .moves
+            .into_iter()
+            .find(|m| m.a == 2 && m.b == 7 && m.enclosed == vec![0, 1])
+            .expect("the chord is listed");
+        assert_eq!(routed(&mut state, chord), 2);
     }
 
     /// The same curve as a drawn move, one way and the other.

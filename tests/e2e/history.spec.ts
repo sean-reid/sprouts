@@ -246,12 +246,16 @@ test("a review with moves the engine has not refitted still shares", async ({ pa
   await expect(other.locator("#status")).toHaveText(/^Reviewing: move 9 of 9/, {
     timeout: 60_000,
   });
-  // Rows past the sharer's cursor carry no cut-off count yet, so the ids
-  // in the titles are what both pages agree on.
-  const titles = (p: Page) =>
-    p.locator("#moveList li button").evaluateAll((b) => b.map((x) => x.getAttribute("title")));
-  expect(await titles(other)).toEqual(await titles(page));
-  await expect(entries(other).nth(1)).toHaveText(await entries(page).nth(1).innerText());
+  // The visitor replayed every move and reads each chord's count; the
+  // sharer's rows past the cursor read plain until Forward reaches them.
+  await expect(entries(other).nth(5)).toHaveText("6. AI, joins two nodes, cuts off 2");
+  await expect(entries(page).nth(5)).toHaveText("6. AI, joins two nodes");
+  for (let steps = 0; steps < 9 && (await page.locator("#forwardBtn").isEnabled()); steps++) {
+    await page.locator("#forwardBtn").click();
+    await expect(page.locator("#status")).not.toHaveText("Initializing...", { timeout: 60_000 });
+    await expect(page.locator("#backBtn")).toBeEnabled({ timeout: 60_000 });
+  }
+  await expect(entries(page)).toHaveText(await entries(other).allTextContents());
   await visitor.close();
 });
 

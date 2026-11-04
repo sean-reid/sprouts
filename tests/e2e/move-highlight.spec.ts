@@ -159,4 +159,18 @@ test("rows count the nodes a chord cuts off or a loop encloses", async ({ page }
   await expect(rows(page).nth(8)).toHaveText("9. You, joins two nodes, cuts off 2");
   await rows(page).nth(8).scrollIntoViewIfNeeded();
   await shot(page, "cut-off-rows");
+  // However a row wraps, "cuts off" and its count stay on one line.
+  for (const row of [2, 5, 6, 8]) {
+    const lines = await rows(page)
+      .nth(row)
+      .evaluate((button) => {
+        const text = Array.from(button.childNodes).find((n) => n.nodeType === Node.TEXT_NODE);
+        if (!text?.textContent) return -1;
+        const range = document.createRange();
+        range.setStart(text, text.textContent.indexOf("cuts"));
+        range.setEnd(text, text.textContent.length);
+        return new Set(Array.from(range.getClientRects()).map((r) => Math.round(r.top))).size;
+      });
+    expect(lines, `row ${row + 1}`).toBe(1);
+  }
 });
