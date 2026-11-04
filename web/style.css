@@ -70,6 +70,38 @@ h1 {
   min-height: 44px;
 }
 
+/* The start label grows with the count and must not add a row above the
+   board, so the row never wraps. */
+.controls.game {
+  flex-wrap: nowrap;
+}
+
+#startBtn {
+  white-space: nowrap;
+}
+
+/* .narrow-hidden is for assistive tech only below 768 px: the word Nodes
+   and the ", 7 nodes" part of the start label do not fit the row there. */
+.visually-hidden,
+.narrow-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+@media (min-width: 768px) {
+  .narrow-hidden {
+    position: static;
+    width: auto;
+    height: auto;
+    overflow: visible;
+    clip-path: none;
+  }
+}
+
 .node-count {
   display: inline-flex;
   align-items: center;
@@ -81,10 +113,18 @@ h1 {
   color: #a0a0a0;
 }
 
+.node-count button {
+  min-width: 44px;
+  padding: 0;
+  font-size: 18px;
+  line-height: 1;
+}
+
 .node-count input {
-  width: 4.5em;
+  width: 44px;
   min-height: 44px;
-  padding: 0 8px;
+  padding: 0 4px;
+  appearance: textfield;
   background: #1a1a1a;
   border: 1px solid #2a2a2a;
   border-radius: 4px;
@@ -92,6 +132,23 @@ h1 {
   font-size: 14px;
   text-align: center;
   font-variant-numeric: tabular-nums;
+}
+
+@media (max-width: 767px) {
+  #startBtn.pending::after {
+    content: attr(data-count);
+    display: inline-block;
+    min-width: 18px;
+    margin-left: 6px;
+    padding: 0 5px;
+    border-radius: 9px;
+    background: #2a2a2a;
+    color: #ffffff;
+    font-size: 10px;
+    line-height: 18px;
+    letter-spacing: 0;
+    vertical-align: middle;
+  }
 }
 
 button {

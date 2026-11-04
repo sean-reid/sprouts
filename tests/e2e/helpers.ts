@@ -118,9 +118,12 @@ export async function expectNodeDrawnAt(page: Page, at: Client): Promise<void> {
 
 export const PLACING_HINT = /Drag the dot/;
 
-// Sets the starting node count and starts a game with it.
+// Sets the starting node count and starts a game with it. The value goes
+// in without events so the stepper does not start a game of its own first.
 export async function startGame(page: Page, count: number): Promise<void> {
-  await page.locator("#nodeCount").fill(String(count));
+  await page.locator("#nodeCount").evaluate((el, value) => {
+    (el as HTMLInputElement).value = String(value);
+  }, count);
   await page.locator("#startBtn").click();
 }
 
