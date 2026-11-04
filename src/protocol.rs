@@ -176,7 +176,10 @@ pub struct MovesFrom {
 pub enum UnroutableKind {
     /// The model does not list the move.
     Illegal,
+    /// No path, no node spot, or no leg at these clearances.
     Room,
+    /// A path was found but could not be drawn as one curve.
+    Shape,
     Topology,
     Bug,
 }
@@ -184,7 +187,8 @@ pub enum UnroutableKind {
 impl From<&Unroutable> for UnroutableKind {
     fn from(why: &Unroutable) -> Self {
         match why {
-            Unroutable::Room => Self::Room,
+            Unroutable::Room | Unroutable::NoSpot | Unroutable::NoLeg => Self::Room,
+            Unroutable::Shape(_) => Self::Shape,
             Unroutable::Topology => Self::Topology,
             Unroutable::Bug(_) => Self::Bug,
         }
@@ -507,6 +511,9 @@ fn illegal(state: &GameState, mv: &face::Move, why: IllegalMove) -> Rejection {
 fn unroutable(mv: &face::Move, why: Unroutable) -> Rejection {
     match why {
         Unroutable::Room => Rejection::unroutable(mv.a, "no room"),
+        Unroutable::NoSpot => Rejection::unroutable(mv.a, "no room for the new node"),
+        Unroutable::NoLeg => Rejection::unroutable(mv.a, "no room to leave the node"),
+        Unroutable::Shape(what) => Rejection::unroutable(mv.a, what),
         Unroutable::Topology => Rejection::unroutable(mv.a, "the curve reads as another move"),
         Unroutable::Bug(what) => Rejection::unroutable(mv.a, what),
     }

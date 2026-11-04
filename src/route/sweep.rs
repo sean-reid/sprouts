@@ -26,7 +26,7 @@ pub(crate) fn draws(state: &GameState, mv: &FaceMove) -> Result<Move, Unroutable
 
 pub(crate) fn kind_name(why: &Unroutable) -> String {
     match why {
-        Unroutable::Bug(what) => format!("Bug({what})"),
+        Unroutable::Bug(what) | Unroutable::Shape(what) => what.to_string(),
         other => format!("{other:?}"),
     }
 }
@@ -60,12 +60,15 @@ pub(crate) fn fixture_json(state: &GameState) -> String {
     .to_string()
 }
 
-/// Routes tried and how each failure went: no room, a read-back mismatch,
-/// or a router bug, with every bug by name.
+/// Routes tried and how each failure went, one bucket per Unroutable
+/// variant, with every shape failure and every bug by name.
 #[derive(Debug, Default, Clone)]
 pub struct Tally {
     pub tried: usize,
     pub room: usize,
+    pub no_spot: usize,
+    pub no_leg: usize,
+    pub shape: BTreeMap<String, usize>,
     pub topology: usize,
     pub bug: usize,
     pub bugs: BTreeMap<String, usize>,
@@ -75,6 +78,11 @@ impl Tally {
     pub fn add(&mut self, other: &Tally) {
         self.tried += other.tried;
         self.room += other.room;
+        self.no_spot += other.no_spot;
+        self.no_leg += other.no_leg;
+        for (kind, n) in &other.shape {
+            *self.shape.entry(kind.clone()).or_default() += n;
+        }
         self.topology += other.topology;
         self.bug += other.bug;
         for (kind, n) in &other.bugs {
@@ -82,9 +90,12 @@ impl Tally {
         }
     }
 
-    fn count(&mut self, why: &Unroutable) {
+    pub(crate) fn count(&mut self, why: &Unroutable) {
         match why {
             Unroutable::Room => self.room += 1,
+            Unroutable::NoSpot => self.no_spot += 1,
+            Unroutable::NoLeg => self.no_leg += 1,
+            Unroutable::Shape(_) => *self.shape.entry(kind_name(why)).or_default() += 1,
             Unroutable::Topology => self.topology += 1,
             Unroutable::Bug(_) => {
                 self.bug += 1;
@@ -98,8 +109,8 @@ impl std::fmt::Display for Tally {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "{} routes: {} no room, {} topology, {} bugs {:?}",
-            self.tried, self.room, self.topology, self.bug, self.bugs
+            "{} routes: {} no room, {} no node spot, {} no leg, shape {:?}, {} topology, {} bugs {:?}",
+            self.tried, self.room, self.no_spot, self.no_leg, self.shape, self.topology, self.bug, self.bugs
         )
     }
 }

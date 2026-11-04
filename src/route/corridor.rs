@@ -9,7 +9,7 @@
 //! that landed wrong.
 
 use std::cmp::Ordering;
-use std::collections::{BinaryHeap, HashMap};
+use std::collections::{BinaryHeap, HashMap, HashSet};
 
 use spade::handles::FixedVertexHandle;
 
@@ -194,6 +194,35 @@ pub(super) fn search(
         }
     }
     Err(Unroutable::Room)
+}
+
+/// Whether any exit triangle is reachable from any entry triangle through
+/// the free triangles, parity aside.
+pub(super) fn reachable(arena: &Arena, entries: &[Entry], exits: &[Entry]) -> bool {
+    let goal: std::collections::HashSet<usize> =
+        exits.iter().flat_map(|e| e.tris.iter().copied()).collect();
+    let mut seen: std::collections::HashSet<usize> = HashSet::new();
+    let mut stack: Vec<usize> = entries
+        .iter()
+        .flat_map(|e| e.tris.iter().copied())
+        .collect();
+    while let Some(t) = stack.pop() {
+        if !seen.insert(t) {
+            continue;
+        }
+        if goal.contains(&t) {
+            return true;
+        }
+        let verts = arena.ccw_vertices(t);
+        for k in 0..3 {
+            if let Some((next, _)) = arena.across(t, verts[k], verts[(k + 1) % 3]) {
+                if !seen.contains(&next) {
+                    stack.push(next);
+                }
+            }
+        }
+    }
+    false
 }
 
 /// The string pulled taut from `start` to `end` through the portals.

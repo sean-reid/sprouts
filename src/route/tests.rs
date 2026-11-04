@@ -266,6 +266,9 @@ fn the_ai_opens_with_a_move_the_normal_validator_accepts() {
 static TALLY: std::sync::Mutex<sweep::Tally> = std::sync::Mutex::new(sweep::Tally {
     tried: 0,
     room: 0,
+    no_spot: 0,
+    no_leg: 0,
+    shape: std::collections::BTreeMap::new(),
     topology: 0,
     bug: 0,
     bugs: std::collections::BTreeMap::new(),
@@ -324,8 +327,7 @@ fn recorded_positions_keep_a_drawable_move() {
                 Err(Unroutable::Bug(what)) => {
                     panic!("{}: {mv:?} failed as a bug: {what}", path.display())
                 }
-                Err(Unroutable::Room) => tally.room += 1,
-                Err(Unroutable::Topology) => tally.topology += 1,
+                Err(why) => tally.count(&why),
             }
         }
         eprintln!(

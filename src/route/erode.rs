@@ -793,7 +793,8 @@ impl Arena {
     /// corner that follows spoke `at`: the node itself when it sits in the
     /// free region, else the free vertices a straight leg reaches without
     /// crossing a wall, heading out between the corner's spokes, the ones
-    /// costing the least detour towards `target` first.
+    /// costing the least detour towards `target` first. Room when no free
+    /// triangle lies within a leg's reach of the node at all.
     pub(super) fn entries(
         &self,
         state: &GameState,
@@ -801,16 +802,16 @@ impl Arena {
         at: Option<HalfEdgeId>,
         c: f64,
         target: Point,
-    ) -> Vec<Entry> {
+    ) -> Result<Vec<Entry>, Unroutable> {
         let a = state.nodes[v].position;
         if at.is_none() {
             let tris = self.free_at(a);
             if !tris.is_empty() {
-                return vec![Entry {
+                return Ok(vec![Entry {
                     at: a,
                     tris,
                     leg: None,
-                }];
+                }]);
             }
         }
         let radius = MIN_PATH_CLEARANCE * scale(state.board_size);
@@ -852,12 +853,14 @@ impl Arena {
             .collect();
         candidates.sort_by(|x, y| x.0.total_cmp(&y.0).then(x.1.index().cmp(&y.1.index())));
         let mut out = Vec::new();
+        let mut any_free = false;
         for (_, handle) in candidates {
             let p = self.vertex_point(handle);
             let tris = self.free_around(handle);
             if tris.is_empty() {
                 continue;
             }
+            any_free = true;
             if let Some((from, span, margin)) = wedge {
                 let heading = (a.y - p.y).atan2(p.x - a.x);
                 let into = turn(from, heading);
@@ -877,7 +880,10 @@ impl Arena {
                 break;
             }
         }
-        out
+        if !any_free {
+            return Err(Unroutable::Room);
+        }
+        Ok(out)
     }
 
     /// A vertex on the piece, to start its cut from: a node on a cycle,

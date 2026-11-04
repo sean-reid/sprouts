@@ -32,9 +32,16 @@ mod tests;
 /// Why a legal move could not be drawn.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Unroutable {
-    /// The eroded face has no path for the move at these clearances, or no
-    /// spot on it for the new node.
+    /// The eroded face has no path between the move's ends at these
+    /// clearances, or no circle for an empty loop.
     Room,
+    /// No point on the path keeps the node spacing from every node.
+    NoSpot,
+    /// No straight leg reaches the free region from an end node.
+    NoLeg,
+    /// The path found could not be drawn as one curve: tangled, touching
+    /// itself, or too short for its node.
+    Shape(&'static str),
     /// The drawn curve reads back as a different move.
     Topology,
     /// A failure the router should never produce in a face it found a path
@@ -92,7 +99,11 @@ pub fn route(state: &GameState, mv: &FaceMove) -> Result<Move, Unroutable> {
     let drawn = route_at(state, mv, &want);
     // The disc clearance is what the AI aims for; a line that cannot have
     // it is still legal at the clearance a human line gets.
-    if !matches!(drawn, Err(Unroutable::Room)) || want.node_clearance <= want.fallback {
+    let worth_retrying = matches!(
+        drawn,
+        Err(Unroutable::Room | Unroutable::NoSpot | Unroutable::NoLeg | Unroutable::Shape(_))
+    );
+    if !worth_retrying || want.node_clearance <= want.fallback {
         return drawn;
     }
     route_cheap(state, mv)
@@ -148,10 +159,10 @@ fn plan(
     let disc = want.node_clearance + curve::tolerance(state.board_size);
     let arena = erode::Arena::build(state, face, mv.a, mv.b, c, disc)?;
     let (pa, pb) = (state.nodes[mv.a].position, state.nodes[mv.b].position);
-    let entries = arena.entries(state, mv.a, mv.at_a, c, pb);
-    let exits = arena.entries(state, mv.b, mv.at_b, c, pa);
+    let entries = arena.entries(state, mv.a, mv.at_a, c, pb)?;
+    let exits = arena.entries(state, mv.b, mv.at_b, c, pa)?;
     if entries.is_empty() || exits.is_empty() {
-        return Err(Unroutable::Room);
+        return Err(Unroutable::NoLeg);
     }
     let ends = [state.nodes[mv.a].position, state.nodes[mv.b].position];
     let blocked = corridor::blocked(&arena, &entries, &exits, ends);
@@ -168,7 +179,13 @@ fn plan(
         &exits,
         corridor::Want::Any,
         is_loop,
-    )?;
+    );
+    // Room means the free triangles disconnect the ends; a path the
+    // search missed would be a bug.
+    if matches!(first, Err(Unroutable::Room)) && corridor::reachable(&arena, &entries, &exits) {
+        return Err(Unroutable::Bug("room with a path"));
+    }
+    let first = first?;
     let mut path = corridor::draw(&first, &entries, &exits);
     if cuts.all != 0 {
         let wrong = wrong_sides(state, mv, own, &cuts, &path);
@@ -180,7 +197,7 @@ fn plan(
             path = corridor::draw(&second, &entries, &exits);
         }
     }
-    let path = uncross(untwist_legs(path)).ok_or(Unroutable::Room)?;
+    let path = uncross(untwist_legs(path)).ok_or(Unroutable::Shape("tangled"))?;
     Ok((arena, path))
 }
 
@@ -245,7 +262,7 @@ pub(crate) fn finish(
     // under two spacings has nowhere for its node.
     let length: f64 = path.windows(2).map(|w| w[0].distance_to(&w[1])).sum();
     if length < 2.0 * spacing {
-        return Err(Unroutable::Room);
+        return Err(Unroutable::Shape("short"));
     }
     // Wiggles under the fit tolerance are relaxation noise, not shape;
     // dropping them first gives the fit a few long, even cubics. The fit
@@ -254,12 +271,12 @@ pub(crate) fn finish(
     let path = densify(&decimate_polyline(&path, tolerance), clearance);
     let segments = curve::fit(&path, tolerance);
     let flat = curve::flatten(&segments, tolerance);
-    let node = place_node(state, &segments, &flat, spacing).ok_or(Unroutable::Room)?;
+    let node = place_node(state, &segments, &flat, spacing).ok_or(Unroutable::NoSpot)?;
     let ends = [state.nodes[mv.a].position, state.nodes[mv.b].position];
     // Two passes the relaxation could not pull apart touch, and the fit
     // can cross where they touch: no room for both.
     if self_crossing(&flat) || self_touching(&flat, ends, clearance) {
-        return Err(Unroutable::Room);
+        return Err(Unroutable::Shape("touching"));
     }
     let mov = Move::from_segments(mv.a, mv.b, path, segments, node, state.current_player);
     match state.current_player {
