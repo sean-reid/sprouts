@@ -369,8 +369,10 @@ function asRecord(value: unknown): GameRecord | null {
   }
   if (v.cursor > v.moves.length) return null;
   if (v.nodes !== undefined && !isLayout(v.nodes, nodes)) return null;
+  // A record from a newer settle would replay through this one onto
+  // another board.
   const settleVersion = v.settleVersion ?? 0;
-  if (!isCount(settleVersion) || settleVersion > 255) return null;
+  if (!isCount(settleVersion) || settleVersion > SETTLE_VERSION) return null;
   return {
     version: 1,
     initialNodes: v.initialNodes,
@@ -588,6 +590,7 @@ export function decodeRecord(payload: string): GameRecord | null {
     if (!LINK_VERSIONS.includes(version)) return null;
     if (version >= FACE_LINK_VERSION && reader.u8() !== ROUTER_VERSION) throw new StaleLink();
     const settleVersion = version >= LINK_VERSION ? reader.u8() : 0;
+    if (settleVersion > SETTLE_VERSION) throw new StaleLink();
     const flags = reader.u8();
     const initialNodes = reader.u16();
     const boardSize = reader.u16();

@@ -10,9 +10,8 @@ use crate::types::Player;
 use proptest::prelude::*;
 use std::path::Path;
 
-/// The recorded games were played with no settling, so their strokes are
-/// applied as drawn and the settle is measured on a copy of each
-/// position at the current version.
+/// A version 0 record's strokes are applied as drawn and the settle is
+/// measured on a copy of each position at the current version.
 fn settled_copy(state: &GameState) -> GameState {
     let mut copy = state.clone();
     copy.settle_version = SETTLE_VERSION;
@@ -59,6 +58,36 @@ fn drift(before: &GameState, after: &GameState) -> f64 {
     worst
 }
 
+/// Replays every line of `state` as a fresh move through the embedding
+/// alone, without the settle's own check, and compares the canonical form
+/// of the model that gives with the model the state holds; a bare loop may
+/// read as either side, which the canonical form treats as one position.
+fn replays_to_the_same_model(state: &GameState) -> bool {
+    let mut fresh = GameState::with_nodes_at(
+        state.nodes[..state.initial_node_count]
+            .iter()
+            .map(|n| n.position)
+            .collect(),
+        state.board_size,
+        state.settle_version,
+    );
+    for line in &state.lines {
+        fresh.current_player = line.player;
+        let mov = crate::types::Move::as_given(
+            line.from_node,
+            line.to_node,
+            line.polyline.clone(),
+            line.segments.clone(),
+            line.new_node_pos,
+            line.player,
+        );
+        if fresh.apply_move(mov).is_err() {
+            return false;
+        }
+    }
+    crate::face::canonical_form(&fresh.face) == crate::face::canonical_form(&state.face)
+}
+
 fn same_face_model(state: &GameState) -> bool {
     let targets = Targets::for_board(state.board_size);
     let layout = Layout::from_state(state, &targets).unwrap();
@@ -84,6 +113,10 @@ fn every_fixture_position_settles_without_changing_the_model_or_losing_clearance
                 "move {index}: least clearance fell from {before:.3} to {after:.3}"
             );
             assert!(same_face_model(&state), "move {index} changed the model");
+            assert!(
+                replays_to_the_same_model(&state),
+                "move {index}: the settled lines do not replay to the model"
+            );
             worst_after = worst_after.min(after);
             println!(
                 "{} nodes, board {}, move {index}: least ratio {before:.2} -> {after:.2} at {at:?}",
@@ -199,6 +232,7 @@ proptest! {
         prop_assert_eq!(played.len(), again.len());
         prop_assert_eq!(bits(&first), bits(&second));
         prop_assert!(same_face_model(&first));
+        prop_assert!(replays_to_the_same_model(&first));
     }
 }
 
@@ -475,4 +509,111 @@ fn version_1_settles_the_seeded_game_the_same_on_every_platform() {
         printed.join(" "),
         stage_report(9, first.unwrap_or(0))
     );
+}
+
+/// Forty points round `center` at `radius`, starting at `start`.
+fn ring(start: Point, center: Point) -> Vec<Point> {
+    let radius = start.distance_to(&center);
+    let (c, s) = (0.987_688_340_595_137_8, 0.156_434_465_040_230_87);
+    let mut d = Point::new(start.x - center.x, start.y - center.y);
+    (0..=40)
+        .map(|_| {
+            let p = Point::new(center.x + d.x, center.y + d.y);
+            d = Point::new(d.x * c - d.y * s, d.x * s + d.y * c);
+            Point::new(p.x, p.y)
+        })
+        .map(|p| {
+            let dx = p.x - center.x;
+            let dy = p.y - center.y;
+            let k = radius / (dx * dx + dy * dy).sqrt();
+            Point::new(center.x + dx * k, center.y + dy * k)
+        })
+        .collect()
+}
+
+/// The guard every round passes refuses a node dragged out of the loop
+/// that held it, a changed face, and a chord dragged through another
+/// line, a crossing, while it accepts the layout as drawn.
+#[test]
+fn the_round_guard_refuses_a_changed_face_and_a_new_crossing() {
+    let mut state = GameState::new(4);
+    let center = Point::new(500.0, 500.0);
+    state.nodes[0].position = Point::new(400.0, 500.0);
+    state.nodes[1].position = Point::new(200.0, 200.0);
+    state.nodes[2].position = Point::new(540.0, 500.0);
+    state.nodes[3].position = Point::new(800.0, 800.0);
+    let polyline = ring(state.nodes[0].position, center);
+    let mov = crate::types::Move::new(
+        0,
+        0,
+        polyline,
+        Point::new(500.0, 400.0),
+        Player::Human,
+        1000,
+    );
+    protocol::check(&state, &mov).unwrap();
+    state.apply_move(mov).unwrap();
+    let targets = Targets::for_board(state.board_size);
+    let tolerance = curve::tolerance(state.board_size);
+    let original = journal(&state);
+    let layout = Layout::from_state(&state, &targets).unwrap();
+    let before = layout.crossings(tolerance);
+    assert!(layout.holds(&state, &original));
+    assert!(layout.keeps(&state, &original, before, before));
+
+    // Node 2 dragged out of the loop sits on another face.
+    let mut moved = layout.clone();
+    moved.nodes[2] = Point::new(700.0, 500.0);
+    assert!(!moved.holds(&state, &original));
+    assert!(!moved.keeps(&state, &original, before, moved.crossings(tolerance)));
+
+    // A chord from node 2 straight to node 3 passes through the loop line.
+    let chord: Vec<Point> = (0..=40)
+        .map(|i| {
+            let t = i as f64 / 40.0;
+            Point::new(540.0 + 260.0 * t, 500.0 + 300.0 * t)
+        })
+        .collect();
+    let bent = crate::types::Move::new(2, 3, chord, Point::new(670.0, 650.0), Player::AI, 1000);
+    let line = Line {
+        id: 1,
+        from_node: bent.from_node,
+        to_node: bent.to_node,
+        polyline: bent.polyline.clone(),
+        segments: bent.segments.clone(),
+        flat: bent.flatten(tolerance),
+        new_node_pos: bent.new_node_pos,
+        player: bent.player,
+    };
+    let mut crossing = layout.clone();
+    crossing
+        .lines
+        .push(Chain::from_line(&line, &targets).unwrap());
+    crossing.nodes.push(bent.new_node_pos);
+    let crossed = crossing.crossings(tolerance);
+    assert!(crossed > before, "{crossed} crossings against {before}");
+    assert!(!crossing.keeps(&state, &original, before, crossed));
+}
+
+/// The board after a version 0 fixture replays, rounded to a millionth
+/// so platform rounding of the fit cannot move it, as recorded here.
+#[test]
+fn a_version_0_fixture_replays_to_the_recorded_board() {
+    const HUMAN_4N_1000: u64 = 0x39702e50bca4b665;
+    let fixture = replay::load(
+        &Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/games/human-4n-1000.json"),
+    )
+    .unwrap();
+    let mut state = fixture.start();
+    for recorded in &fixture.moves {
+        assert!(matches!(
+            protocol::apply(&mut state, recorded.wire()),
+            protocol::Outcome::Applied { .. }
+        ));
+    }
+    let mut fnv = crate::exact::Fnv::default();
+    for b in bits(&state) {
+        fnv.feed((f64::from_bits(b) * 1e6).round() / 1e6);
+    }
+    assert_eq!(fnv.0, HUMAN_4N_1000, "{}", fnv.hex());
 }

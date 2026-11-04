@@ -609,7 +609,9 @@ function canPlay(): boolean {
 // A board that changes under a stroke or a candidate takes it down with it.
 function applySnapshot(snapshot: Snapshot, drawn?: Drawn): void {
   timeline.adopt(snapshot.lines);
-  const before: Geometry = { nodes: [...state.nodes], lines: [...state.lines] };
+  // A snapshot that lands mid-animation eases on from what is on screen.
+  const shown = state.settling ?? state;
+  const before: Geometry = { nodes: [...shown.nodes], lines: [...shown.lines] };
   const added = snapshot.lines.at(-1);
   if (drawn && added && !before.lines.some((line) => line.id === added.id)) {
     before.lines.push({ ...added, segments: drawn.segments, newNodePos: drawn.newNodePos });

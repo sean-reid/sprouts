@@ -259,3 +259,38 @@ test("a reload after Undo and a new stroke rebuilds the same settled board", asy
   await expect(page.locator("#moveList li")).toHaveCount(2);
   expect(boardOffset(await boardNodes(page), settled)).toBeLessThanOrEqual(1e-6);
 });
+
+// The longest step node 3's hit target takes between two painted frames,
+// in CSS px.
+function longestStep(probe: SettleProbe): number {
+  let longest = 0;
+  for (let i = 1; i < probe.frames.length; i++) {
+    longest = Math.max(longest, distance(probe.frames[i]!, probe.frames[i - 1]!));
+  }
+  return longest;
+}
+
+test("Undo pressed mid-animation eases on from the board on screen", async ({ page }) => {
+  await openBoard(page);
+  const frame = await frameOf(page);
+  await drawPastNode3(page);
+  await expect.poll(() => findDot(page)).not.toBeNull();
+  await armSettleProbe(page, 6);
+  await clickAway(page);
+  await expect(page.locator("#status")).toHaveText("Your turn!", { timeout: 60_000 });
+  // 150 ms into the 500 ms ease toward the AI's settled board.
+  await page.waitForTimeout(150);
+  await page.locator("#undoBtn").click();
+  await expect(page.locator("#status")).toHaveText("Move undone: your turn");
+  await page.waitForTimeout(700);
+  const probe = await readSettleProbe(page);
+  expect(probe.frames.length).toBeGreaterThan(10);
+  const step = longestStep(probe);
+  test
+    .info()
+    .annotations.push({ type: "undo-mid-animation-step-px", description: step.toFixed(2) });
+  // A frame at 60 Hz covers at most a sixth of the whole ease; a jump to
+  // the undone board would be the whole distance at once.
+  const whole = distance(probe.frames[0]!, probe.frames.at(-1)!);
+  expect(step).toBeLessThan(Math.max(whole / 2, fit(frame).scale * 10));
+});

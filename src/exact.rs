@@ -13,7 +13,6 @@ pub fn snap_to_grid(p: Point) -> Point {
     Point::new((p.x / GRID).round() * GRID, (p.y / GRID).round() * GRID)
 }
 
-/// Length of the vector (dx, dy).
 /// `p` rounded to the grid a settled game stores its geometry on: `unit`
 /// is one unit of the 1000 board, the link quantum, scaled to the board,
 /// and a multiple of GRID, so a stored value is on both grids.
@@ -21,6 +20,7 @@ pub fn snap_to_unit(p: Point, unit: f64) -> Point {
     Point::new((p.x / unit).round() * unit, (p.y / unit).round() * unit)
 }
 
+/// Length of the vector (dx, dy).
 pub fn length(dx: f64, dy: f64) -> f64 {
     (dx * dx + dy * dy).sqrt()
 }

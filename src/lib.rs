@@ -13,6 +13,7 @@ pub use abstract_graph::search_rate;
 pub mod replay;
 mod route;
 mod settle;
+#[cfg(feature = "hash")]
 pub use settle::golden::seeded_hashes;
 mod types;
 mod validation;

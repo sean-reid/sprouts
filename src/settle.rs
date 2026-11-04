@@ -23,8 +23,8 @@ use crate::types::{
 /// Rounds per settle at most; a round that moves nothing ends it early.
 pub const ROUNDS: usize = 64;
 /// Pair distances measured plus lines carried, summed over the rounds,
-/// at which a settle stops whatever the board: 2.0 M is about 330 ms
-/// natively and binds only on the 24-node game.
+/// at which a settle stops whatever the board. The model and crossing
+/// checks each round are not counted; ROUNDS bounds them.
 pub const WORK_CAP: usize = 2_000_000;
 /// Share of a shortfall each side of a pair closes per round.
 const STEP: f64 = 1.0;
@@ -625,6 +625,18 @@ impl Layout {
         count
     }
 
+    /// The guard a round must pass: no more crossings than the board had
+    /// and every line still reading as its move.
+    fn keeps(
+        &self,
+        state: &GameState,
+        original: &[FaceMove],
+        before: usize,
+        crossed: usize,
+    ) -> bool {
+        crossed <= before && self.holds(state, original)
+    }
+
     /// Whether every line, replayed onto this geometry, still reads as the
     /// move the model holds for it.
     fn holds(&self, state: &GameState, original: &[FaceMove]) -> bool {
@@ -800,6 +812,11 @@ pub struct Undo {
 }
 
 impl Undo {
+    /// Whether the settle moved nothing.
+    pub fn is_empty(&self) -> bool {
+        self.nodes.is_empty() && self.lines.is_empty()
+    }
+
     /// Puts back every item the settle changed that the board still has.
     pub fn restore(self, state: &mut GameState) {
         for (id, position) in self.nodes {
@@ -922,11 +939,7 @@ fn relax(
         if let Some(trace) = trace.as_deref_mut() {
             trace.push(layout_hash(&next));
         }
-        if moved > 0.0
-            && (roomier || evener)
-            && crossed <= crossings
-            && next.holds(state, &original)
-        {
+        if moved > 0.0 && (roomier || evener) && next.keeps(state, &original, crossings, crossed) {
             layout = next;
             least = after.least;
             crossings = crossed;

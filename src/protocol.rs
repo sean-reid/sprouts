@@ -29,7 +29,7 @@ pub struct Move {
 
 /// The move as the engine applies it to `state`: a settling game takes
 /// the spline as given and puts the move on the grid; an unsettled one
-/// fits the stroke, as every game did before splines travelled. A move
+/// fits the stroke, the only geometry a version 0 record carries. A move
 /// that arrives with an empty spline is refused.
 pub(crate) fn enter(mov: Move, state: &GameState) -> Result<types::Move, Rejection> {
     let player = state.current_player;
@@ -271,6 +271,11 @@ pub fn start(
     nodes: Option<Vec<Point>>,
     settle_version: u8,
 ) -> Result<GameState, String> {
+    if settle_version > SETTLE_VERSION {
+        return Err(format!(
+            "settle version {settle_version} is newer than this engine's {SETTLE_VERSION}"
+        ));
+    }
     let mut state = match nodes {
         Some(nodes) if nodes.len() == initial_nodes => {
             GameState::with_nodes_at(nodes, board_size, settle_version)
@@ -636,16 +641,12 @@ fn unroutable(mv: &face::Move, why: Unroutable) -> Rejection {
 
 /// Takes the last move back and puts the geometry back as it was before
 /// that move settled, so the board is the one the next move was drawn on.
-/// Records left above the board are dropped unused; every record of the
-/// undone move is restored, newest first, so a move settled twice still
-/// comes back as drawn and the stack never outgrows the moves.
+/// Every record of the undone move is restored, newest first, so a move
+/// settled twice still comes back as drawn.
 pub fn undo(state: &mut GameState) -> bool {
     let undone = state.undo_move();
     if undone {
         let board = state.lines.len() + 1;
-        while state.settles.last().is_some_and(|s| s.board > board) {
-            state.settles.pop();
-        }
         while state.settles.last().is_some_and(|s| s.board == board) {
             if let Some(settled) = state.settles.pop() {
                 settled.restore(state);
@@ -1882,6 +1883,91 @@ mod tests {
         assert!(valid > 100 && valid < 400, "{valid} of 401 spots valid");
     }
 
+    /// An unsettled game records an empty settle per move, so undo pops it
+    /// and the board is the one before the move.
+    #[test]
+    fn undo_past_a_version_0_move_leaves_no_record_and_the_drawn_board() {
+        let mut state = start(4, 1000, Player::Human, None, 0).unwrap();
+        let before = settle::golden::bits(&state);
+        let RouteReply::Routed { mov, .. } = route_move(&state, face_move(0, 1, vec![])) else {
+            panic!("the chord did not route");
+        };
+        assert!(matches!(apply(&mut state, mov), Outcome::Applied { .. }));
+        assert_eq!(state.settles.len(), 1);
+        assert!(state.settles[0].is_empty());
+        assert!(undo(&mut state));
+        assert!(state.settles.is_empty());
+        assert_eq!(settle::golden::bits(&state), before);
+    }
+
+    /// A refused move leaves no record, so the next undo pairs with the
+    /// move before it.
+    #[test]
+    fn undo_after_a_rejected_move_restores_the_move_before_it() {
+        let mut state = GameState::new(4);
+        let start_bits = settle::golden::bits(&state);
+        let RouteReply::Routed { mov, .. } = route_move(&state, face_move(0, 1, vec![])) else {
+            panic!("the chord did not route");
+        };
+        assert!(matches!(apply(&mut state, mov), Outcome::Applied { .. }));
+        let records = state.settles.len();
+        let a = state.nodes[0].position;
+        let short = Move {
+            from_node: 0,
+            to_node: 1,
+            polyline: vec![a, a],
+            new_node_pos: a,
+            segments: None,
+        };
+        assert!(matches!(apply(&mut state, short), Outcome::Rejected { .. }));
+        assert_eq!(state.settles.len(), records);
+        assert!(undo(&mut state));
+        assert!(state.settles.is_empty());
+        assert_eq!(settle::golden::bits(&state), start_bits);
+    }
+
+    /// Rehearsing a link replays on a fresh board; the game it came from
+    /// keeps its records.
+    #[test]
+    fn rehearse_leaves_the_records_of_the_game_alone() {
+        let mut state = GameState::new(4);
+        let RouteReply::Routed { mov, .. } = route_move(&state, face_move(0, 1, vec![])) else {
+            panic!("the chord did not route");
+        };
+        assert!(matches!(
+            apply(&mut state, mov.clone()),
+            Outcome::Applied { .. }
+        ));
+        let records = state.settles.clone();
+        let plan = Rehearsal {
+            router_version: ROUTER_VERSION,
+            settle_version: SETTLE_VERSION,
+            initial_nodes: 4,
+            board_size: 1000,
+            first_player: Player::Human,
+            nodes: None,
+            moves: vec![LinkMove::Drawn { mov }],
+        };
+        assert_eq!(rehearse(plan), Ok(None));
+        assert_eq!(state.settles.len(), records.len());
+        assert!(state
+            .settles
+            .iter()
+            .zip(&records)
+            .all(|(a, b)| a.board == b.board && a.is_empty() == b.is_empty()));
+    }
+
+    /// A record from a newer settle would replay through this one and show
+    /// another board, so it is refused.
+    #[test]
+    fn start_refuses_a_settle_version_newer_than_the_engine() {
+        let Err(refused) = start(4, 1000, Player::Human, None, SETTLE_VERSION + 1) else {
+            panic!("a newer settle version was accepted");
+        };
+        assert!(refused.contains("newer"), "{refused}");
+        assert!(start(4, 1000, Player::Human, None, SETTLE_VERSION).is_ok());
+    }
+
     /// The routed line settles the same way whether it arrives drawn or as
     /// its face move, and each path leaves one settle record.
     #[test]
@@ -1912,10 +1998,10 @@ mod tests {
         }
     }
 
-    /// A second settle of one move leaves a record above the board; undo
-    /// drops it and restores from the one that matches.
+    /// A move settled twice leaves two records at its board; undo restores
+    /// both, newest first, and lands on the drawn board.
     #[test]
-    fn undo_drops_a_duplicate_settle_record_and_restores_the_drawn_board() {
+    fn undo_restores_every_record_of_a_move_settled_twice() {
         let mut state = GameState::new(4);
         state.current_player = Player::Human;
         let before = settle::golden::bits(&state);
@@ -2002,8 +2088,8 @@ mod tests {
     /// round nothing set nothing apart; a second chord 0 to 1 with the
     /// two-node piece {3, 6} on its new side sets 3 and 6 apart from 2
     /// and 4, with node 5 on both arcs and so on the wall.
-    // These boards take several routed moves in turn, so they run
-    // unsettled, as the fixtures they stand for were recorded.
+    // These boards take several routed moves in turn on fixed positions,
+    // so they run unsettled.
     #[test]
     fn cut_off_counts_the_smaller_side_by_hand() {
         let mut state = start(6, 1000, Player::Human, None, 0).unwrap();

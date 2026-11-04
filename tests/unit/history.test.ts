@@ -312,6 +312,35 @@ describe("the share link codec", () => {
     expect(recordFromHash("#game=" + VERSION_4_PAYLOAD)?.moves).toHaveLength(2);
   });
 
+  it("refuses a link or record from a newer settle", () => {
+    const bytes = bytesOf(
+      encodeRecord(
+        game({
+          fromNode: 0,
+          toNode: 1,
+          polyline: [at(300, 500), at(700, 500)],
+          newNodePos: at(500, 500),
+        }),
+      ),
+    );
+    expect(decodeRecord(payloadOf(bytes))).not.toBeNull();
+    bytes[SETTLE_OFFSET] = SETTLE_VERSION + 1;
+    expect(() => decodeRecord(payloadOf(bytes))).toThrow(StaleLink);
+    const saved = JSON.parse(readFileSync("fixtures/saved/first-exchange.json", "utf8")) as Record<
+      string,
+      unknown
+    >;
+    const stub = (value: Record<string, unknown>) =>
+      Object.defineProperty(globalThis, "localStorage", {
+        value: { getItem: () => JSON.stringify(value) },
+        configurable: true,
+      });
+    stub(saved);
+    expect(loadSaved()).not.toBeNull();
+    stub({ ...saved, settleVersion: SETTLE_VERSION + 1 });
+    expect(loadSaved()).toBeNull();
+  });
+
   it("matches the engine's router and settle versions", () => {
     const source = readFileSync("src/protocol.rs", "utf8");
     const router = /pub const ROUTER_VERSION: u8 = (\d+);/.exec(source);
