@@ -360,6 +360,39 @@ mod tests {
         )
     }
 
+    /// Placing a node on a curve and placing it again where it landed
+    /// gives the same point: a node already on the curve is kept.
+    #[test]
+    fn a_node_placed_on_its_curve_stays_put_when_placed_again() {
+        let polyline: Vec<Point> = (0..=20)
+            .map(|i| {
+                let t = i as f64 / 20.0;
+                Point::new(100.0 + 400.0 * t, 300.0 + 120.0 * (t * 3.0).sin())
+            })
+            .collect();
+        let first = Move::new(
+            0,
+            1,
+            polyline.clone(),
+            Point::new(250.0, 450.0),
+            Player::AI,
+            1000,
+        );
+        assert!(first.new_node_pos.distance_to(&Point::new(250.0, 450.0)) > 1.0);
+        let again = Move::new(0, 1, polyline, first.new_node_pos, Player::AI, 1000);
+        assert_eq!(again.new_node_pos, first.new_node_pos);
+        assert_eq!(again.segments, first.segments);
+        let refit = Move::from_segments(
+            0,
+            1,
+            again.polyline.clone(),
+            again.segments.clone(),
+            again.new_node_pos,
+            Player::AI,
+        );
+        assert_eq!(refit.new_node_pos, first.new_node_pos);
+    }
+
     // --- GameState::new ---
 
     #[test]

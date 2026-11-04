@@ -76,19 +76,34 @@ impl Ord for Item {
 }
 
 /// Whether a corridor may step from triangle `from` into `to`, and
-/// whether it has then been outside the exit's guard: the middle of the
-/// path keeps out of each end's guard, so no guard is entered except the
-/// exit's, to finish, and the exit's is left only by a path that has
-/// never been outside it, which is a loop setting out.
+/// whether it has then been outside the exit's guard.
 fn step_out(arena: &Arena, from: usize, to: usize, exit: &Entry, out: bool) -> Option<bool> {
-    let (was, now) = (arena.guard(from), arena.guard(to));
-    let exit_bit = 1u8 << exit.end;
+    step_bits(arena.guard(from), arena.guard(to), 1u8 << exit.end, out)
+}
+
+/// The guard rule on the bits of the triangle left, `was`, and the one
+/// entered, `now`: the middle of the path keeps out of each end's guard,
+/// so no guard is entered except the exit's, and entering a triangle with
+/// the exit's bit commits the path to finishing there, since the exit's
+/// guard is left only by a path that has never been outside it, a loop or
+/// a chord setting out. A triangle carrying both ends' bits may be entered
+/// on the exit's account, and nothing inside it leads back into the
+/// entry's guard alone.
+pub(super) fn step_bits(was: u8, now: u8, exit_bit: u8, out: bool) -> Option<bool> {
     let entering = now & !was;
     let leaving = was & !now;
-    if entering & !exit_bit != 0 || (leaving & exit_bit != 0 && out) {
+    if (entering & !exit_bit != 0 && now & exit_bit == 0) || (leaving & exit_bit != 0 && out) {
         return None;
     }
     Some(out || leaving & exit_bit != 0)
+}
+
+/// Whether a path setting out from entry triangle `t` counts as having
+/// been outside the exit's guard: a chord does, unless its ends sit so
+/// close that the entry already lies within the exit's guard, and a loop
+/// never does.
+fn starts_out(arena: &Arena, t: usize, exit: &Entry, is_loop: bool) -> bool {
+    !is_loop && arena.guard(t) & (1u8 << exit.end) == 0
 }
 
 fn accepts(want: Want, parity: u64, all: u64) -> bool {
@@ -117,7 +132,7 @@ pub(super) fn search(
         let key = Key {
             tri: t,
             mask: 0,
-            out: !is_loop,
+            out: starts_out(arena, t, exit, is_loop),
         };
         best.insert(key, 0.0);
         heap.push(Item {
@@ -194,7 +209,11 @@ pub(super) fn search(
 pub(super) fn reachable(arena: &Arena, entry: &Entry, exit: &Entry, is_loop: bool) -> bool {
     let goal: HashSet<usize> = exit.tris.iter().copied().collect();
     let mut seen: HashSet<(usize, bool)> = HashSet::new();
-    let mut stack: Vec<(usize, bool)> = entry.tris.iter().map(|&t| (t, !is_loop)).collect();
+    let mut stack: Vec<(usize, bool)> = entry
+        .tris
+        .iter()
+        .map(|&t| (t, starts_out(arena, t, exit, is_loop)))
+        .collect();
     while let Some((t, out)) = stack.pop() {
         if !seen.insert((t, out)) {
             continue;

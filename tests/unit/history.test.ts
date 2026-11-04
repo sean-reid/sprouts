@@ -515,6 +515,16 @@ describe("a move that arrives as topology", () => {
     expect(history.moves.map((m) => m.topology)).toEqual([chord, undefined]);
   });
 
+  it("measures drift between the nodes as the link rounds them", async () => {
+    // 3.99 apart as recorded, 4.24 apart once both round to whole units.
+    const source = twoDrawnMoves();
+    source.moves[1]!.newNodePos = at(500.49, 650.49);
+    const { engine, seen } = drifting(at(503.31, 653.31));
+    const { history } = await prepareLink(source, engine);
+    expect(seen.rehearsed).toBe(2);
+    expect(history.moves.map((m) => m.topology)).toEqual([chord, undefined]);
+  });
+
   it("keeps a topology move whose rehearsed node drifts within the tolerance", async () => {
     const { engine, seen } = drifting(at(500, 650 + DRIFT_TOLERANCE));
     const { history } = await prepareLink(twoDrawnMoves(), engine);

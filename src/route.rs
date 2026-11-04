@@ -146,9 +146,27 @@ fn eroded_by(state: &GameState, want: &Rules) -> f64 {
     want.clearance + curve::tolerance(state.board_size)
 }
 
-/// The taut path for `mv` through the eroded face, legs included, in the
-/// homotopy class the move names.
+/// The taut path for `mv` through the eroded face, in the homotopy class
+/// the move names, with its pinches parted and its crossings undone.
 fn plan(
+    state: &GameState,
+    mv: &FaceMove,
+    want: &Rules,
+) -> Result<(erode::Arena, Vec<Point>), Unroutable> {
+    let (arena, path) = taut_path(state, mv, want)?;
+    let path = split_pinches(path, eroded_by(state, want) / 4.0, |q| arena.free_at(q));
+    let path = settle(path)?;
+    Ok((arena, path))
+}
+
+/// The path with a doubled-back leg cut and its crossings undone, or
+/// tangled.
+fn settle(path: Vec<Point>) -> Result<Vec<Point>, Unroutable> {
+    uncross(untwist_legs(path)).ok_or(Unroutable::Shape("tangled"))
+}
+
+/// The taut path for `mv` through the eroded face as the funnel leaves it.
+fn taut_path(
     state: &GameState,
     mv: &FaceMove,
     want: &Rules,
@@ -197,34 +215,57 @@ fn plan(
             );
         }
     }
-    let path = split_pinches(path, c / 4.0);
-    let path = uncross(untwist_legs(path)).ok_or(Unroutable::Shape("tangled"))?;
     Ok((arena, path))
 }
 
 /// Two legs of a path the funnel pulled through the same vertex are set a
-/// little apart there, each to its own left, so they leave the vertex on
-/// opposite sides and the relaxation can open them further instead of
-/// crossing them.
-fn split_pinches(mut path: Vec<Point>, by: f64) -> Vec<Point> {
+/// little apart there, so they leave the vertex on different sides and the
+/// relaxation can open them further instead of crossing them: a leg moves
+/// to the left of its way through, a hairpin back the way it came, each
+/// only where that is free. Legs through one vertex the same way are left
+/// as they are.
+fn split_pinches(mut path: Vec<Point>, by: f64, free: impl Fn(Point) -> bool) -> Vec<Point> {
     let n = path.len();
-    let left = |path: &[Point], k: usize| {
-        let (p, q) = (path[k - 1], path[k + 1]);
+    let unit = |p: Point, q: Point| {
         let (dx, dy) = (q.x - p.x, q.y - p.y);
         let len = (dx * dx + dy * dy).sqrt();
-        if len < 1e-9 {
-            (0.0, 0.0)
-        } else {
-            (dy / len * by, -dx / len * by)
-        }
+        (len >= 1e-9).then(|| (dx / len, dy / len))
     };
-    for i in 1..n.saturating_sub(1) {
-        for j in i + 1..n - 1 {
-            if path[i].distance_to(&path[j]) < 1e-9 {
-                let (a, b) = (left(&path, i), left(&path, j));
-                path[i] = Point::new(path[i].x + a.0, path[i].y + a.1);
-                path[j] = Point::new(path[j].x + b.0, path[j].y + b.1);
-            }
+    // A pass through vertex k: the way in and the way out, as unit vectors.
+    let pass =
+        |path: &[Point], k: usize| Some((unit(path[k - 1], path[k])?, unit(path[k], path[k + 1])?));
+    let same_way = |a: ((f64, f64), (f64, f64)), b: ((f64, f64), (f64, f64))| {
+        a.0 .0 * b.0 .0 + a.0 .1 * b.0 .1 > 0.0 && a.1 .0 * b.1 .0 + a.1 .1 * b.1 .1 > 0.0
+    };
+    let interior: Vec<usize> = (1..n.saturating_sub(1)).collect();
+    let mut moved: Vec<Option<Point>> = vec![None; n];
+    for &i in &interior {
+        let Some(this) = pass(&path, i) else {
+            continue;
+        };
+        let pinched = interior.iter().any(|&j| {
+            j != i
+                && path[i].distance_to(&path[j]) < 1e-9
+                && pass(&path, j).is_some_and(|other| !same_way(this, other))
+        });
+        if !pinched {
+            continue;
+        }
+        let ((ax, ay), (bx, by_)) = this;
+        let (sx, sy) = (ax + bx, ay + by_);
+        let through = (sx * sx + sy * sy).sqrt();
+        // Left of the way through, or straight back out of a hairpin.
+        let (dx, dy) = if through >= 1e-6 {
+            (sy / through, -sx / through)
+        } else {
+            (-ax, -ay)
+        };
+        let to = Point::new(path[i].x + dx * by, path[i].y + dy * by);
+        moved[i] = free(to).then_some(to);
+    }
+    for (i, at) in moved.into_iter().enumerate() {
+        if let Some(at) = at {
+            path[i] = at;
         }
     }
     path

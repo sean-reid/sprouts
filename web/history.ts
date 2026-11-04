@@ -630,10 +630,15 @@ function readStrokeMove(reader: ByteReader): RecordMove | null {
   return toRecordMove({ fromNode, toNode, polyline, newNodePos });
 }
 
+// The point as the link carries it, in whole quanta.
+function quantized(p: Point, quantum: number): Point {
+  return { x: Math.round(p.x / quantum), y: Math.round(p.y / quantum) };
+}
+
 function deltaWriter(out: ByteWriter, quantum: number): (p: Point) => void {
   let last = { x: 0, y: 0 };
   return (p) => {
-    const q = { x: Math.round(p.x / quantum), y: Math.round(p.y / quantum) };
+    const q = quantized(p, quantum);
     out.varint(zigzag(q.x - last.x));
     out.varint(zigzag(q.y - last.y));
     last = q;
@@ -726,15 +731,17 @@ export interface LinkEngine {
   rehearse(plan: Rehearsal): Promise<Rehearsed>;
 }
 
-// The game as the link will carry it, worked out on a copy: the engine
-// says which drawn moves the router redraws, then the link is replayed as
-// decoded and any topology move the replay refuses, or lands its node more
-// than DRIFT_TOLERANCE from the recorded one, goes as geometry until the
-// whole link applies and every routed node holds. A refused drawn move is
-// blamed on the latest topology move before it, whose redraw shifted the
-// board under it; when none precedes it the index comes back so the sharer
-// can be told. A history the engine refuses to classify, as one left with
-// moves past a stopped restore, keeps the face moves the AI reported.
+// The game as the link will carry it, worked out on a copy: the
+// engine says which drawn moves the router redraws, then the link
+// is replayed as decoded and any topology move the replay refuses,
+// or lands its node more than DRIFT_TOLERANCE from the recorded
+// one, both nodes rounded as a link carries them, goes as geometry
+// until the whole link applies and every routed node holds. A
+// refused drawn move is blamed on the latest topology move before
+// it, whose redraw shifted the board under it; when none precedes
+// it the index comes back so the sharer can be told. A history the
+// engine refuses to classify, as one left with moves past a
+// stopped restore, keeps the face moves the AI reported.
 export async function prepareLink(
   source: History,
   engine: LinkEngine,
@@ -752,6 +759,9 @@ export async function prepareLink(
       // The AI's own face moves stand; the rehearsal checks them anyway.
     }
   }
+  const quantum = LINK_QUANTUM * scaleOf(history.boardSize);
+  const drift = (a: Point, b: Point) =>
+    distance(quantized(a, quantum), quantized(b, quantum)) * quantum;
   const tolerance = DRIFT_TOLERANCE * scaleOf(history.boardSize);
   for (;;) {
     const link = rehearsal(history);
@@ -761,7 +771,7 @@ export async function prepareLink(
       let drifted = false;
       nodes.forEach((node, i) => {
         const move = history.moves[i];
-        if (node && move && distance(node, move.newNodePos) > tolerance) {
+        if (node && move && drift(node, move.newNodePos) > tolerance) {
           drifted = demote(history, i) || drifted;
         }
       });
