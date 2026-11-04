@@ -8,8 +8,7 @@ const ROUNDS: usize = 40;
 /// A moved segment that comes within one grid step of a wall vertex or a
 /// node touches it and counts as crossing there. Distance from the walls
 /// themselves is the hard step's job, and finish refuses a fitted curve
-/// nearer any line than the player's clearance, which every drawn move
-/// of the seeded sweeps goes through.
+/// nearer any line than the player's clearance.
 const GRAZE: f64 = crate::exact::GRID;
 /// Share of the shortfall a point moves per round, so two walls closer than
 /// twice the clearance settle the point between them instead of bouncing.

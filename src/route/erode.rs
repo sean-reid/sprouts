@@ -769,6 +769,16 @@ impl Arena {
         }
     }
 
+    /// Whether `p` lies in the triangulation at all.
+    #[cfg(test)]
+    pub(super) fn contains(&self, p: Point) -> bool {
+        !matches!(
+            self.cdt.locate(point2(p)),
+            PositionInTriangulation::OutsideOfConvexHull(_)
+                | PositionInTriangulation::NoTriangulation
+        )
+    }
+
     pub(super) fn walls(&self) -> &[(Point, Point)] {
         &self.walls.segments
     }
@@ -872,7 +882,7 @@ impl Arena {
     /// the first triangle the segment enters, or the last it leaves, has
     /// to be one of that end's corner triangles, or the segment would
     /// reach the node from the wrong side of one of its own lines.
-    fn segment_parity(
+    pub(super) fn segment_parity(
         &self,
         cuts: &Cuts,
         p: Point,
@@ -1032,8 +1042,9 @@ impl Arena {
             .collect::<Result<_, _>>()?;
         if let Component::Cycle(start) = own {
             // The own cut starts at the vertex of the piece farthest from
-            // both ends: never an end itself, or a corridor would flip the
-            // bit by starting in the next fan triangle and change nothing.
+            // both ends and off every blocked vertex, so the second search
+            // cannot satisfy its parity inside an entry fan. The piece is a
+            // cycle of flattened lines, so it has vertices off both ends.
             let ends = [state.nodes[mv.a].position, state.nodes[mv.b].position];
             let room = |p: Point| {
                 ends.iter()
@@ -1049,6 +1060,7 @@ impl Arena {
                 .iter()
                 .filter(|(_, p)| room(*p) > SAME_POINT)
                 .find_map(|(_, p)| self.vertex_at(*p))
+                .filter(|v| !blocked_flags[v.index()])
                 .ok_or(Unroutable::Bug("own vertex"))?;
             sources.push((None, v));
         }
