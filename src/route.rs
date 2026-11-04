@@ -180,9 +180,13 @@ fn plan(
         corridor::Want::Any,
         is_loop,
     );
-    // Room means the free triangles disconnect the ends; a path the
-    // search missed would be a bug.
-    if matches!(first, Err(Unroutable::Room)) && corridor::reachable(&arena, &entries, &exits) {
+    // A chord's Room means the free triangles disconnect its ends, so a
+    // path the search missed is a bug. A loop's Room means no closed walk
+    // from the node crosses a cut, which only the parity search decides.
+    if !is_loop
+        && matches!(first, Err(Unroutable::Room))
+        && corridor::reachable(&arena, &entries, &exits)
+    {
         return Err(Unroutable::Bug("room with a path"));
     }
     let first = first?;
