@@ -1378,12 +1378,10 @@ fn record_spokes_position() {
     std::fs::write(path, sweep::fixture_json(&spokes_position())).unwrap();
 }
 
-/// A route out of an end node with two spokes leaves between them instead
-/// of hugging one: the relaxation moves the first point after the end to
-/// the line clearance from both spokes, and the drawn curve stays in the
-/// corner, a clearance off both spokes by the time it is a node room out.
-#[test]
-fn a_route_out_of_an_end_with_two_spokes_leaves_between_them() {
+/// The move of `SPOKES_FIXTURE` that leaves node 0 between its spokes,
+/// with the recorded position, the rules and the test for a point inside
+/// that corner: heading left, within 50 degrees of the chord to node 2.
+fn spokes_case() -> (GameState, FaceMove, Rules, impl Fn(&Point) -> bool) {
     let state = position(&std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(SPOKES_FIXTURE));
     let live = spokes_position();
     assert_eq!(
@@ -1392,12 +1390,9 @@ fn a_route_out_of_an_end_with_two_spokes_leaves_between_them() {
         "the fixture is the recorded position"
     );
     let want = rules(&state);
-    let spokes = spokes_at(&state, 0);
-    assert_eq!(spokes.len(), 2);
+    assert_eq!(spokes_at(&state, 0).len(), 2);
     let end = state.nodes[0].position;
-    // Node 0 has two corners; the move through the one between the spokes
-    // heads left, within 50 degrees of the chord to node 2.
-    let between = |q: &Point| q.x < end.x && (q.y - end.y).abs() < (end.x - q.x) * 1.19;
+    let between = move |q: &Point| q.x < end.x && (q.y - end.y).abs() < (end.x - q.x) * 1.19;
     let mv = listed(&state, 0, 2)
         .into_iter()
         .find(|m| {
@@ -1405,41 +1400,74 @@ fn a_route_out_of_an_end_with_two_spokes_leaves_between_them() {
                 .is_ok_and(|(_, taut)| between(&taut[1]))
         })
         .expect("a move leaving between the spokes");
-    let gap = |q: &Point| {
-        spokes
-            .iter()
-            .map(|s| closest_point_on_polyline(s, q).1)
-            .fold(f64::INFINITY, f64::min)
-    };
+    (state, mv, want, between)
+}
 
-    let (arena, taut) = plan(&mut Router::new(), &state, &mv, &want, Parity::Search).unwrap();
-    let relaxed = relax(&state, &mv, &want, &arena, &taut).unwrap();
-    let before = clearance::resample(&taut, clearance::SPACING * super::eroded_by(&state, &want));
-    assert_eq!(relaxed[0], end);
+/// Least distance from `q` to a spoke of node 0.
+fn spoke_gap(state: &GameState, q: &Point) -> f64 {
+    spokes_at(state, 0)
+        .iter()
+        .map(|s| closest_point_on_polyline(s, q).1)
+        .fold(f64::INFINITY, f64::min)
+}
+
+/// Relaxes `mv` and checks the interior point next to node 0 (the first
+/// when `at_start`, else the last) moved from where the taut path put it,
+/// stayed in the corner and sits the line clearance from both spokes.
+fn assert_relaxed_point_leaves_spokes(
+    state: &GameState,
+    mv: &FaceMove,
+    want: &Rules,
+    between: &dyn Fn(&Point) -> bool,
+    at_start: bool,
+) {
+    let end = state.nodes[0].position;
+    let (arena, taut) = plan(&mut Router::new(), state, mv, want, Parity::Search).unwrap();
+    let relaxed = relax(state, mv, want, &arena, &taut).unwrap();
+    let before = clearance::resample(&taut, clearance::SPACING * super::eroded_by(state, want));
+    let n = relaxed.len();
+    let (end_at, i) = if at_start { (0, 1) } else { (n - 1, n - 2) };
+    assert_eq!(relaxed[end_at], end);
     assert!(
-        before[1].distance_to(&relaxed[1]) > 1e-9,
-        "the first point after the end did not move"
+        before[i].distance_to(&relaxed[i]) > 1e-9,
+        "the point next to the end did not move"
     );
     assert!(
-        between(&relaxed[1]),
-        "the first point left the corner: {:?}",
-        relaxed[1]
+        between(&relaxed[i]),
+        "the point next to the end left the corner: {:?}",
+        relaxed[i]
     );
     assert!(
-        gap(&relaxed[1]) >= want.clearance,
-        "first point {:.2} from a spoke, clearance {:.2}",
-        gap(&relaxed[1]),
+        spoke_gap(state, &relaxed[i]) >= want.clearance,
+        "point next to the end {:.2} from a spoke, clearance {:.2}",
+        spoke_gap(state, &relaxed[i]),
         want.clearance
     );
+}
 
-    let drawn = route(&state, &mv).unwrap();
+/// Checks the drawn curve for `mv` stays in node 0's corner over the node
+/// room nearest it (its first when `at_start`, else its last) and is a
+/// clearance off both spokes one node room out.
+fn assert_curve_leaves_spokes(
+    state: &GameState,
+    mv: &FaceMove,
+    want: &Rules,
+    between: &dyn Fn(&Point) -> bool,
+    at_start: bool,
+) {
+    let drawn = route(state, mv).unwrap();
+    let mut flat = drawn.flatten(curve::tolerance(state.board_size));
+    if !at_start {
+        flat.reverse();
+    }
+    assert_eq!(flat[0], state.nodes[0].position);
     let room = NODE_ROOM * want.spacing;
     let mut along = 0.0;
     let mut checked = 0;
-    let mut last = end;
+    let mut last = flat[0];
     // The curve sampled about every unit of arc length over the first
     // node room, so a straight route still gives points to check.
-    'curve: for w in drawn.flatten(curve::tolerance(state.board_size)).windows(2) {
+    'curve: for w in flat.windows(2) {
         let length = w[0].distance_to(&w[1]);
         let steps = length.ceil().max(1.0) as usize;
         for k in 1..=steps {
@@ -1458,10 +1486,37 @@ fn a_route_out_of_an_end_with_two_spokes_leaves_between_them() {
     }
     assert!(checked >= 20, "{checked} points checked");
     assert!(
-        gap(&last) >= want.clearance,
+        spoke_gap(state, &last) >= want.clearance,
         "{:.2} from a spoke one node room out",
-        gap(&last)
+        spoke_gap(state, &last)
     );
+}
+
+/// A route out of an end node with two spokes leaves between them instead
+/// of hugging one: the relaxation moves the first point after the end to
+/// the line clearance from both spokes, and the drawn curve stays in the
+/// corner, a clearance off both spokes by the time it is a node room out.
+#[test]
+fn a_route_out_of_an_end_with_two_spokes_leaves_between_them() {
+    let (state, mv, want, between) = spokes_case();
+    assert_relaxed_point_leaves_spokes(&state, &mv, &want, &between, true);
+    assert_curve_leaves_spokes(&state, &mv, &want, &between, true);
+}
+
+/// The same move routed the other way, into the spoked node: the last
+/// point before the end moves and the curve arrives between the spokes.
+#[test]
+fn a_route_into_an_end_with_two_spokes_arrives_between_them() {
+    let (state, mv, want, between) = spokes_case();
+    let reversed = FaceMove {
+        a: mv.b,
+        at_a: mv.at_b,
+        b: mv.a,
+        at_b: mv.at_a,
+        enclosed: mv.enclosed.clone(),
+    };
+    assert_relaxed_point_leaves_spokes(&state, &reversed, &want, &between, false);
+    assert_curve_leaves_spokes(&state, &reversed, &want, &between, false);
 }
 
 /// Every coordinate of a position, for comparing a fixture with the

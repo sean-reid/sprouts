@@ -274,8 +274,9 @@ impl<'a> Obstacles<'a> {
 
     /// Whether the segment from `a` to `b` crosses the boundary or a part of
     /// the path other than the segments around point `i`. Passing through a
-    /// wall vertex or a node counts: a crossing there touches no segment
-    /// properly, and no legal line comes that close.
+    /// wall vertex or a node counts, since a crossing there touches no
+    /// segment properly, except the vertices on an end of the path for the
+    /// segment meeting that end: the end's own spokes start there.
     fn crosses(&self, path: &[Point], i: usize, a: Point, b: Point) -> bool {
         if self
             .segments
@@ -284,9 +285,6 @@ impl<'a> Obstacles<'a> {
         {
             return true;
         }
-        // A segment through a wall vertex or a node crosses nothing
-        // properly; the hard step keeps the clearance from them. The end
-        // node's own spokes start on the end, where the path starts too.
         let leaving = (i == 1).then(|| path[0]);
         let arriving = (i + 2 == path.len()).then(|| path[path.len() - 1]);
         let own_end = |v: &Point| {
