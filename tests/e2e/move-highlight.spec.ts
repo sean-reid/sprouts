@@ -2,6 +2,7 @@ import { readFile } from "node:fs/promises";
 import { expect, test, type Page } from "@playwright/test";
 import { HIGHLIGHT_COLOR, PLAYER_COLORS } from "../../web/render";
 import {
+  awaitReply,
   awayFrom,
   colourPixelsNear,
   frameOf,
@@ -136,4 +137,22 @@ test("rows describe the shape of each move, name the nodes in the title and wear
   await expect(swatch(0)).toHaveCSS("background-color", "rgb(96, 165, 250)");
   await expect(swatch(1)).toHaveCSS("background-color", "rgb(239, 68, 68)");
   await expect(swatch(8)).toHaveCSS("background-color", "rgb(96, 165, 250)");
+});
+
+test("rows count the nodes a chord cuts off or a loop encloses", async ({ page }) => {
+  test.skip(
+    !["mobile", "desktop"].includes(test.info().project.name),
+    "the text does not depend on the viewport",
+  );
+  const record = await readFile("fixtures/saved/ten-moves-9n-1000.json", "utf8");
+  await page.addInitScript((saved) => localStorage.setItem("sprouts.game", saved), record);
+  await page.goto("/");
+  await awaitReply(page);
+  await expect(rows(page).nth(0)).toHaveText("1. You, joins two nodes");
+  await expect(rows(page).nth(1)).toHaveText("2. AI, loop on one node, encloses 3");
+  await expect(rows(page).nth(3)).toHaveText("4. AI, joins two nodes, cuts off 1");
+  await expect(rows(page).nth(6)).toHaveText("7. You, joins two nodes, cuts off 3");
+  await expect(rows(page).nth(8)).toHaveText("9. You, joins two nodes, cuts off 2");
+  await rows(page).nth(6).scrollIntoViewIfNeeded();
+  await shot(page, "cut-off-rows");
 });

@@ -23,6 +23,7 @@ import {
   shareUrl,
   StaleLink,
   toMove,
+  type Applied,
   type GameRecord,
 } from "./history";
 import { attachInput, type InputOptions, type PointerKind } from "./input";
@@ -557,15 +558,15 @@ async function executeMove(): Promise<void> {
     return;
   }
 
-  recordMove(move, outcome.snapshot);
+  recordMove(move, outcome);
   clearStroke();
   if (state.gameOver) showGameOver();
   else startAITurn();
 }
 
-function recordMove(move: Move, snapshot: Snapshot, topology?: FaceMove): void {
-  timeline.push(move, topology);
-  applySnapshot(snapshot);
+function recordMove(move: Move, outcome: Applied, topology?: FaceMove): void {
+  timeline.push(move, topology, outcome.cutOff);
+  applySnapshot(outcome.snapshot);
   persist();
 }
 
@@ -653,7 +654,7 @@ async function finishAIMove(move: Move, topology: FaceMove, epoch: number): Prom
   } else if (outcome.kind === "rejected") {
     setStatus("AI error: " + outcome.rejection.message, "lose");
   } else {
-    recordMove(move, outcome.snapshot, topology);
+    recordMove(move, outcome, topology);
     if (state.gameOver) showGameOver();
     else setStatus("Your turn!");
   }
