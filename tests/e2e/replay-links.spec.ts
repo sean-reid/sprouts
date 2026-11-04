@@ -28,15 +28,14 @@ const fixtures = [
   "fixtures/games/selfplay-4n-500.json",
 ];
 
-// Games played on the page against the current AI, the human strokes
-// wobbly, so AI moves travel as face moves and human moves as geometry.
-// Per game: the payload budget in characters (231 and 440 measured, with
-// headroom) and how many of the AI's moves go as topology; the nine-node
-// game has one the visitor's engine cannot route, which the share's
-// rehearsal sends as geometry instead.
+// Games recorded against the current AI by the record_shared_games test
+// in src/route/tests.rs, the human strokes kinked, so AI moves travel as
+// face moves and human moves as geometry. Per game: the payload budget in
+// characters (223 and 379 measured, with headroom) and how many of the
+// AI's moves go as topology.
 const routed: [string, number, number][] = [
   ["fixtures/saved/eight-moves-4n-1000.json", 250, 4],
-  ["fixtures/saved/ten-moves-9n-1000.json", 480, 4],
+  ["fixtures/saved/ten-moves-9n-1000.json", 420, 5],
 ];
 
 const entries = (page: Page) => page.locator("#moveList li");

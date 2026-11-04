@@ -551,30 +551,55 @@ fn diagnose_fixture() {
 }
 
 /// Writes a game of `moves` moves on `nodes` nodes to `path` in the saved
-/// record shape, the human moving first: human lines are routed at the
-/// human clearances and then bent by more than the redraw tolerance, so
-/// they travel as geometry in a link, and AI lines are what the AI draws.
-fn record_shared_game(nodes: usize, moves: usize, path: &std::path::Path) {
+/// record shape, the human moving first: human lines are routed at twice
+/// the human clearances, so the rounded strokes of a link still pass, and
+/// then kinked by more than the redraw tolerance, so they travel as
+/// geometry; AI lines are what the AI draws.
+fn record_shared_game(nodes: usize, moves: usize, pick: usize, path: &std::path::Path) {
     let mut state = GameState::with_board_size(nodes, 1000);
     state.current_player = Player::Human;
-    let wobble = 3.0 * curve::tolerance(state.board_size);
+    let kink = 4.0 * curve::tolerance(state.board_size);
+    let human = rules(&state);
+    let slack = Rules {
+        clearance: 2.0 * human.clearance,
+        node_clearance: 2.0 * human.node_clearance,
+        fallback: 2.0 * human.fallback,
+        ..human
+    };
     let mut record = Vec::new();
     for index in 0..moves {
         let mov = if state.current_player == Player::Human {
-            let listed = state.face.search_moves();
+            // Long chords first, as a hand plays across a fresh board; a
+            // loop's stroke costs the link more.
+            let mut listed = state.face.search_moves();
+            let span = |m: &FaceMove| {
+                state.nodes[m.a]
+                    .position
+                    .distance_to(&state.nodes[m.b].position)
+            };
+            listed.sort_by(|x, y| {
+                (x.a == x.b)
+                    .cmp(&(y.a == y.b))
+                    .then(span(y).total_cmp(&span(x)))
+            });
+            let n = listed.len();
             listed
                 .iter()
+                .cycle()
+                .skip(pick % n)
+                .take(n)
                 .find_map(|face| {
-                    let routed = route(&state, face).ok()?;
+                    let routed = route_at(&state, face, &slack).ok()?;
+                    // One kink in the middle, so the thinned stroke stays
+                    // short and still differs from the router's line.
                     let n = routed.polyline.len();
                     let bent: Vec<Point> = routed
                         .polyline
                         .iter()
                         .enumerate()
                         .map(|(i, q)| {
-                            let t = i as f64 / (n - 1) as f64;
-                            let s = (t * std::f64::consts::PI).sin();
-                            Point::new(q.x + wobble * s, q.y + wobble * s * (2.0 * t - 1.0))
+                            let t = 1.0 - (2.0 * i as f64 / (n - 1) as f64 - 1.0).abs();
+                            Point::new(q.x + kink * t, q.y + kink * t)
                         })
                         .collect();
                     let mov = Move::new(
@@ -622,11 +647,31 @@ fn record_shared_game(nodes: usize, moves: usize, path: &std::path::Path) {
 
 /// Rewrites the two shared-game fixtures that tests/e2e/replay-links.spec.ts
 /// carries as topology, for when the router's output changes:
-/// `cargo test --release record_shared_games -- --ignored`.
+/// `cargo test --release record_shared_games -- --ignored`. The pick,
+/// from SPROUTS_PICK_4 and SPROUTS_PICK_9 when set, is which chord the
+/// human opens with; the spec needs games whose AI moves the visitor's
+/// rounded board reroutes within a unit, which most picks do not give, so
+/// a new router may need another pick.
 #[test]
 #[ignore]
 fn record_shared_games() {
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/saved");
-    record_shared_game(4, 8, &dir.join("eight-moves-4n-1000.json"));
-    record_shared_game(9, 10, &dir.join("ten-moves-9n-1000.json"));
+    let pick = |var: &str, default: usize| {
+        std::env::var(var)
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(default)
+    };
+    record_shared_game(
+        4,
+        8,
+        pick("SPROUTS_PICK_4", 4),
+        &dir.join("eight-moves-4n-1000.json"),
+    );
+    record_shared_game(
+        9,
+        10,
+        pick("SPROUTS_PICK_9", 17),
+        &dir.join("ten-moves-9n-1000.json"),
+    );
 }
