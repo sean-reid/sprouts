@@ -135,22 +135,35 @@ pub fn route(state: &GameState, mv: &FaceMove) -> Result<Move, Unroutable> {
     Router::new().route(state, mv)
 }
 
-/// An eroded face by face, end pair and node clearance.
-type ArenaKey = (FaceId, NodeId, NodeId, u64);
-/// A chord's corners and node clearance.
+/// The bits of the three clearances an erosion is built to: the wall
+/// clearance, the node disc and the forgiven radius.
+type Clearances = (u64, u64, u64);
+/// An eroded face by face, end pair and clearances.
+type ArenaKey = (FaceId, NodeId, NodeId, Clearances);
+/// A chord's corners and clearances.
 type CornerKey = (
     FaceId,
     NodeId,
     Option<HalfEdgeId>,
     NodeId,
     Option<HalfEdgeId>,
-    u64,
+    Clearances,
 );
 
-/// Work shared by every route of one position: an eroded face depends on
+fn clearances(state: &GameState, want: &Rules) -> Clearances {
+    (
+        eroded_by(state, want).to_bits(),
+        disc_of(state, want).to_bits(),
+        want.forgiven.to_bits(),
+    )
+}
+
+/// Work shared by every route of one position. An eroded face depends on
 /// the face, the move's end nodes and the clearances, not on which pieces
-/// the move encloses, and a chord's ends being disconnected in it refuses
-/// every chord between the same corners.
+/// the move encloses, so it is built once per those; a chord's ends being
+/// disconnected in it refuses every chord between the same corners at the
+/// same clearances. The keys do not cover the position itself: a Router
+/// serves one `GameState` and is dropped with it.
 #[derive(Default)]
 pub struct Router {
     arenas: BTreeMap<ArenaKey, Result<Rc<erode::Arena>, Unroutable>>,
@@ -160,6 +173,12 @@ pub struct Router {
 impl Router {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Corner pairs remembered as having no room.
+    #[cfg(test)]
+    pub(crate) fn corners_without_room(&self) -> usize {
+        self.no_room.len()
     }
 
     /// The curve for `mv`, drawn to the clearances of the player to move,
@@ -236,14 +255,14 @@ impl Router {
         mv: &FaceMove,
         want: &Rules,
     ) -> Result<Rc<erode::Arena>, Unroutable> {
-        let disc = disc_of(state, want);
-        let key = (face, mv.a, mv.b, disc.to_bits());
+        let key = (face, mv.a, mv.b, clearances(state, want));
         if let Some(hit) = self.arenas.get(&key) {
             return hit.clone();
         }
         #[cfg(test)]
         let started = std::time::Instant::now();
         let c = eroded_by(state, want);
+        let disc = disc_of(state, want);
         let built =
             erode::Arena::build(state, face, mv.a, mv.b, c, disc, want.forgiven).map(Rc::new);
         #[cfg(test)]
@@ -300,14 +319,7 @@ fn taut_path(
         .face
         .corner_face(mv.a, mv.at_a)
         .map_err(|_| Unroutable::Bug("corner"))?;
-    let corners = (
-        face,
-        mv.a,
-        mv.at_a,
-        mv.b,
-        mv.at_b,
-        disc_of(state, want).to_bits(),
-    );
+    let corners = (face, mv.a, mv.at_a, mv.b, mv.at_b, clearances(state, want));
     if router.no_room.contains(&corners) {
         return Err(Unroutable::Room);
     }

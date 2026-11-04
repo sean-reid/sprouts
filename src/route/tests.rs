@@ -235,7 +235,7 @@ fn the_ai_opens_with_a_move_the_normal_validator_accepts() {
             state.current_player = Player::AI;
             let moves = state.face.search_moves();
             let order = crate::ai::rank(&state, &moves);
-            let (Some(mov), failures) = crate::ai::draw(&state, &moves, &order) else {
+            let (Ok(mov), failures) = crate::ai::draw(&state, &moves, &order) else {
                 panic!("{nodes} nodes at {board}: no opening move drawn");
             };
             assert_eq!(failures, 0, "{nodes} nodes at {board}");
@@ -582,8 +582,8 @@ fn record_shared_game(nodes: usize, moves: usize, pick: usize, path: &std::path:
             let moves = state.face.search_moves();
             let order: Vec<usize> = (0..moves.len()).collect();
             match crate::ai::draw(&state, &moves, &order) {
-                (Some(mov), _) => mov,
-                (None, _) => panic!("no AI move draws at move {index}"),
+                (Ok(mov), _) => mov,
+                (Err(why), _) => panic!("no AI move drawn at move {index}: {why:?}"),
             }
         };
         record.push(serde_json::json!({
