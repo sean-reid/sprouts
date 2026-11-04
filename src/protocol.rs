@@ -198,6 +198,16 @@ pub enum RouteReply {
 
 /// A fresh board on the recorded positions, or on the default layout when
 /// none are given. Positions that do not match the count are an error.
+/// FNV-1a over the node positions and the line flattenings, as hex.
+pub fn hash_board(state: &GameState) -> String {
+    let mut fnv = crate::exact::Fnv::default();
+    fnv.points(&state.nodes.iter().map(|n| n.position).collect::<Vec<_>>());
+    for line in &state.lines {
+        fnv.points(&line.flat);
+    }
+    fnv.hex()
+}
+
 pub fn start(
     initial_nodes: usize,
     board_size: usize,
@@ -554,6 +564,22 @@ pub fn auto_placement(state: &GameState, query: AutoPlacementQuery) -> AutoPlace
 
 #[cfg(test)]
 mod tests {
+    /// The hash of a fresh four-node board on fixed positions, recorded on
+    /// a Mac; tests/unit/board-hash.test.ts asks the wasm build for it.
+    const BOARD_HASH: &str = "0x88c8d6882977d382";
+
+    #[test]
+    fn a_fixed_board_hashes_to_the_recorded_value() {
+        let nodes = vec![
+            Point::new(632.2875655532296, 500.0),
+            Point::new(331.0475650550718, 654.7742702330713),
+            Point::new(525.8608781260419, 205.32863223151458),
+            Point::new(712.9536013426019, 777.7602629520936),
+        ];
+        let state = start(4, 1000, Player::Human, Some(nodes)).unwrap();
+        assert_eq!(hash_board(&state), BOARD_HASH);
+    }
+
     use super::*;
     use serde_json::json;
 

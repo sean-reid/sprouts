@@ -123,13 +123,13 @@ pub fn point_to_segment_distance(px: f64, py: f64, x1: f64, y1: f64, x2: f64, y2
     let dy = y2 - y1;
     let len_sq = dx * dx + dy * dy;
     if len_sq < 1e-10 {
-        return ((px - x1).powi(2) + (py - y1).powi(2)).sqrt();
+        return ((px - x1) * (px - x1) + (py - y1) * (py - y1)).sqrt();
     }
     let t = ((px - x1) * dx + (py - y1) * dy) / len_sq;
     let t = t.clamp(0.0, 1.0);
     let cx = x1 + t * dx;
     let cy = y1 + t * dy;
-    ((px - cx).powi(2) + (py - cy).powi(2)).sqrt()
+    ((px - cx) * (px - cx) + (py - cy) * (py - cy)).sqrt()
 }
 
 /// Douglas-Peucker polyline decimation

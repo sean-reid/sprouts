@@ -2,6 +2,7 @@ mod abstract_graph;
 mod ai;
 mod curve;
 mod embedding;
+pub mod exact;
 pub mod face;
 mod geometry;
 mod nimber;
@@ -71,6 +72,14 @@ impl SproutsGame {
         Ok(protocol::classify(plan.to_rust()?)
             .map_err(|e| JsError::new(&e))?
             .into_ts()?)
+    }
+
+    /// FNV-1a over the board's node positions and line flattenings, as
+    /// hex, for checking that this build draws what the native build drew.
+    #[cfg(feature = "hash")]
+    #[wasm_bindgen(js_name = hashBoard)]
+    pub fn hash_board(&self) -> String {
+        protocol::hash_board(&self.state)
     }
 
     pub fn undo(&mut self) -> bool {

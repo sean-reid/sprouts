@@ -23,6 +23,7 @@ proptest = "1"
 
 [features]
 bench = ["dep:serde_json"]
+hash = []
 
 [[bench]]
 name = "replay"
