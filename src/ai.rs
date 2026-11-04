@@ -72,9 +72,10 @@ pub(crate) fn rank(state: &GameState, candidates: &[FaceMove]) -> Vec<usize> {
 /// Routes the candidates in ranked order until one draws, trying the other
 /// members of a move's class before moving down the ranking. Once
 /// `ROUTE_BUDGET_MS` has passed, each remaining candidate gets one attempt
-/// at the cheap clearance, until `DRAW_LIMIT_MS` has passed and the rest
-/// go untried. Returns the drawn move, or why there is none, and the
-/// number of ranked moves passed over.
+/// at the cheap clearance, those whose first path needs the parity search
+/// after all the others, until `DRAW_LIMIT_MS` has passed and the rest go
+/// untried. Returns the drawn move, or why there is none, and the number
+/// of candidates refused before it.
 pub(crate) fn draw(
     state: &GameState,
     candidates: &[FaceMove],
@@ -92,23 +93,17 @@ pub(crate) fn draw_within(
 ) -> (Result<Move, Undrawn>, usize) {
     let mut router = route::Router::new();
     let mut failures = 0;
-    for &idx in order {
-        let listed = &candidates[idx];
+    let mut pos = 0;
+    while pos < order.len() {
         let elapsed = clock.elapsed_ms();
         if elapsed > DRAW_LIMIT_MS {
             return (Err(Undrawn::OutOfTime), failures);
         }
         if elapsed > ROUTE_BUDGET_MS {
-            if let Some(mov) = router
-                .route_cheap(state, listed)
-                .ok()
-                .and_then(|m| stored(state, m))
-            {
-                return (Ok(mov), failures);
-            }
-            failures += 1;
-            continue;
+            break;
         }
+        let listed = &candidates[order[pos]];
+        pos += 1;
         let tries = std::iter::once(listed.clone()).chain(class_members(state, listed));
         for attempt in tries {
             if let Some(mov) = router
@@ -125,6 +120,36 @@ pub(crate) fn draw_within(
             if elapsed > ROUTE_BUDGET_MS {
                 break;
             }
+        }
+        failures += 1;
+    }
+    // The parity search is most of a refused route's cost, so the rest of
+    // the list is swept without it first, and the candidates it held back
+    // get it afterwards.
+    let mut deferred = Vec::new();
+    for &idx in &order[pos..] {
+        if clock.elapsed_ms() > DRAW_LIMIT_MS {
+            return (Err(Undrawn::OutOfTime), failures);
+        }
+        match router
+            .route_cheap_with(state, &candidates[idx], route::Parity::Skip)
+            .map(|m| stored(state, m))
+        {
+            Ok(Some(mov)) => return (Ok(mov), failures),
+            Err(route::Unroutable::Sides) => deferred.push(idx),
+            Ok(None) | Err(_) => failures += 1,
+        }
+    }
+    for idx in deferred {
+        if clock.elapsed_ms() > DRAW_LIMIT_MS {
+            return (Err(Undrawn::OutOfTime), failures);
+        }
+        if let Some(mov) = router
+            .route_cheap(state, &candidates[idx])
+            .ok()
+            .and_then(|m| stored(state, m))
+        {
+            return (Ok(mov), failures);
         }
         failures += 1;
     }

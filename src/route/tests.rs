@@ -272,6 +272,7 @@ static TALLY: std::sync::Mutex<sweep::Tally> = std::sync::Mutex::new(sweep::Tall
     no_spot: 0,
     shape: std::collections::BTreeMap::new(),
     topology: 0,
+    sides: 0,
     bug: 0,
     bugs: std::collections::BTreeMap::new(),
 });
@@ -283,6 +284,7 @@ static HUMAN_TALLY: std::sync::Mutex<sweep::Tally> = std::sync::Mutex::new(sweep
     no_spot: 0,
     shape: std::collections::BTreeMap::new(),
     topology: 0,
+    sides: 0,
     bug: 0,
     bugs: std::collections::BTreeMap::new(),
 });
@@ -546,7 +548,9 @@ fn record_shared_game(nodes: usize, moves: usize, pick: usize, path: &std::path:
                 .skip(pick % n)
                 .take(n)
                 .find_map(|face| {
-                    let routed = Router::new().route_at(&state, face, &slack).ok()?;
+                    let routed = Router::new()
+                        .route_at(&state, face, &slack, Parity::Search)
+                        .ok()?;
                     // One kink in the middle, so the thinned stroke stays
                     // short and still differs from the router's line.
                     let n = routed.polyline.len();
@@ -758,7 +762,9 @@ fn routing_hashes() -> [u64; 5] {
         let want = rules(&state);
         for mv in state.face.search_moves() {
             if mv.a != mv.b || !mv.enclosed.is_empty() {
-                if let Ok((arena, taut)) = plan(&mut Router::new(), &state, &mv, &want) {
+                if let Ok((arena, taut)) =
+                    plan(&mut Router::new(), &state, &mv, &want, Parity::Search)
+                {
                     stages[0].points(&arena.vertex_points());
                     stages[1].points(&taut);
                     if let Some(relaxed) = relax(&state, &mv, &want, &arena, &taut) {
@@ -1057,7 +1063,7 @@ fn a_pinch_left_coincident_still_routes_or_is_refused_as_a_shape() {
         enclosed: vec![3],
     };
     let want = rules(&state);
-    let (arena, taut) = taut_path(&mut Router::new(), &state, &mv, &want).unwrap();
+    let (arena, taut) = taut_path(&mut Router::new(), &state, &mv, &want, Parity::Search).unwrap();
     let n = taut.len();
     assert!(
         (1..n - 1).any(|i| (i + 1..n - 1).any(|j| taut[i].distance_to(&taut[j]) < 1e-9)),

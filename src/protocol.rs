@@ -129,7 +129,21 @@ pub enum AiReply {
         topology: FaceMove,
     },
     GameOver,
-    Undrawn,
+    Undrawn {
+        reason: UndrawnReason,
+    },
+}
+
+/// Why the AI drew nothing in a position with listed moves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Tsify)]
+#[serde(rename_all = "camelCase")]
+pub enum UndrawnReason {
+    /// Every listed move was tried and refused.
+    Exhausted,
+    /// The draw hit its time limit with moves still untried.
+    OutOfTime,
+    /// The curve drawn would not read back as a move.
+    Unreadable,
 }
 
 #[derive(Debug, Clone, Deserialize, Tsify)]
@@ -225,6 +239,9 @@ pub enum UnroutableKind {
     /// A path was found but could not be drawn as one curve.
     Shape,
     Topology,
+    /// The first path put pieces on the wrong side and the parity search
+    /// was skipped.
+    Sides,
     Bug,
 }
 
@@ -234,6 +251,7 @@ impl From<&Unroutable> for UnroutableKind {
             Unroutable::Room | Unroutable::NoSpot => Self::Room,
             Unroutable::Shape(_) => Self::Shape,
             Unroutable::Topology => Self::Topology,
+            Unroutable::Sides => Self::Sides,
             Unroutable::Bug(_) => Self::Bug,
         }
     }
@@ -663,6 +681,9 @@ fn unroutable(mv: &face::Move, why: Unroutable) -> Rejection {
         Unroutable::NoSpot => Rejection::unroutable(mv.a, "no room for the new node"),
         Unroutable::Shape(what) => Rejection::unroutable(mv.a, what),
         Unroutable::Topology => Rejection::unroutable(mv.a, "the curve reads as another move"),
+        Unroutable::Sides => {
+            Rejection::unroutable(mv.a, "the first path put pieces on the wrong side")
+        }
         Unroutable::Bug(what) => Rejection::unroutable(mv.a, what),
     }
 }
@@ -688,17 +709,29 @@ pub fn undo(state: &mut GameState) -> bool {
 /// off the curve; a curve that will not read back cannot be applied
 /// either, so it is reported as undrawn rather than trapping the worker.
 pub fn ai_move(state: &mut GameState) -> AiReply {
-    match ai::select_ai_move(state) {
+    answer(state, ai::select_ai_move(state))
+}
+
+/// The AI's reply as the page receives it.
+fn answer(state: &GameState, reply: ai::Reply) -> AiReply {
+    match reply {
         ai::Reply::Move(mov) => match embedding::embed(state, &mov) {
             Ok(face) => AiReply::Move {
                 topology: face.into(),
                 segments: mov.segments.clone(),
                 mov: Move::from(mov),
             },
-            Err(_) => AiReply::Undrawn,
+            Err(_) => AiReply::Undrawn {
+                reason: UndrawnReason::Unreadable,
+            },
         },
         ai::Reply::GameOver => AiReply::GameOver,
-        ai::Reply::Undrawn(_) => AiReply::Undrawn,
+        ai::Reply::Undrawn(ai::Undrawn::Exhausted) => AiReply::Undrawn {
+            reason: UndrawnReason::Exhausted,
+        },
+        ai::Reply::Undrawn(ai::Undrawn::OutOfTime) => AiReply::Undrawn {
+            reason: UndrawnReason::OutOfTime,
+        },
     }
 }
 
@@ -1709,6 +1742,34 @@ mod tests {
         ));
     }
 
+    /// A drawn move the embedding cannot read, here a line from a node the
+    /// board does not have, is reported as Undrawn for that reason.
+    #[test]
+    fn a_move_the_embedding_cannot_read_is_undrawn_as_unreadable() {
+        let state = start(4, 1000, Player::AI, None, 0).unwrap();
+        let bogus = types::Move::new(
+            9,
+            1,
+            vec![Point::new(10.0, 10.0), Point::new(20.0, 20.0)],
+            Point::new(15.0, 15.0),
+            Player::AI,
+            1000,
+        );
+        assert!(embedding::embed(&state, &bogus).is_err());
+        assert!(matches!(
+            answer(&state, ai::Reply::Move(bogus)),
+            AiReply::Undrawn {
+                reason: UndrawnReason::Unreadable
+            }
+        ));
+        assert!(matches!(
+            answer(&state, ai::Reply::Undrawn(ai::Undrawn::OutOfTime)),
+            AiReply::Undrawn {
+                reason: UndrawnReason::OutOfTime
+            }
+        ));
+    }
+
     /// A bare node sealed inside a loop of radius 18 with every other node
     /// dead: its only moves are loops, and the cell is smaller than the
     /// smallest loop the router draws, so the AI reports that it cannot
@@ -1752,7 +1813,12 @@ mod tests {
         }
         assert_eq!(state.current_player, Player::AI);
         assert!(!state.face.search_moves().is_empty());
-        assert!(matches!(ai_move(&mut state), AiReply::Undrawn));
+        assert!(matches!(
+            ai_move(&mut state),
+            AiReply::Undrawn {
+                reason: UndrawnReason::Exhausted
+            }
+        ));
         assert!(!snapshot(&state).game_over);
     }
 

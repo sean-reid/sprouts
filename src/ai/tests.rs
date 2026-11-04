@@ -199,18 +199,91 @@ fn the_draw_limit_stops_a_class_walk_between_members() {
     assert!(attempts <= 2, "{attempts} attempts for one member");
 }
 
-/// Between the route budget and the draw limit every candidate gets its
-/// one cheap attempt, and the opening still draws.
+/// The face move a drawn move reads back as, with its enclosed pieces
+/// sorted as the enumeration lists them.
+fn reads_as(state: &GameState, mov: &Move) -> FaceMove {
+    let read = crate::embedding::embed(state, mov).expect("the drawn move reads back");
+    let mut enclosed = read.enclosed;
+    enclosed.sort_unstable();
+    FaceMove {
+        a: read.a,
+        at_a: read.at_a,
+        b: read.b,
+        at_b: read.at_b,
+        enclosed,
+    }
+}
+
+/// Between the route budget and the draw limit the opening still draws
+/// under the cheap pass: one attempt per candidate on the first sweep,
+/// which runs no parity search, and one more per candidate it held back.
 #[test]
-fn past_the_route_budget_each_candidate_gets_one_cheap_attempt() {
+fn past_the_route_budget_the_cheap_pass_sweeps_once_then_retries_the_deferred() {
     let state = GameState::with_board_size(4, 1000);
     let candidates = state.face.search_moves();
     let order: Vec<usize> = (0..candidates.len()).collect();
     stats::take();
     let (drawn, passed) = draw_within(&state, &candidates, &order, Stopped(ROUTE_BUDGET_MS + 1.0));
-    assert!(drawn.is_ok());
-    let attempts = stats::take().attempts;
-    assert_eq!(attempts, passed + 1);
+    let s = stats::take();
+    let mov = drawn.expect("the opening draws");
+    assert!(candidates.contains(&reads_as(&state, &mov)));
+    assert!(s.attempts > passed);
+    assert!(s.attempts <= candidates.len() + s.refused.sides);
+    assert!(s.parity.len() <= s.refused.sides);
+}
+
+/// Two nodes joined by a straight line, with a bare third node below it:
+/// the two chords listed between the line's ends run round it on the
+/// side the first path happens to take and on the other, so one has a
+/// wrong-sided first path. Skipping the parity search refuses that one
+/// as Sides and draws the other, searching draws it, and no corner pair
+/// is remembered as having no room.
+#[test]
+fn skipping_the_parity_search_refuses_a_wrong_sided_first_path_as_sides() {
+    use crate::types::Point;
+    let (a, b) = (Point::new(300.0, 500.0), Point::new(700.0, 500.0));
+    let mut state = GameState::with_nodes(vec![a, b, Point::new(500.0, 650.0)], 1000);
+    let along: Vec<Point> = (0..=8)
+        .map(|k| Point::new(a.x + (b.x - a.x) * k as f64 / 8.0, a.y))
+        .collect();
+    state
+        .apply_move(Move::new(
+            0,
+            1,
+            along,
+            Point::new(500.0, 500.0),
+            Player::Human,
+            1000,
+        ))
+        .unwrap();
+    state.current_player = Player::AI;
+    let chords: Vec<FaceMove> = state
+        .face
+        .search_moves()
+        .into_iter()
+        .filter(|m| m.a == 0 && m.b == 1)
+        .collect();
+    assert!(chords.len() >= 2, "{chords:?}");
+    let mut router = route::Router::new();
+    let skipped: Vec<Result<Move, route::Unroutable>> = chords
+        .iter()
+        .map(|m| router.route_cheap_with(&state, m, route::Parity::Skip))
+        .collect();
+    let wrong: Vec<usize> = (0..chords.len())
+        .filter(|&i| matches!(skipped[i], Err(route::Unroutable::Sides)))
+        .collect();
+    assert_eq!(wrong.len(), 1, "{chords:?} gave {skipped:?}");
+    for (i, drawn) in skipped.iter().enumerate() {
+        if i != wrong[0] {
+            let drawn = drawn.as_ref().expect("the other chords draw");
+            assert_eq!(reads_as(&state, drawn), chords[i]);
+        }
+    }
+    let searched = router
+        .route_cheap(&state, &chords[wrong[0]])
+        .expect("the parity search draws it");
+    assert_eq!(reads_as(&state, &searched), chords[wrong[0]]);
+    assert_eq!(router.corners_without_room(), 0);
 }
 
 /// Every listed move refused, with time to spare, is Exhausted. The sealed
@@ -297,11 +370,11 @@ fn a_second_chord_between_corners_without_room_is_refused_from_memory() {
 
 /// Work the draw does on the pinned position under a stopped clock past
 /// the route budget, one cheap attempt per candidate, with the most
-/// enclosing moves first as the ranking tends to put them: 32 attempts
-/// and 5 arena builds measured, 31 candidates passed over out of 60; the
-/// bounds are twice that.
-const PINNED_ATTEMPTS: usize = 64;
-const PINNED_ARENAS: usize = 10;
+/// enclosing moves first as the ranking tends to put them: 43 attempts
+/// and 7 arena builds measured on the settled board, 1 candidate passed
+/// over out of 56; the bounds are twice that.
+const PINNED_ATTEMPTS: usize = 86;
+const PINNED_ARENAS: usize = 14;
 
 /// The 24-node opening after four splitting moves draws under the cheap
 /// pass within its measured work, most enclosing first and least first.
@@ -360,6 +433,208 @@ fn a_router_builds_the_arena_once_per_end_pair() {
         let _ = route::Router::new().route_cheap(&state, mv);
     }
     assert_eq!(stats::take().arenas, 3);
+}
+
+/// The position of a saved page record with the AI to move: the record's
+/// stroke moves are applied as recorded and its topology moves are drawn
+/// by the router, as the page does on load.
+fn position_of_record(name: &str) -> GameState {
+    use crate::types::Point;
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("fixtures/undrawn")
+        .join(name);
+    let raw: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    let point = |p: &serde_json::Value| Point::new(p[0].as_f64().unwrap(), p[1].as_f64().unwrap());
+    let nodes: Vec<Point> = raw["nodes"].as_array().unwrap().iter().map(point).collect();
+    let first = match raw["firstPlayer"].as_str().unwrap() {
+        "ai" => Player::AI,
+        _ => Player::Human,
+    };
+    let board = raw["boardSize"].as_u64().unwrap() as usize;
+    let settle = raw["settleVersion"].as_u64().unwrap_or(0) as u8;
+    let mut state = crate::protocol::start(nodes.len(), board, first, Some(nodes), settle).unwrap();
+    for m in raw["moves"].as_array().unwrap() {
+        let (from, to) = (
+            m["from"].as_u64().unwrap() as usize,
+            m["to"].as_u64().unwrap() as usize,
+        );
+        let mov = if let Some(polyline) = m["polyline"].as_array() {
+            Move::new(
+                from,
+                to,
+                polyline.iter().map(point).collect(),
+                point(&m["newNode"]),
+                state.current_player,
+                board,
+            )
+        } else {
+            let face = &m["face"];
+            let listed = FaceMove {
+                a: face["a"].as_u64().unwrap() as usize,
+                at_a: face["atA"].as_u64().map(|h| h as usize),
+                b: face["b"].as_u64().unwrap() as usize,
+                at_b: face["atB"].as_u64().map(|h| h as usize),
+                enclosed: face["enclosed"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|v| v.as_u64().unwrap() as usize)
+                    .collect(),
+            };
+            let routed = route::route(&state, &listed).expect("the recorded topology draws");
+            Move::from_segments(
+                from,
+                to,
+                routed.polyline,
+                routed.segments,
+                point(&m["node"]),
+                state.current_player,
+            )
+        };
+        crate::protocol::check(&state, &mov).unwrap();
+        state.apply_move(mov).unwrap();
+    }
+    state
+}
+
+/// The live position where the page answered Undrawn with room to spare
+/// has moves that draw without a parity search, so the cheap pass draws
+/// one on its first sweep, before any parity search runs, in listed order
+/// and reversed, and the move reads back as a listed one. The ranked walk
+/// on this position took 1_300 attempts; the sweep takes 41 and 40.
+#[test]
+fn the_live_room_position_draws_under_the_cheap_pass() {
+    let state = position_of_record("room-24n-1000.json");
+    assert_eq!(state.current_player, Player::AI);
+    let candidates = state.face.search_moves();
+    let forward: Vec<usize> = (0..candidates.len()).collect();
+    let backward: Vec<usize> = forward.iter().rev().copied().collect();
+    for order in [&forward, &backward] {
+        stats::take();
+        let (drawn, passed) =
+            draw_within(&state, &candidates, order, Stopped(ROUTE_BUDGET_MS + 1.0));
+        let s = stats::take();
+        eprintln!(
+            "{} listed, {passed} passed, {} attempts, {} arenas, {} memo hits",
+            candidates.len(),
+            s.attempts,
+            s.arenas,
+            s.memo_hits
+        );
+        let mov = drawn.unwrap_or_else(|why| panic!("{passed} passed and nothing drew: {why:?}"));
+        assert!(candidates.contains(&reads_as(&state, &mov)));
+        assert!(
+            s.parity.is_empty(),
+            "{} parity searches ran",
+            s.parity.len()
+        );
+        assert!(s.attempts <= candidates.len());
+    }
+}
+
+/// Replies on the live position where the page answered Undrawn with room
+/// to spare: `cargo test --release probe_live_room_position -- --ignored
+/// --nocapture`.
+#[test]
+#[ignore = "prints replies, run in release"]
+fn probe_live_room_position() {
+    let state = position_of_record("room-24n-1000.json");
+    assert_eq!(state.current_player, Player::AI);
+    let candidates = state.face.search_moves();
+    eprintln!("{} candidates", candidates.len());
+    for run in 0..5 {
+        stats::take();
+        let t = Instant::now();
+        let order = rank(&state, &candidates);
+        let search_ms = t.elapsed().as_secs_f64() * 1000.0;
+        let t = Instant::now();
+        let (drawn, passed) = draw(&state, &candidates, &order);
+        let draw_ms = t.elapsed().as_secs_f64() * 1000.0;
+        let s = stats::take();
+        eprintln!(
+            "run {run}: {} after {passed} passed, search {search_ms:.0} ms, draw {draw_ms:.0} ms, {} attempts, {} arenas, {} memo hits, room {}, bugs {:?}, first ranked {:?}",
+            match &drawn {
+                Ok(m) => format!("drew {}-{}", m.from_node, m.to_node),
+                Err(why) => format!("{why:?}"),
+            },
+            s.attempts,
+            s.arenas,
+            s.memo_hits,
+            s.refused.room,
+            s.refused.bugs,
+            candidates[order[0]]
+        );
+    }
+}
+
+/// Every candidate of the live position routed once at the cheap clearance
+/// through a fresh Router and once through one shared Router: what each
+/// came to, whether a parity search ran, and what it cost. `cargo test
+/// --release probe_live_room_candidates -- --ignored --nocapture`.
+#[test]
+#[ignore = "routes every candidate, run in release"]
+fn probe_live_room_candidates() {
+    let state = position_of_record("room-24n-1000.json");
+    let candidates = state.face.search_moves();
+    let mut shared = route::Router::new();
+    let mut tally: std::collections::BTreeMap<String, (usize, f64)> =
+        std::collections::BTreeMap::new();
+    let mut drawable = Vec::new();
+    let mut disagreements = 0;
+    for (i, mv) in candidates.iter().enumerate() {
+        stats::take();
+        let t = Instant::now();
+        let fresh = route::Router::new().route_cheap(&state, mv);
+        let ms = t.elapsed().as_secs_f64() * 1000.0;
+        let s = stats::take();
+        let parity = if s.parity.is_empty() {
+            "no parity"
+        } else {
+            "parity"
+        };
+        let kind = match &fresh {
+            Ok(_) => format!("ok, {parity}"),
+            Err(route::Unroutable::Bug(what)) => format!("bug {what}"),
+            Err(route::Unroutable::Shape(what)) => format!("shape {what}, {parity}"),
+            Err(why) => format!("{why:?}, {parity}"),
+        };
+        let slot = tally.entry(kind).or_insert((0, 0.0));
+        slot.0 += 1;
+        slot.1 += ms;
+        if fresh.is_ok() {
+            drawable.push(i);
+        }
+        let together = shared.route_cheap(&state, mv);
+        let same = match (&fresh, &together) {
+            (Ok(a), Ok(b)) => a.segments == b.segments,
+            (Err(a), Err(b)) => a == b,
+            _ => false,
+        };
+        if !same {
+            disagreements += 1;
+            eprintln!("candidate {i} {mv:?}: fresh {fresh:?} shared {together:?}");
+        }
+    }
+    eprintln!(
+        "{} candidates, {disagreements} shared/fresh disagreements",
+        candidates.len()
+    );
+    for (kind, (n, ms)) in &tally {
+        eprintln!(
+            "  {kind}: {n}, {:.0} ms total, {:.1} ms each",
+            ms,
+            ms / *n as f64
+        );
+    }
+    eprintln!(
+        "drawable at the cheap clearance: {} of {}",
+        drawable.len(),
+        candidates.len()
+    );
+    for i in drawable.iter().take(12) {
+        eprintln!("  {i}: {:?}", candidates[*i]);
+    }
 }
 
 /// Prints the reply timings of a 24-node self-play on the 1000 board:

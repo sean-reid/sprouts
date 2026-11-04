@@ -727,11 +727,20 @@ async function refreshBoard(): Promise<void> {
   if (epoch === gameEpoch) applySnapshot(snapshot);
 }
 
+// One line per reply on the console, so a report of a stuck or slow AI
+// carries what the engine said and how long it took.
+function logReply(what: string, since: number): void {
+  // eslint-disable-next-line no-console
+  console.log(`aiMove: ${what} in ${Math.round(performance.now() - since)} ms`);
+}
+
 async function performAIMove(): Promise<void> {
   const epoch = gameEpoch;
+  const since = performance.now();
   try {
     const reply = await engine.latest("turn", "aiMove");
     stopThinking();
+    logReply(reply.kind === "undrawn" ? `undrawn (${reply.reason})` : reply.kind, since);
     if (reply.kind === "gameOver") {
       state.gameOver = true;
       showGameOver();
@@ -764,6 +773,7 @@ async function performAIMove(): Promise<void> {
   } catch (error) {
     if (error instanceof StaleRequest) return;
     stopThinking();
+    logReply(error instanceof CallTimeout ? "undrawn (timeout)" : "error", since);
     // A reply that never came leaves the board as an undrawn one does:
     // the engine never applies the AI's move itself, so Undo still works.
     if (error instanceof CallTimeout) setStatus(UNDRAWN_STATUS, "lose");
