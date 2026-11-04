@@ -272,6 +272,7 @@ function persist(): void {
   if (!shared) {
     save(timeline);
     dropHash();
+    fallback = false;
   }
   renderMoveList();
 }
@@ -913,6 +914,7 @@ function chosenNodeCount(): number {
 
 // Below 768 px the count shows as a badge drawn from data-count.
 function showNodeCount(count: number): void {
+  const active = document.activeElement;
   nodeCountEl.value = String(count);
   fewerBtn.disabled = count <= Number(nodeCountEl.min);
   moreBtn.disabled = count >= Number(nodeCountEl.max);
@@ -921,8 +923,9 @@ function showNodeCount(count: number): void {
   startBtn.dataset.count = String(count);
   startCount.textContent = pending ? `, ${count} nodes` : "";
   startBtn.setAttribute("aria-label", pending ? `New game, ${count} nodes` : "New game");
+  if (!pending) countNote.textContent = "";
   for (const button of [fewerBtn, moreBtn]) {
-    if (button.disabled && document.activeElement === button) nodeCountEl.focus();
+    if (button.disabled && active === button) nodeCountEl.focus();
   }
 }
 

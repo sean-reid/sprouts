@@ -12,7 +12,7 @@
     <div class="toolbar">
       <div class="controls game">
         <div class="node-count" role="group" aria-label="Nodes">
-          <span id="nodeCountLabel">Nodes</span>
+          <span id="nodeCountLabel" class="narrow-hidden">Nodes</span>
           <button id="fewerBtn" type="button" aria-label="Fewer nodes">&minus;</button>
           <input
             id="nodeCount"
@@ -26,7 +26,7 @@
           <button id="moreBtn" type="button" aria-label="More nodes">+</button>
           <span id="countNote" class="visually-hidden" role="status" aria-live="polite"></span>
         </div>
-        <button id="startBtn">New game<span id="startCount"></span></button>
+        <button id="startBtn">New game<span id="startCount" class="narrow-hidden"></span></button>
         <button id="undoBtn" disabled>Undo</button>
       </div>
 
@@ -78,7 +78,7 @@
         <p>Game Over</p>
         <div class="modal-actions">
           <button id="reviewBtn">Review Board</button>
-          <button id="newGameBtn">New Game</button>
+          <button id="newGameBtn">New game</button>
         </div>
       </div>
     </div>

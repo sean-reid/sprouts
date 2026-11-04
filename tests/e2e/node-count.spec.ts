@@ -9,6 +9,7 @@ import {
   nodeOnScreen,
   openBoard,
   playExchange,
+  share,
   shot,
   startGame,
   strokeCells,
@@ -42,16 +43,18 @@ async function replyTime(page: Page, count: number): Promise<number> {
   return took;
 }
 
-// The button's text sits on one line and nothing spills past its box.
+// The button's text and its count span, when the span is shown, share one
+// line, and nothing spills past the button's box.
 async function expectOneLine(page: Page, selector: string): Promise<void> {
   const fit = await page.locator(selector).evaluate((el) => {
-    const range = document.createRange();
-    range.selectNodeContents(el.firstChild ?? el);
-    const tops = new Set(
-      Array.from(range.getClientRects())
-        .filter((r) => r.width > 0)
-        .map((r) => Math.round(r.top)),
-    );
+    const tops = new Set<number>();
+    for (const node of el.childNodes) {
+      const range = document.createRange();
+      range.selectNodeContents(node);
+      const shown =
+        !(node instanceof HTMLElement) || getComputedStyle(node).position !== "absolute";
+      for (const r of range.getClientRects()) if (shown && r.width > 0) tops.add(Math.round(r.top));
+    }
     return { lines: tops.size, spill: el.scrollWidth - el.clientWidth };
   });
   expect(fit.lines).toBe(1);
@@ -151,6 +154,7 @@ test("once a move is played the count waits on the start button", async ({ page 
   await page.locator("#startBtn").click();
   await expect(page.locator("#status")).toHaveText(FRESH);
   await expect(page.locator("#startBtn")).toHaveText("New game");
+  await expect(page.locator("#countNote")).toHaveText("");
   await expect(page.locator("#moveList li")).toHaveCount(0);
   await expectNodesDrawn(page, 5);
   expect(await page.locator("#canvas").boundingBox()).toEqual(canvas);
@@ -212,9 +216,45 @@ test("the board after a failed load keeps the saved game through a step", async 
   await expect(page.locator("#status")).toHaveText(/^Could not load the saved game/, {
     timeout: 20_000,
   });
+  expect(saved).not.toBeNull();
   await page.locator("#moreBtn").click();
   await expect(page.locator("#status")).toHaveText(`5 nodes. ${FRESH}`);
   expect(await page.evaluate(() => localStorage.getItem("sprouts.game"))).toBe(saved);
+
+  // A move on that board saves the new game. Undo keeps the moves for
+  // Forward, so a step there waits on New game, which clears the save.
+  await playExchange(page, 5);
+  await page.locator("#undoBtn").click();
+  await expect(page.locator("#status")).toHaveText("Move undone: your turn");
+  await page.locator("#moreBtn").click();
+  await expect(page.locator("#status")).toHaveText("Move undone: your turn");
+  await expect(page.locator("#startBtn")).toHaveText("New game, 6 nodes");
+  await page.locator("#startBtn").click();
+  await expect(page.locator("#status")).toHaveText(FRESH);
+  await expectNodesDrawn(page, 6);
+  expect(await page.evaluate(() => localStorage.getItem("sprouts.game"))).toBeNull();
+});
+
+test("a board that failed to load from a link keeps the link through a step", async ({ page }) => {
+  await playExchange(page);
+  const { url } = await share(page, "stepper-link-payload-chars");
+  const hash = new URL(url).hash;
+  await page.addInitScript(() => {
+    (window as unknown as { failNext: (m: string, e: string) => void }).failNext(
+      "init",
+      "no engine",
+    );
+  });
+  // A visitor has no saved game, and a hash-only change would not reload.
+  await page.evaluate(() => localStorage.clear());
+  await page.goto("about:blank");
+  await page.goto(url);
+  await expect(page.locator("#status")).toHaveText(/^Could not load the saved game/, {
+    timeout: 20_000,
+  });
+  await page.locator("#moreBtn").click();
+  await expect(page.locator("#status")).toHaveText(`5 nodes. ${FRESH}`);
+  expect(await page.evaluate(() => location.hash)).toBe(hash);
 });
 
 test("a review keeps its status and the count waits on the start button", async ({ page }) => {

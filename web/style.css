@@ -80,13 +80,26 @@ h1 {
   white-space: nowrap;
 }
 
-.visually-hidden {
+/* .narrow-hidden is for assistive tech only below 768 px: the word Nodes
+   and the ", 7 nodes" part of the start label do not fit the row there. */
+.visually-hidden,
+.narrow-hidden {
   position: absolute;
   width: 1px;
   height: 1px;
   overflow: hidden;
   clip-path: inset(50%);
   white-space: nowrap;
+}
+
+@media (min-width: 768px) {
+  .narrow-hidden {
+    position: static;
+    width: auto;
+    height: auto;
+    overflow: visible;
+    clip-path: none;
+  }
 }
 
 .node-count {
@@ -121,20 +134,7 @@ h1 {
   font-variant-numeric: tabular-nums;
 }
 
-/* The word and the full pending label do not fit the 375 wide row beside
-   the stepper and Undo; the group keeps its name and the button its
-   aria-label for assistive tech, and the count shows as a badge. */
 @media (max-width: 767px) {
-  #nodeCountLabel,
-  #startCount {
-    position: absolute;
-    width: 1px;
-    height: 1px;
-    overflow: hidden;
-    clip-path: inset(50%);
-    white-space: nowrap;
-  }
-
   #startBtn.pending::after {
     content: attr(data-count);
     display: inline-block;
@@ -149,12 +149,6 @@ h1 {
     letter-spacing: 0;
     vertical-align: middle;
   }
-}
-
-.node-count input::-webkit-inner-spin-button,
-.node-count input::-webkit-outer-spin-button {
-  appearance: none;
-  margin: 0;
 }
 
 button {
