@@ -133,6 +133,7 @@ pub fn point_to_segment_distance(px: f64, py: f64, x1: f64, y1: f64, x2: f64, y2
 }
 
 /// Douglas-Peucker polyline decimation
+#[cfg(test)]
 pub fn decimate_polyline(points: &[Point], epsilon: f64) -> Vec<Point> {
     if points.len() <= 2 {
         return points.to_vec();

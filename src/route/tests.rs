@@ -706,35 +706,12 @@ fn recorded_topology_positions_stay_bounded() {
     assert!(tally.topology <= RECORDED_TOPOLOGY, "{tally}");
 }
 
-/// FNV-1a over f64 bits.
-struct Fnv(u64);
-
-impl Fnv {
-    fn new() -> Self {
-        Self(0xcbf2_9ce4_8422_2325)
-    }
-
-    fn feed(&mut self, x: f64) {
-        for byte in x.to_bits().to_le_bytes() {
-            self.0 ^= byte as u64;
-            self.0 = self.0.wrapping_mul(0x0000_0100_0000_01b3);
-        }
-    }
-
-    fn points(&mut self, pts: &[Point]) {
-        for p in pts {
-            self.feed(p.x);
-            self.feed(p.y);
-        }
-    }
-}
-
 /// Hashes of each routing stage over every search move of the first
 /// `ROUTING_HASH_FIXTURES` routing fixtures, in path order: arena
 /// vertices, taut path, relaxed path, fitted cubics, and the flattening
 /// with the node. A platform that disagrees shows where it diverged.
 fn routing_hashes() -> [u64; 5] {
-    let mut stages = [Fnv::new(), Fnv::new(), Fnv::new(), Fnv::new(), Fnv::new()];
+    let mut stages: [Fnv; 5] = Default::default();
     for path in fixture_paths("fixtures/routing")
         .into_iter()
         .take(ROUTING_HASH_FIXTURES)
@@ -755,10 +732,9 @@ fn routing_hashes() -> [u64; 5] {
                 for c in &drawn.segments {
                     stages[3].points(&[c.p0, c.p1, c.p2, c.p3]);
                 }
-                stages[4].points(&drawn.flatten(curve::tolerance(state.board_size)));
-                stages[4].points(&[drawn.new_node_pos]);
             }
         }
+        hash_routes(&mut stages[4], &state);
     }
     stages.map(|f| f.0)
 }
@@ -766,9 +742,10 @@ fn routing_hashes() -> [u64; 5] {
 /// Routing fixtures the hash covers; five keep the debug run short.
 const ROUTING_HASH_FIXTURES: usize = 5;
 
-/// The final routing hash a Mac records; the Linux runner has to produce
-/// the same one, since a share link is redrawn on the visitor's device.
-const ROUTING_HASH: u64 = 0xab0b_8b95_c9b9_01f1;
+/// The final routing hash a Mac records; the Linux runner and the wasm
+/// build (tests/unit/route-hash.test.ts) have to produce the same one,
+/// since a share link is redrawn on the visitor's device.
+const ROUTING_HASH: u64 = 0x349e_1729_e980_5649;
 
 #[test]
 fn routing_hashes_the_same_on_every_platform() {

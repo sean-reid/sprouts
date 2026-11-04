@@ -13,7 +13,7 @@ use crate::ai::rank_node_placements;
 use crate::curve;
 use crate::embedding;
 use crate::face::{Component, Move as FaceMove, NodeId};
-use crate::geometry::{decimate_polyline, resample_polyline};
+use crate::geometry::resample_polyline;
 use crate::types::{
     ai_node_clearance, node_disc, scale, GameState, Move, Player, Point, MIN_NODE_SPACING,
     MIN_NODE_SPACING_AI, MIN_PATH_CLEARANCE, MIN_PATH_CLEARANCE_AI,
@@ -234,6 +234,42 @@ fn relax(
     clearance::push(path.to_vec(), &obstacles)
 }
 
+/// FNV-1a over f64 bits, for comparing routes across platforms.
+pub struct Fnv(pub u64);
+
+impl Default for Fnv {
+    fn default() -> Self {
+        Self(0xcbf2_9ce4_8422_2325)
+    }
+}
+
+impl Fnv {
+    pub fn feed(&mut self, x: f64) {
+        for byte in x.to_bits().to_le_bytes() {
+            self.0 ^= byte as u64;
+            self.0 = self.0.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    }
+
+    pub fn points(&mut self, pts: &[Point]) {
+        for p in pts {
+            self.feed(p.x);
+            self.feed(p.y);
+        }
+    }
+}
+
+/// Feeds the flattening and node of every routed search move of `state`
+/// into `fnv`, in the model's move order.
+pub fn hash_routes(fnv: &mut Fnv, state: &GameState) {
+    for mv in state.face.search_moves() {
+        if let Ok(drawn) = route(state, &mv) {
+            fnv.points(&drawn.flatten(curve::tolerance(state.board_size)));
+            fnv.points(&[drawn.new_node_pos]);
+        }
+    }
+}
+
 /// Bits of the pieces the path puts on the wrong side of the move.
 fn wrong_sides(
     state: &GameState,
@@ -269,13 +305,12 @@ pub(crate) fn finish(
     if length < 2.0 * spacing {
         return Err(Unroutable::Shape("short"));
     }
-    // Wiggles under the fit tolerance are relaxation noise, not shape;
-    // dropping them first gives the fit a few long, even cubics. The fit
-    // measures its error at the points alone, so a long straight run gets
-    // points along it to hold the cubic down. The face is eroded by one
-    // tolerance, so the decimation and the fit share it.
-    let path = densify(&decimate_polyline(&path, tolerance / 2.0), clearance);
-    let segments = curve::fit(&path, tolerance / 2.0);
+    // The fit measures its error at the points alone, so a long straight
+    // run gets points along it to hold the cubic down. The face is eroded
+    // by one fit tolerance, so nothing else may move the path before the
+    // fit, and Move::new refits the stored points at this tolerance.
+    let path = densify(&path, clearance);
+    let segments = curve::fit(&path, tolerance);
     let flat = curve::flatten(&segments, tolerance);
     let node = place_node(state, &segments, &flat, spacing).ok_or(Unroutable::NoSpot)?;
     let ends = [state.nodes[mv.a].position, state.nodes[mv.b].position];
