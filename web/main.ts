@@ -593,7 +593,7 @@ interface Drawn {
 // Records the move as the engine applied it, on its grid with the spline
 // it committed as, so a replay sends the engine its own input.
 function recordMove(outcome: Applied, drawn?: Drawn, topology?: FaceMove): void {
-  timeline.push(outcome.mov, topology, outcome.cutOff, outcome.segments);
+  timeline.push(outcome.mov, topology, outcome.cutOff);
   applySnapshot(outcome.snapshot, drawn);
   persist();
 }

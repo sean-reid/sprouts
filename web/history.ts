@@ -164,12 +164,11 @@ export class History {
 
   // A move made from the cursor discards whatever was ahead of it; the
   // AI's move comes with the face move it was drawn from.
-  push(move: Move, topology?: FaceMove, cutOff?: number, segments?: Cubic[]): void {
+  push(move: Move, topology?: FaceMove, cutOff?: number): void {
     this.moves.length = this.cursor;
     const kept = cloneMove(move);
     if (cutOff !== undefined) kept.cutOff = cutOff;
     if (topology) kept.topology = topology;
-    if (segments) kept.segments = segments;
     this.moves.push(kept);
     this.cursor = this.moves.length;
   }
@@ -220,7 +219,8 @@ export class History {
 
   // Takes the outcome of applying move number index + 1.
   applied(index: number, outcome: Applied): void {
-    this.settle(index, { ...outcome.mov, segments: outcome.segments });
+    const { segments } = outcome.mov;
+    if (segments) this.settle(index, { ...outcome.mov, segments });
     const move = this.moves[index];
     if (move) move.cutOff = outcome.cutOff;
   }

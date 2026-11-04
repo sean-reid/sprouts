@@ -97,7 +97,6 @@ pub enum Outcome {
         snapshot: Snapshot,
         cut_off: usize,
         mov: Move,
-        segments: Vec<Cubic>,
     },
     Rejected {
         rejection: Rejection,
@@ -114,7 +113,6 @@ fn applied(state: &GameState) -> Outcome {
         snapshot: snapshot(state),
         cut_off: cut_off(&state.face),
         mov: Move::from(last.clone()),
-        segments: last.segments.clone(),
     }
 }
 

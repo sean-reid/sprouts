@@ -26,7 +26,7 @@ function applied(cutOff: number): Extract<Outcome, { kind: "applied" }> {
     gameOver: false,
   } as unknown as Snapshot;
   const mov = { fromNode: 0, toNode: 1, polyline: [], newNodePos: { x: 0, y: 0 } };
-  return { kind: "applied", snapshot, cutOff, mov, segments: [] };
+  return { kind: "applied", snapshot, cutOff, mov };
 }
 
 describe("shape text", () => {
