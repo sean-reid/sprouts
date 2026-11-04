@@ -3,13 +3,21 @@ use tsify::Tsify;
 
 use crate::curve::{self, Cubic};
 use crate::embedding;
-use crate::face::FaceModel;
+use crate::face::{FaceModel, Move as FaceMove};
+use crate::settle;
 use crate::validation::Rejection;
 
 pub const BOARD_SIZE: usize = 1000;
 
 // All spatial constants are tuned for a 1000px board.
 // Use scale(board_size) to adapt them to smaller boards (e.g. 500px mobile).
+
+/// The grid every coordinate a settled game stores sits on: one unit of
+/// the 1000 board, the link quantum, so a link carries it exactly.
+pub fn grid(board_size: usize) -> f64 {
+    scale(board_size)
+}
+
 pub fn scale(board_size: usize) -> f64 {
     board_size as f64 / BOARD_SIZE as f64
 }
@@ -159,15 +167,7 @@ impl Move {
         board_size: usize,
     ) -> Self {
         let segments = curve::fit(&polyline, curve::tolerance(board_size));
-        let new_node_pos = on_curve(&segments, new_node_pos);
-        Self {
-            from_node,
-            to_node,
-            polyline,
-            segments,
-            new_node_pos,
-            player,
-        }
+        Self::from_segments(from_node, to_node, polyline, segments, new_node_pos, player)
     }
 
     /// A move whose spline is already fit, with its node on that curve.
@@ -190,6 +190,53 @@ impl Move {
         }
     }
 
+    /// A move taken as given, node included; `on_grid` then decides whether
+    /// the node stays.
+    pub fn as_given(
+        from_node: usize,
+        to_node: usize,
+        polyline: Vec<Point>,
+        segments: Vec<Cubic>,
+        new_node_pos: Point,
+        player: Player,
+    ) -> Self {
+        Self {
+            from_node,
+            to_node,
+            polyline,
+            segments,
+            new_node_pos,
+            player,
+        }
+    }
+
+    /// The move with every coordinate on the grid. A node already on the
+    /// grid and within a grid cell of the rounded curve stays put, so a move
+    /// the engine applied comes back as itself; any other node is put on
+    /// the rounded curve and then on the grid.
+    pub fn on_grid(mut self, grid: f64) -> Self {
+        for p in &mut self.polyline {
+            *p = crate::exact::snap_to_unit(*p, grid);
+        }
+        for c in &mut self.segments {
+            *c = Cubic {
+                p0: crate::exact::snap_to_unit(c.p0, grid),
+                p1: crate::exact::snap_to_unit(c.p1, grid),
+                p2: crate::exact::snap_to_unit(c.p2, grid),
+                p3: crate::exact::snap_to_unit(c.p3, grid),
+            };
+        }
+        let node = self.new_node_pos;
+        let kept = crate::exact::snap_to_unit(node, grid) == node
+            && curve::nearest(&self.segments, &node)
+                .is_some_and(|hit| hit.distance <= grid * std::f64::consts::FRAC_1_SQRT_2);
+        if !kept {
+            let near = curve::nearest(&self.segments, &node).map_or(node, |hit| hit.point);
+            self.new_node_pos = crate::exact::snap_to_unit(near, grid);
+        }
+        self
+    }
+
     pub fn flatten(&self, tolerance: f64) -> Vec<Point> {
         curve::flatten(&self.segments, tolerance)
     }
@@ -206,6 +253,12 @@ pub struct GameState {
     pub next_line_id: usize,
     pub initial_node_count: usize,
     pub board_size: usize,
+    /// What each settle moved, one record per settled move, so an undo
+    /// puts the geometry back.
+    pub settles: Vec<settle::Undo>,
+    /// The settle this game is recorded under; 0 means none runs, so a
+    /// game recorded before settling replays as drawn.
+    pub settle_version: u8,
 }
 
 impl GameState {
@@ -218,13 +271,30 @@ impl GameState {
         Self::with_nodes(opening_layout(initial_nodes, board_size), board_size)
     }
 
-    /// A fresh game whose starting nodes sit at `positions`.
+    /// A fresh game whose starting nodes sit at `positions`, settling at
+    /// the current version.
     pub fn with_nodes(positions: Vec<Point>, board_size: usize) -> Self {
+        Self::with_nodes_at(positions, board_size, crate::protocol::SETTLE_VERSION)
+    }
+
+    /// A fresh game at `settle_version`; a settling game keeps its
+    /// starting nodes on the grid.
+    pub fn with_nodes_at(positions: Vec<Point>, board_size: usize, settle_version: u8) -> Self {
         let initial_nodes = positions.len();
+        let g = grid(board_size);
         let nodes = positions
             .into_iter()
             .enumerate()
-            .map(|(i, position)| Node::new(i, position))
+            .map(|(i, position)| {
+                Node::new(
+                    i,
+                    if settle_version > 0 {
+                        crate::exact::snap_to_unit(position, g)
+                    } else {
+                        position
+                    },
+                )
+            })
             .collect();
         Self {
             nodes,
@@ -236,6 +306,18 @@ impl GameState {
             next_line_id: 0,
             initial_node_count: initial_nodes,
             board_size,
+            settles: Vec::new(),
+            settle_version,
+        }
+    }
+
+    /// The move as it enters this board: on the grid when the game settles,
+    /// as drawn otherwise.
+    pub fn entering(&self, mov: Move) -> Move {
+        if self.settle_version == 0 {
+            mov
+        } else {
+            mov.on_grid(grid(self.board_size))
         }
     }
 
@@ -250,9 +332,14 @@ impl GameState {
     /// Fails, changing nothing, when the line cannot be placed in a face.
     pub fn apply_move(&mut self, mov: Move) -> Result<(), Rejection> {
         let topology = embedding::embed(self, &mov)?;
+        self.apply_embedded(mov, &topology)
+    }
+
+    /// Applies a move whose face-model reading is already known.
+    pub fn apply_embedded(&mut self, mov: Move, topology: &FaceMove) -> Result<(), Rejection> {
         self.face
-            .apply(&topology)
-            .expect("the embedding checked the move");
+            .apply(topology)
+            .map_err(|_| Rejection::crossing_somewhere(&mov.polyline))?;
 
         if mov.from_node == mov.to_node {
             // Self-loop: node gets +2 connections
@@ -450,7 +537,10 @@ mod tests {
         let gs = GameState::with_board_size(2, 500);
         assert_eq!(gs.board_size, 500);
         for (node, expected) in gs.nodes.iter().zip(opening_layout(2, 500)) {
-            assert_eq!(node.position, expected);
+            assert_eq!(
+                node.position,
+                crate::exact::snap_to_unit(expected, grid(500))
+            );
             assert!(node.position.x > 0.0 && node.position.x < 500.0);
             assert!(node.position.y > 0.0 && node.position.y < 500.0);
         }

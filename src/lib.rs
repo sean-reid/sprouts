@@ -12,6 +12,9 @@ pub use abstract_graph::search_rate;
 #[cfg(any(test, feature = "bench"))]
 pub mod replay;
 mod route;
+mod settle;
+#[cfg(feature = "hash")]
+pub use settle::golden::seeded_hashes;
 mod types;
 mod validation;
 
@@ -31,6 +34,18 @@ pub struct SproutsGame {
     state: GameState,
 }
 
+/// The settled board after each move of the seeded random game of `nodes`
+/// nodes, as hex, for checking a build against the values recorded in
+/// src/settle/golden.rs.
+#[cfg(feature = "hash")]
+#[wasm_bindgen(js_name = goldenHashes)]
+pub fn golden_hashes(nodes: usize) -> Vec<String> {
+    seeded_hashes(nodes)
+        .iter()
+        .map(|h| exact::Fnv(*h).hex())
+        .collect()
+}
+
 #[wasm_bindgen]
 impl SproutsGame {
     #[wasm_bindgen(constructor)]
@@ -39,10 +54,17 @@ impl SproutsGame {
         board_size: usize,
         first_player: Ts<Player>,
         layout: Option<Ts<Layout>>,
+        settle_version: u8,
     ) -> Result<SproutsGame, JsError> {
         let nodes = layout.map(|l| l.to_rust()).transpose()?.map(|l| l.nodes);
-        let state = protocol::start(initial_nodes, board_size, first_player.to_rust()?, nodes)
-            .map_err(|e| JsError::new(&e))?;
+        let state = protocol::start(
+            initial_nodes,
+            board_size,
+            first_player.to_rust()?,
+            nodes,
+            settle_version,
+        )
+        .map_err(|e| JsError::new(&e))?;
         Ok(Self { state })
     }
 
@@ -96,7 +118,7 @@ impl SproutsGame {
     }
 
     pub fn undo(&mut self) -> bool {
-        self.state.undo_move()
+        protocol::undo(&mut self.state)
     }
 
     #[wasm_bindgen(js_name = aiMove)]

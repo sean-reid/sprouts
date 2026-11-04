@@ -16,7 +16,8 @@ describe("the wasm engine", () => {
       { x: 525.8608781260419, y: 205.32863223151458 },
       { x: 712.9536013426019, y: 777.7602629520936 },
     ];
-    const game = new SproutsGame(4, 1000, "human", { nodes });
+    // Recorded on the layout as given, so the game runs unsettled.
+    const game = new SproutsGame(4, 1000, "human", { nodes }, 0);
     expect(game.hashBoard()).toBe(golden);
   });
 });

@@ -8,6 +8,7 @@ import {
   awaitReply,
   expectSameStrokes,
   HASH_PREFIX,
+  interceptWorkerMessages,
   recordNodesOnScreen,
   colourPixelsNear,
   rowIds,
@@ -78,6 +79,7 @@ for (const file of fixtures) {
     const { url } = await share(page, `${basename(file, ".json")}-payload-chars`);
     const visitor = await browser.newContext();
     const other = await visitor.newPage();
+    await other.addInitScript(interceptWorkerMessages);
     await other.goto(url);
     await expect(other.locator("#status")).toHaveText(
       new RegExp(`^Reviewing: move ${total} of ${total}\\.`),

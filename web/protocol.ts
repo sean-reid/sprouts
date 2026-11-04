@@ -14,7 +14,13 @@ type GameMethods = {
 
 // Every public method of the wasm class is a request; init builds the game.
 export interface Api extends GameMethods {
-  init(nodeCount: number, boardSize: number, firstPlayer: Player, layout?: Layout): void;
+  init(
+    nodeCount: number,
+    boardSize: number,
+    firstPlayer: Player,
+    layout: Layout | undefined,
+    settleVersion: number,
+  ): void;
 }
 
 export type Method = keyof Api;

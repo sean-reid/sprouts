@@ -7,7 +7,8 @@ use crate::embedding;
 use crate::face::{self, IllegalMove, Move as ModelMove};
 use crate::geometry;
 use crate::route::{self, Unroutable};
-use crate::types::{self, scale, GameState, Line, Node, Player, Point, MIN_NODE_SPACING};
+use crate::settle;
+use crate::types::{self, grid, scale, GameState, Line, Node, Player, Point, MIN_NODE_SPACING};
 use crate::validation::{self, Rejection};
 
 /// A move as proposed to the engine. The mover is whoever is to play, so a
@@ -19,19 +20,45 @@ pub struct Move {
     pub to_node: usize,
     pub polyline: Vec<Point>,
     pub new_node_pos: Point,
+    /// The spline the move committed as, applied as it is when present so
+    /// a replay does not depend on refitting the stroke.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[tsify(optional)]
+    pub segments: Option<Vec<Cubic>>,
 }
 
-impl Move {
-    fn by(self, player: Player, board_size: usize) -> types::Move {
-        types::Move::new(
-            self.from_node,
-            self.to_node,
-            self.polyline,
-            self.new_node_pos,
+/// The move as the engine applies it to `state`: a settling game takes
+/// the spline as given and puts the move on the grid; an unsettled one
+/// fits the stroke, the only geometry a version 0 record carries. A move
+/// that arrives with an empty spline is refused.
+pub(crate) fn enter(mov: Move, state: &GameState) -> Result<types::Move, Rejection> {
+    let player = state.current_player;
+    let entered = match mov.segments {
+        Some(segments) if segments.is_empty() => {
+            return Err(Rejection {
+                kind: validation::RejectionKind::PathTooShort,
+                message: "The move carries no curve".to_string(),
+                at: validation::BoardLocation::Node { id: mov.from_node },
+            })
+        }
+        Some(segments) if state.settle_version > 0 => types::Move::as_given(
+            mov.from_node,
+            mov.to_node,
+            mov.polyline,
+            segments,
+            mov.new_node_pos,
             player,
-            board_size,
-        )
-    }
+        ),
+        _ => types::Move::new(
+            mov.from_node,
+            mov.to_node,
+            mov.polyline,
+            mov.new_node_pos,
+            player,
+            state.board_size,
+        ),
+    };
+    Ok(state.entering(entered))
 }
 
 impl From<types::Move> for Move {
@@ -41,6 +68,7 @@ impl From<types::Move> for Move {
             to_node: mov.to_node,
             polyline: mov.polyline,
             new_node_pos: mov.new_node_pos,
+            segments: Some(mov.segments),
         }
     }
 }
@@ -61,15 +89,31 @@ pub struct Snapshot {
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum Outcome {
     /// `cut_off` counts the nodes the move put on its new side: inside a
-    /// loop, or on the face a splitting chord closes off.
+    /// loop, or on the face a splitting chord closes off. `mov` is the move
+    /// as it was drawn with the spline it committed as, which a replay
+    /// sends again.
     #[serde(rename_all = "camelCase")]
     Applied {
         snapshot: Snapshot,
         cut_off: usize,
+        mov: Move,
     },
     Rejected {
         rejection: Rejection,
     },
+}
+
+/// The outcome of a move just applied and settled.
+fn applied(state: &GameState) -> Outcome {
+    let last = state
+        .move_history
+        .last()
+        .expect("an applied move is recorded");
+    Outcome::Applied {
+        snapshot: snapshot(state),
+        cut_off: cut_off(&state.face),
+        mov: Move::from(last.clone()),
+    }
 }
 
 /// The AI's answer: a move with the spline it commits as, so the page
@@ -216,22 +260,35 @@ pub fn hash_board(state: &GameState) -> String {
 }
 
 /// A fresh board on the recorded positions, or on the default layout when
-/// none are given. Positions that do not match the count are an error.
+/// none are given, settling under `settle_version` (0 for none).
+/// Positions that do not match the count are an error.
 pub fn start(
     initial_nodes: usize,
     board_size: usize,
     first_player: Player,
     nodes: Option<Vec<Point>>,
+    settle_version: u8,
 ) -> Result<GameState, String> {
+    if settle_version > SETTLE_VERSION {
+        return Err(format!(
+            "settle version {settle_version} is newer than this engine's {SETTLE_VERSION}"
+        ));
+    }
     let mut state = match nodes {
-        Some(nodes) if nodes.len() == initial_nodes => GameState::with_nodes(nodes, board_size),
+        Some(nodes) if nodes.len() == initial_nodes => {
+            GameState::with_nodes_at(nodes, board_size, settle_version)
+        }
         Some(nodes) => {
             return Err(format!(
                 "{} starting positions for {initial_nodes} nodes",
                 nodes.len()
             ))
         }
-        None => GameState::with_board_size(initial_nodes, board_size),
+        None => GameState::with_nodes_at(
+            types::opening_layout(initial_nodes, board_size),
+            board_size,
+            settle_version,
+        ),
     };
     state.current_player = first_player;
     Ok(state)
@@ -251,8 +308,8 @@ pub fn snapshot(state: &GameState) -> Snapshot {
     }
 }
 
-#[cfg(any(test, feature = "bench"))]
-pub fn check(state: &GameState, mov: &types::Move) -> Result<(), Rejection> {
+#[cfg(any(test, feature = "bench", feature = "hash"))]
+pub(crate) fn check(state: &GameState, mov: &types::Move) -> Result<(), Rejection> {
     topology(state, mov).map(drop)
 }
 
@@ -265,21 +322,23 @@ fn topology(state: &GameState, mov: &types::Move) -> Result<face::Move, Rejectio
     embedding::embed(state, mov)
 }
 
+/// The move goes in and the board settles around it, so the snapshot
+/// carries the relaxed geometry.
 pub fn apply(state: &mut GameState, mov: Move) -> Outcome {
-    let mov = mov.by(state.current_player, state.board_size);
-    match topology(state, &mov) {
-        Ok(_) => commit(state, mov),
+    match enter(mov, state).and_then(|mov| topology(state, &mov).map(|_| mov)) {
+        Ok(mov) => commit(state, mov),
         Err(rejection) => Outcome::Rejected { rejection },
     }
 }
 
-/// Applies a line that has passed every check.
+/// Applies a line that has passed every check and settles the board
+/// around it, so the snapshot carries the relaxed geometry.
 fn commit(state: &mut GameState, line: types::Move) -> Outcome {
     match state.apply_move(line) {
-        Ok(()) => Outcome::Applied {
-            cut_off: cut_off(&state.face),
-            snapshot: snapshot(state),
-        },
+        Ok(()) => {
+            settle::settle(state);
+            applied(state)
+        }
         Err(rejection) => Outcome::Rejected { rejection },
     }
 }
@@ -356,6 +415,11 @@ fn cut_off(model: &face::FaceModel) -> usize {
 /// the link instead of drawing a game the sharer never saw.
 pub const ROUTER_VERSION: u8 = 2;
 
+/// Changes whenever the settle moves a board differently. Records and
+/// links carry the version they were played under; 0 is a game recorded
+/// with no settling, replayed with none, so its strokes still fit.
+pub const SETTLE_VERSION: u8 = 1;
+
 /// A game with its real geometry, for working out which moves the router
 /// redraws. `known` holds the face move of a line already known to be
 /// router output, which is then taken as read.
@@ -366,6 +430,8 @@ pub struct Classification {
     pub board_size: usize,
     pub first_player: Player,
     pub nodes: Option<Vec<Point>>,
+    #[serde(default)]
+    pub settle_version: u8,
     pub moves: Vec<Move>,
     pub known: Vec<Option<FaceMove>>,
 }
@@ -377,23 +443,26 @@ pub struct Classified {
     pub topology: Vec<Option<FaceMove>>,
 }
 
-/// Replays the real history and classifies each move. A move the engine
-/// refuses is an error, since the history came from it.
+/// Replays the real history, settling after each move as the game did, and
+/// classifies each move. A move the engine refuses is an error, since the
+/// history came from it.
 pub fn classify(plan: Classification) -> Result<Classified, String> {
     let mut state = start(
         plan.initial_nodes,
         plan.board_size,
         plan.first_player,
         plan.nodes,
+        plan.settle_version,
     )?;
     let mut out = Vec::with_capacity(plan.moves.len());
     for (index, (mov, known)) in plan.moves.into_iter().zip(plan.known).enumerate() {
-        let mov = mov.by(state.current_player, state.board_size);
+        let mov = enter(mov, &state).map_err(|e| format!("move {index}: {}", e.message))?;
         let face = topology(&state, &mov).map_err(|e| format!("move {index}: {}", e.message))?;
         out.push(known.or_else(|| redraws(&state, &face, &mov).then(|| face.into())));
         state
             .apply_move(mov)
             .map_err(|e| format!("move {index}: {}", e.message))?;
+        settle::settle(&mut state);
     }
     Ok(Classified { topology: out })
 }
@@ -413,11 +482,19 @@ pub struct RouteHashPlan {
 pub fn route_hash(plan: RouteHashPlan) -> Result<String, String> {
     let mut fnv = crate::exact::Fnv::default();
     for plan in plan.plans {
-        let mut state = start(plan.initial_nodes, plan.board_size, Player::AI, plan.nodes)?;
+        // Recorded positions, replayed as drawn with no settle.
+        let mut state = start(
+            plan.initial_nodes,
+            plan.board_size,
+            Player::AI,
+            plan.nodes,
+            0,
+        )?;
         for (index, mov) in plan.moves.into_iter().enumerate() {
             state.current_player = Player::AI;
+            let mov = enter(mov, &state).map_err(|e| format!("move {index}: {}", e.message))?;
             state
-                .apply_move(mov.by(Player::AI, state.board_size))
+                .apply_move(mov)
                 .map_err(|e| format!("move {index}: {}", e.message))?;
         }
         state.current_player = Player::AI;
@@ -440,6 +517,8 @@ pub enum LinkMove {
 #[serde(rename_all = "camelCase")]
 pub struct Rehearsal {
     pub router_version: u8,
+    #[serde(default)]
+    pub settle_version: u8,
     pub initial_nodes: usize,
     pub board_size: usize,
     pub first_player: Player,
@@ -447,12 +526,14 @@ pub struct Rehearsal {
     pub moves: Vec<LinkMove>,
 }
 
-/// What a rehearsal found: the first move refused, if any, and for every
-/// routed move before it the node the replay placed.
+/// What a rehearsal found: the first move refused, if any, for every
+/// routed move before it the node the replay placed, and when every move
+/// applied, where the settled board left each node.
 #[derive(Debug, Clone, PartialEq, Serialize, Tsify)]
 pub struct Rehearsed {
     pub refused: Option<usize>,
     pub nodes: Vec<Option<Point>>,
+    pub settled: Vec<Point>,
 }
 
 /// Replays a link on a fresh board the way a visitor's engine will, and
@@ -472,6 +553,7 @@ pub fn rehearse(plan: Rehearsal) -> Result<Rehearsed, String> {
         plan.board_size,
         plan.first_player,
         plan.nodes,
+        plan.settle_version,
     )?;
     let mut nodes = vec![None; plan.moves.len()];
     for (index, mov) in plan.moves.into_iter().enumerate() {
@@ -480,19 +562,24 @@ pub fn rehearse(plan: Rehearsal) -> Result<Rehearsed, String> {
             LinkMove::Drawn { mov } => apply(&mut state, mov),
             LinkMove::Routed { face, at } => apply_face_move(&mut state, face, at),
         };
-        if matches!(outcome, Outcome::Rejected { .. }) {
-            return Ok(Rehearsed {
-                refused: Some(index),
-                nodes,
-            });
-        }
-        if routed {
-            nodes[index] = state.lines.last().map(|line| line.new_node_pos);
+        // The node as the move applied it, before the settle moved it, which
+        // is what the link recorded.
+        match outcome {
+            Outcome::Applied { mov, .. } if routed => nodes[index] = Some(mov.new_node_pos),
+            Outcome::Applied { .. } => {}
+            Outcome::Rejected { .. } => {
+                return Ok(Rehearsed {
+                    refused: Some(index),
+                    nodes,
+                    settled: Vec::new(),
+                })
+            }
         }
     }
     Ok(Rehearsed {
         refused: None,
         nodes,
+        settled: state.nodes.iter().map(|node| node.position).collect(),
     })
 }
 
@@ -517,7 +604,7 @@ pub(crate) fn redraws(state: &GameState, face: &face::Move, mov: &types::Move) -
 
 /// Draws a move named by its topology with the router, puts its node at
 /// the point of the curve nearest `at`, and applies it as the player to
-/// move.
+/// move; the board then settles as it does for a drawn move.
 pub fn apply_face_move(state: &mut GameState, mov: FaceMove, at: Point) -> Outcome {
     let listed: face::Move = mov.clone().into();
     let drawn = state
@@ -526,14 +613,28 @@ pub fn apply_face_move(state: &mut GameState, mov: FaceMove, at: Point) -> Outco
         .map_err(|why| illegal(state, &listed, why))
         .and_then(|()| route::route(state, &listed).map_err(|why| unroutable(&listed, why)))
         .and_then(|routed| {
-            let line = types::Move::from_segments(
-                routed.from_node,
-                routed.to_node,
-                routed.polyline,
-                routed.segments,
-                at,
-                routed.player,
-            );
+            // A settling game keeps a node that is already on its grid and
+            // on the curve, so a recorded node lands where it was recorded.
+            let line = if state.settle_version > 0 {
+                types::Move::as_given(
+                    routed.from_node,
+                    routed.to_node,
+                    routed.polyline,
+                    routed.segments,
+                    at,
+                    routed.player,
+                )
+            } else {
+                types::Move::from_segments(
+                    routed.from_node,
+                    routed.to_node,
+                    routed.polyline,
+                    routed.segments,
+                    at,
+                    routed.player,
+                )
+            };
+            let line = state.entering(line);
             topology(state, &line).map(|_| line)
         });
     match drawn {
@@ -564,6 +665,23 @@ fn unroutable(mv: &face::Move, why: Unroutable) -> Rejection {
         Unroutable::Topology => Rejection::unroutable(mv.a, "the curve reads as another move"),
         Unroutable::Bug(what) => Rejection::unroutable(mv.a, what),
     }
+}
+
+/// Takes the last move back and puts the geometry back as it was before
+/// that move settled, so the board is the one the next move was drawn on.
+/// Every record of the undone move is restored, newest first, so a move
+/// settled twice still comes back as drawn.
+pub fn undo(state: &mut GameState) -> bool {
+    let undone = state.undo_move();
+    if undone {
+        let board = state.lines.len() + 1;
+        while state.settles.last().is_some_and(|s| s.board == board) {
+            if let Some(settled) = state.settles.pop() {
+                settled.restore(state);
+            }
+        }
+    }
+    undone
 }
 
 /// The AI's line is router output, so its face move is read straight back
@@ -642,7 +760,8 @@ pub fn fit(state: &GameState, query: FitQuery) -> Curve {
 }
 
 pub fn placement(state: &GameState, query: PlacementQuery) -> Placement {
-    let Some(hit) = curve::nearest(&query.segments, &query.at).map(|hit| curve::Nearest {
+    let segments = as_stored(state, &query.segments);
+    let Some(hit) = curve::nearest(&segments, &query.at).map(|hit| curve::Nearest {
         point: crate::exact::snap_to_grid(hit.point),
         ..hit
     }) else {
@@ -651,13 +770,37 @@ pub fn placement(state: &GameState, query: PlacementQuery) -> Placement {
             valid: false,
         };
     };
-    let path = curve::flatten(&query.segments, curve::tolerance(state.board_size));
+    let position = node_as_stored(state, hit.point);
+    let path = curve::flatten(&segments, curve::tolerance(state.board_size));
     let valid =
-        validation::validate_new_node_placement(&path, &hit.point, &state.nodes, state.board_size)
+        validation::validate_new_node_placement(&path, &position, &state.nodes, state.board_size)
             .is_ok();
-    Placement {
-        position: hit.point,
-        valid,
+    Placement { position, valid }
+}
+
+/// The spline as a settling game stores it, so what the page checks is
+/// what apply will see.
+fn as_stored(state: &GameState, segments: &[Cubic]) -> Vec<Cubic> {
+    if state.settle_version == 0 {
+        return segments.to_vec();
+    }
+    let g = grid(state.board_size);
+    segments
+        .iter()
+        .map(|c| Cubic {
+            p0: crate::exact::snap_to_unit(c.p0, g),
+            p1: crate::exact::snap_to_unit(c.p1, g),
+            p2: crate::exact::snap_to_unit(c.p2, g),
+            p3: crate::exact::snap_to_unit(c.p3, g),
+        })
+        .collect()
+}
+
+fn node_as_stored(state: &GameState, at: Point) -> Point {
+    if state.settle_version == 0 {
+        at
+    } else {
+        crate::exact::snap_to_unit(at, grid(state.board_size))
     }
 }
 
@@ -666,7 +809,8 @@ pub fn placement(state: &GameState, query: PlacementQuery) -> Placement {
 /// the first that validates wins.
 pub fn auto_placement(state: &GameState, query: AutoPlacementQuery) -> AutoPlacement {
     let tolerance = curve::tolerance(state.board_size);
-    let flat = curve::flatten(&query.segments, tolerance);
+    let segments = as_stored(state, &query.segments);
+    let flat = curve::flatten(&segments, tolerance);
     let path = geometry::resample_polyline(&flat, tolerance * 2.0);
     let inset = MIN_NODE_SPACING * scale(state.board_size);
     let far = state.board_size as f64 - inset;
@@ -676,8 +820,8 @@ pub fn auto_placement(state: &GameState, query: AutoPlacementQuery) -> AutoPlace
     };
     let chosen = ai::rank_node_placements(&path, state)
         .into_iter()
-        .filter_map(|at| curve::nearest(&query.segments, &at))
-        .map(|hit| crate::exact::snap_to_grid(hit.point))
+        .filter_map(|at| curve::nearest(&segments, &at))
+        .map(|hit| node_as_stored(state, crate::exact::snap_to_grid(hit.point)))
         .filter(inside)
         .find(valid);
     match chosen {
@@ -714,12 +858,26 @@ mod tests {
             Point::new(525.8608781260419, 205.32863223151458),
             Point::new(712.9536013426019, 777.7602629520936),
         ];
-        let state = start(4, 1000, Player::Human, Some(nodes)).unwrap();
+        let state = start(4, 1000, Player::Human, Some(nodes), 0).unwrap();
         assert_eq!(hash_board(&state), BOARD_HASH);
     }
 
     use super::*;
     use serde_json::json;
+
+    /// `stored` is `drawn` with every control point rounded to the grid.
+    fn assert_on_grid_of(stored: &[Cubic], drawn: &[Cubic], board: usize) {
+        assert_eq!(stored.len(), drawn.len());
+        let half = grid(board) / 2.0 + 1e-9;
+        for (s, d) in stored.iter().zip(drawn) {
+            for (p, q) in [(s.p0, d.p0), (s.p1, d.p1), (s.p2, d.p2), (s.p3, d.p3)] {
+                assert!(
+                    (p.x - q.x).abs() <= half && (p.y - q.y).abs() <= half,
+                    "{p:?} is not {q:?} on the grid"
+                );
+            }
+        }
+    }
 
     fn straight(a: Point, b: Point, steps: usize) -> Vec<Point> {
         (0..=steps)
@@ -737,6 +895,7 @@ mod tests {
             to_node: 1,
             polyline: vec![Point::new(1.0, 2.0), Point::new(3.0, 4.0)],
             new_node_pos: Point::new(2.0, 3.0),
+            segments: None,
         };
         let wire = serde_json::to_value(&mov).unwrap();
         assert_eq!(
@@ -771,7 +930,7 @@ mod tests {
     /// but has nobody to reach, so it is not active either.
     #[test]
     fn snapshot_of_a_finished_game() {
-        let mut state = start(1, 1000, Player::Human, None).unwrap();
+        let mut state = start(1, 1000, Player::Human, None, 0).unwrap();
         let a = state.nodes[0].position;
         let ring: Vec<Point> = (0..=48)
             .map(|i| {
@@ -787,6 +946,7 @@ mod tests {
                 to_node: 0,
                 polyline: ring,
                 new_node_pos: far,
+                segments: None,
             },
         ) else {
             panic!("the loop was rejected");
@@ -808,6 +968,7 @@ mod tests {
                 to_node: 1,
                 polyline: over.clone(),
                 new_node_pos: over[1],
+                segments: None,
             },
         );
         let Outcome::Applied { snapshot: snap, .. } = outcome else {
@@ -827,6 +988,7 @@ mod tests {
             to_node: 0,
             polyline: vec![a, a],
             new_node_pos: a,
+            segments: None,
         };
         let wire = serde_json::to_value(apply(&mut state, mov)).unwrap();
         assert_eq!(wire["kind"], json!("rejected"));
@@ -842,20 +1004,25 @@ mod tests {
     #[test]
     fn start_takes_recorded_positions_and_refuses_a_count_mismatch() {
         let given = vec![Point::new(100.0, 100.0), Point::new(400.0, 100.0)];
-        let placed = start(2, 500, Player::AI, Some(given.clone())).unwrap();
+        let placed = start(2, 500, Player::AI, Some(given.clone()), 0).unwrap();
         assert_eq!(placed.nodes[1].position, given[1]);
         assert_eq!(placed.current_player, Player::AI);
-        let refused = start(3, 500, Player::Human, Some(given))
+        let refused = start(3, 500, Player::Human, Some(given), SETTLE_VERSION)
             .err()
             .expect("a count mismatch is refused");
         assert!(refused.contains("2 starting positions for 3 nodes"));
-        let laid_out = start(3, 500, Player::Human, None).unwrap();
+        let laid_out = start(3, 500, Player::Human, None, 0).unwrap();
         assert_eq!(laid_out.nodes[0].position, types::opening_layout(3, 500)[0]);
+        let gridded = start(3, 500, Player::Human, None, SETTLE_VERSION).unwrap();
+        assert_eq!(
+            gridded.nodes[0].position,
+            crate::exact::snap_to_unit(types::opening_layout(3, 500)[0], grid(500))
+        );
     }
 
     #[test]
     fn the_ai_opening_on_a_full_size_board_is_accepted() {
-        let mut state = start(4, 1000, Player::AI, None).unwrap();
+        let mut state = start(4, 1000, Player::AI, None, SETTLE_VERSION).unwrap();
         let AiReply::Move { mov, .. } = ai_move(&mut state) else {
             panic!("the AI has an opening move");
         };
@@ -869,7 +1036,7 @@ mod tests {
     /// draws the same line again.
     #[test]
     fn the_ai_reply_carries_a_face_move_that_redraws_its_line() {
-        let mut state = start(4, 1000, Player::AI, None).unwrap();
+        let mut state = start(4, 1000, Player::AI, None, SETTLE_VERSION).unwrap();
         let AiReply::Move { mov, topology, .. } = ai_move(&mut state) else {
             panic!("the AI has an opening move");
         };
@@ -923,6 +1090,7 @@ mod tests {
             from_node: 0,
             to_node: 1,
             new_node_pos: path[20],
+            segments: None,
             polyline: path,
         };
         assert!(matches!(
@@ -942,6 +1110,7 @@ mod tests {
             board_size: 1000,
             first_player: Player::Human,
             nodes: None,
+            settle_version: SETTLE_VERSION,
             moves: vec![chord.clone(), reply.clone()],
             known,
         };
@@ -979,7 +1148,7 @@ mod tests {
     /// kind the visitor's page shows.
     #[test]
     fn a_face_move_whose_node_sits_on_a_node_is_rejected_as_too_close() {
-        let mut state = start(4, 1000, Player::AI, None).unwrap();
+        let mut state = start(4, 1000, Player::AI, None, SETTLE_VERSION).unwrap();
         let AiReply::Move { mov, topology, .. } = ai_move(&mut state) else {
             panic!("the AI has an opening move");
         };
@@ -997,7 +1166,7 @@ mod tests {
     /// move is too short.
     #[test]
     fn a_rehearsal_names_the_first_move_a_fresh_engine_refuses() {
-        let mut state = start(4, 1000, Player::Human, None).unwrap();
+        let mut state = start(4, 1000, Player::Human, None, SETTLE_VERSION).unwrap();
         let a = state.nodes[0].position;
         let b = state.nodes[1].position;
         let polyline = straight(a, b, 10);
@@ -1005,6 +1174,7 @@ mod tests {
             from_node: 0,
             to_node: 1,
             new_node_pos: polyline[5],
+            segments: None,
             polyline,
         };
         assert!(matches!(
@@ -1021,6 +1191,7 @@ mod tests {
         };
         let plan = |face: FaceMove| Rehearsal {
             router_version: ROUTER_VERSION,
+            settle_version: SETTLE_VERSION,
             initial_nodes: 4,
             board_size: 1000,
             first_player: Player::Human,
@@ -1041,12 +1212,12 @@ mod tests {
             apply(&mut replayed, chord.clone()),
             Outcome::Applied { .. }
         ));
-        assert!(matches!(
-            apply_face_move(&mut replayed, face.clone(), reply.new_node_pos),
-            Outcome::Applied { .. }
-        ));
-        let placed = replayed.lines.last().unwrap().new_node_pos;
-        assert_eq!(rehearsed.nodes, vec![None, Some(placed)]);
+        let Outcome::Applied { mov: placed, .. } =
+            apply_face_move(&mut replayed, face.clone(), reply.new_node_pos)
+        else {
+            panic!("the reply was rejected");
+        };
+        assert_eq!(rehearsed.nodes, vec![None, Some(placed.new_node_pos)]);
         let wrong = FaceMove {
             at_a: Some(1),
             ..face.clone()
@@ -1121,7 +1292,7 @@ mod tests {
 
     #[test]
     fn the_ai_answers_a_human_opening_with_a_move_that_applies() {
-        let mut state = start(4, 1000, Player::Human, None).unwrap();
+        let mut state = start(4, 1000, Player::Human, None, SETTLE_VERSION).unwrap();
         let a = state.nodes[0].position;
         let b = state.nodes[1].position;
         let polyline = straight(a, b, 20);
@@ -1133,6 +1304,7 @@ mod tests {
                 to_node: 1,
                 polyline,
                 new_node_pos,
+                segments: None,
             },
         ) else {
             panic!("the opening chord was rejected");
@@ -1151,7 +1323,7 @@ mod tests {
 
     #[test]
     fn the_ai_can_open_and_the_turn_passes_to_the_human() {
-        let mut state = start(4, 1000, Player::AI, None).unwrap();
+        let mut state = start(4, 1000, Player::AI, None, SETTLE_VERSION).unwrap();
         assert_eq!(snapshot(&state).current_player, Player::AI);
         let a = state.nodes[0].position;
         let b = state.nodes[1].position;
@@ -1162,6 +1334,7 @@ mod tests {
             to_node: 1,
             polyline,
             new_node_pos,
+            segments: None,
         };
         match apply(&mut state, mov) {
             Outcome::Applied { snapshot, .. } => {
@@ -1186,6 +1359,7 @@ mod tests {
             to_node: 1,
             polyline,
             new_node_pos,
+            segments: None,
         };
         let wire = serde_json::to_value(apply(&mut state, mov)).unwrap();
         assert_eq!(wire["kind"], json!("applied"));
@@ -1229,6 +1403,7 @@ mod tests {
             recorded.board_size,
             Player::Human,
             nodes,
+            SETTLE_VERSION,
         )
         .unwrap();
         for mov in recorded.moves {
@@ -1291,13 +1466,14 @@ mod tests {
             to_node: 1,
             polyline: path,
             new_node_pos: placed.position,
+            segments: None,
         };
-        let Outcome::Applied { snapshot, .. } = apply(&mut state, mov) else {
+        let Outcome::Applied { .. } = apply(&mut state, mov) else {
             panic!("wavy chord rejected");
         };
-        assert_eq!(snapshot.lines[0].segments, shown);
-        assert_eq!(snapshot.lines[0].new_node_pos, placed.position);
-        assert_eq!(snapshot.nodes[4].position, placed.position);
+        let committed = state.move_history.last().unwrap();
+        assert_on_grid_of(&committed.segments, &shown, 1000);
+        assert!(committed.new_node_pos.distance_to(&placed.position) <= grid(1000));
         let line = &state.lines[0];
         assert_eq!(line.flat, line.flatten(curve::tolerance(state.board_size)));
     }
@@ -1314,6 +1490,7 @@ mod tests {
             to_node: 1,
             polyline,
             new_node_pos,
+            segments: None,
         };
         assert!(matches!(
             apply(&mut state, opening),
@@ -1322,15 +1499,19 @@ mod tests {
         let AiReply::Move { mov, segments, .. } = ai_move(&mut state) else {
             panic!("the AI has a move on an open board");
         };
-        let Outcome::Applied { snapshot, .. } = apply(&mut state, mov) else {
+        let Outcome::Applied { .. } = apply(&mut state, mov) else {
             panic!("the AI's own move was rejected");
         };
-        assert_eq!(snapshot.lines.last().unwrap().segments, segments);
+        assert_on_grid_of(
+            &state.move_history.last().unwrap().segments,
+            &segments,
+            1000,
+        );
     }
 
     #[test]
     fn a_line_on_the_wire_carries_its_stroke_and_segments_but_not_the_flattening() {
-        let mut state = GameState::new(4);
+        let mut state = start(4, 1000, Player::Human, None, 0).unwrap();
         let path = wavy(state.nodes[0].position, state.nodes[1].position);
         let new_node_pos = path[20];
         let mov = Move {
@@ -1338,6 +1519,7 @@ mod tests {
             to_node: 1,
             polyline: path,
             new_node_pos,
+            segments: None,
         };
         let wire = serde_json::to_value(apply(&mut state, mov)).unwrap();
         let line = &wire["snapshot"]["lines"][0];
@@ -1365,6 +1547,7 @@ mod tests {
             to_node: 1,
             polyline: path,
             new_node_pos,
+            segments: None,
         };
         let text = serde_json::to_string(&mov).unwrap();
         let back: Move = serde_json::from_str(&text).unwrap();
@@ -1402,6 +1585,7 @@ mod tests {
                 to_node: to,
                 polyline,
                 new_node_pos,
+                segments: None,
             }
         };
         let fixture = serde_json::to_string(&Recorded {
@@ -1543,7 +1727,7 @@ mod tests {
             .map(|p| Point::new(p[0].as_f64().unwrap(), p[1].as_f64().unwrap()))
             .collect();
         assert_eq!(raw["firstPlayer"], "ai");
-        let mut state = start(2, 1000, Player::AI, Some(nodes)).unwrap();
+        let mut state = start(2, 1000, Player::AI, Some(nodes), 0).unwrap();
         for m in raw["moves"].as_array().unwrap() {
             let polyline: Vec<Point> = m["polyline"]
                 .as_array()
@@ -1659,7 +1843,7 @@ mod tests {
             let RouteReply::Routed { mov, segments } = reply else {
                 panic!("{listed:?} did not route: {reply:?}");
             };
-            let read = embedding::embed(&state, &mov.clone().by(Player::Human, 1000)).unwrap();
+            let read = embedding::embed(&state, &enter(mov.clone(), &state).unwrap()).unwrap();
             assert_eq!(
                 (read.a, read.at_a, read.b, read.at_b),
                 (listed.a, None, listed.b, None)
@@ -1672,14 +1856,251 @@ mod tests {
                 "{listed:?} read back as {read:?}"
             );
             let mut played = state.clone();
-            let Outcome::Applied { snapshot, .. } = apply(&mut played, mov) else {
+            let Outcome::Applied { .. } = apply(&mut played, mov) else {
                 panic!("the routed move for {listed:?} was rejected");
             };
-            assert_eq!(snapshot.lines[0].segments, segments);
+            assert_on_grid_of(&played.move_history[0].segments, &segments, 1000);
         }
         let wire = serde_json::to_value(route_move(&state, face_move(0, 1, vec![]))).unwrap();
         assert_eq!(wire["kind"], json!("routed"));
         assert!(!wire["segments"].as_array().unwrap().is_empty());
+    }
+
+    /// A dot the page offers as valid commits: placement checks the curve
+    /// and node as the board will store them, so a stroke at a threshold
+    /// cannot pass the dot and fail the commit.
+    #[test]
+    fn a_valid_dot_always_commits_along_a_chord_past_a_node() {
+        let mut state = start(4, 1000, Player::Human, None, SETTLE_VERSION).unwrap();
+        state.nodes[0].position = Point::new(300.0, 500.0);
+        state.nodes[1].position = Point::new(700.0, 500.0);
+        state.nodes[2].position = Point::new(500.0, 400.0);
+        state.nodes[3].position = Point::new(500.0, 900.0);
+        let path = straight(state.nodes[0].position, state.nodes[1].position, 40);
+        let segments = curve::fit(&path, curve::tolerance(1000));
+        let mut valid = 0;
+        for tenths in 0..=400 {
+            let at = Point::new(300.0 + tenths as f64, 500.0);
+            let offered = placement(
+                &state,
+                PlacementQuery {
+                    segments: segments.clone(),
+                    at,
+                },
+            );
+            let mut played = state.clone();
+            let outcome = apply(
+                &mut played,
+                Move {
+                    from_node: 0,
+                    to_node: 1,
+                    polyline: path.clone(),
+                    new_node_pos: offered.position,
+                    segments: None,
+                },
+            );
+            let applied = matches!(outcome, Outcome::Applied { .. });
+            if offered.valid {
+                assert!(
+                    applied,
+                    "the dot at {at:?} was valid yet refused: {outcome:?}"
+                );
+                valid += 1;
+            }
+        }
+        assert!(valid > 100 && valid < 400, "{valid} of 401 spots valid");
+    }
+
+    /// An unsettled game records an empty settle per move, so undo pops it
+    /// and the board is the one before the move.
+    #[test]
+    fn undo_past_a_version_0_move_leaves_no_record_and_the_drawn_board() {
+        let mut state = start(4, 1000, Player::Human, None, 0).unwrap();
+        let before = settle::golden::bits(&state);
+        let RouteReply::Routed { mov, .. } = route_move(&state, face_move(0, 1, vec![])) else {
+            panic!("the chord did not route");
+        };
+        assert!(matches!(apply(&mut state, mov), Outcome::Applied { .. }));
+        assert_eq!(state.settles.len(), 1);
+        assert!(state.settles[0].is_empty());
+        assert!(undo(&mut state));
+        assert!(state.settles.is_empty());
+        assert_eq!(settle::golden::bits(&state), before);
+    }
+
+    /// A refused move leaves no record, so the next undo pairs with the
+    /// move before it.
+    #[test]
+    fn undo_after_a_rejected_move_restores_the_move_before_it() {
+        let mut state = GameState::new(4);
+        let start_bits = settle::golden::bits(&state);
+        let RouteReply::Routed { mov, .. } = route_move(&state, face_move(0, 1, vec![])) else {
+            panic!("the chord did not route");
+        };
+        assert!(matches!(apply(&mut state, mov), Outcome::Applied { .. }));
+        let records = state.settles.len();
+        let a = state.nodes[0].position;
+        let short = Move {
+            from_node: 0,
+            to_node: 1,
+            polyline: vec![a, a],
+            new_node_pos: a,
+            segments: None,
+        };
+        assert!(matches!(apply(&mut state, short), Outcome::Rejected { .. }));
+        assert_eq!(state.settles.len(), records);
+        assert!(undo(&mut state));
+        assert!(state.settles.is_empty());
+        assert_eq!(settle::golden::bits(&state), start_bits);
+    }
+
+    /// Rehearsing a link replays on a fresh board, so undoing a settled
+    /// move afterwards still restores the board bit for bit, and the
+    /// rehearsal reports the settled nodes the visitor will see.
+    #[test]
+    fn a_rehearsal_leaves_the_game_to_undo_to_its_settled_board() {
+        let mut state = GameState::new(4);
+        let RouteReply::Routed { mov, .. } = route_move(&state, face_move(0, 1, vec![])) else {
+            panic!("the chord did not route");
+        };
+        let Outcome::Applied { mov: first, .. } = apply(&mut state, mov) else {
+            panic!("the chord was rejected");
+        };
+        let before = settle::golden::bits(&state);
+        state.current_player = Player::AI;
+        let reply = face_move(2, 3, vec![]);
+        let Outcome::Applied { mov: second, .. } =
+            apply_face_move(&mut state, reply.clone(), Point::new(500.0, 500.0))
+        else {
+            panic!("the reply was rejected");
+        };
+        assert_ne!(settle::golden::bits(&state), before);
+        let plan = Rehearsal {
+            router_version: ROUTER_VERSION,
+            settle_version: SETTLE_VERSION,
+            initial_nodes: 4,
+            board_size: 1000,
+            first_player: Player::Human,
+            nodes: None,
+            moves: vec![
+                LinkMove::Drawn { mov: first },
+                LinkMove::Routed {
+                    face: reply,
+                    at: second.new_node_pos,
+                },
+            ],
+        };
+        let rehearsed = rehearse(plan).unwrap();
+        assert_eq!(rehearsed.refused, None);
+        assert_eq!(
+            rehearsed.settled,
+            state.nodes.iter().map(|n| n.position).collect::<Vec<_>>()
+        );
+        assert!(undo(&mut state));
+        assert_eq!(settle::golden::bits(&state), before);
+    }
+
+    /// A settled game's rehearsal reports each routed node as the move
+    /// applied it, not where the settle took it, so the drift the page
+    /// measures against the record is zero.
+    #[test]
+    fn a_rehearsal_reports_the_routed_node_as_applied_not_as_settled() {
+        let mut state = GameState::new(4);
+        let RouteReply::Routed { mov, .. } = route_move(&state, face_move(0, 1, vec![])) else {
+            panic!("the chord did not route");
+        };
+        let Outcome::Applied { mov: first, .. } = apply(&mut state, mov) else {
+            panic!("the chord was rejected");
+        };
+        state.current_player = Player::AI;
+        let reply = face_move(2, 3, vec![]);
+        let Outcome::Applied { mov: second, .. } =
+            apply_face_move(&mut state, reply.clone(), Point::new(500.0, 500.0))
+        else {
+            panic!("the reply was rejected");
+        };
+        let settled = state.lines[1].new_node_pos;
+        assert_ne!(
+            settled, second.new_node_pos,
+            "the settle left the node where it was"
+        );
+        let plan = Rehearsal {
+            router_version: ROUTER_VERSION,
+            settle_version: SETTLE_VERSION,
+            initial_nodes: 4,
+            board_size: 1000,
+            first_player: Player::Human,
+            nodes: None,
+            moves: vec![
+                LinkMove::Drawn { mov: first },
+                LinkMove::Routed {
+                    face: reply,
+                    at: second.new_node_pos,
+                },
+            ],
+        };
+        let rehearsed = rehearse(plan).unwrap();
+        assert_eq!(rehearsed.refused, None);
+        assert_eq!(rehearsed.nodes[1], Some(second.new_node_pos));
+    }
+
+    /// A record from a newer settle would replay through this one and show
+    /// another board, so it is refused.
+    #[test]
+    fn start_refuses_a_settle_version_newer_than_the_engine() {
+        let Err(refused) = start(4, 1000, Player::Human, None, SETTLE_VERSION + 1) else {
+            panic!("a newer settle version was accepted");
+        };
+        assert!(refused.contains("newer"), "{refused}");
+        assert!(start(4, 1000, Player::Human, None, SETTLE_VERSION).is_ok());
+    }
+
+    /// The routed line settles the same way whether it arrives drawn or as
+    /// its face move, and each path leaves one settle record.
+    #[test]
+    fn a_face_move_applies_to_the_board_a_drawn_copy_of_it_does() {
+        let mut state = GameState::new(4);
+        state.current_player = Player::Human;
+        for listed in moves_from(&state, 0).moves {
+            let RouteReply::Routed { mov, .. } = route_move(&state, listed.clone()) else {
+                continue;
+            };
+            let mut drawn = state.clone();
+            let mut routed = state.clone();
+            assert!(matches!(
+                apply(&mut drawn, mov.clone()),
+                Outcome::Applied { .. }
+            ));
+            assert!(matches!(
+                apply_face_move(&mut routed, listed.clone(), mov.new_node_pos),
+                Outcome::Applied { .. }
+            ));
+            assert_eq!(
+                settle::golden::bits(&drawn),
+                settle::golden::bits(&routed),
+                "{listed:?}"
+            );
+            assert_eq!(drawn.settles.len(), 1);
+            assert_eq!(routed.settles.len(), 1);
+        }
+    }
+
+    /// A move settled twice leaves two records at its board; undo restores
+    /// both, newest first, and lands on the drawn board.
+    #[test]
+    fn undo_restores_every_record_of_a_move_settled_twice() {
+        let mut state = GameState::new(4);
+        state.current_player = Player::Human;
+        let before = settle::golden::bits(&state);
+        let RouteReply::Routed { mov, .. } = route_move(&state, face_move(0, 1, vec![])) else {
+            panic!("the chord did not route");
+        };
+        assert!(matches!(apply(&mut state, mov), Outcome::Applied { .. }));
+        settle::settle(&mut state);
+        assert_eq!(state.settles.len(), 2);
+        assert!(undo(&mut state));
+        assert!(state.settles.is_empty());
+        assert_eq!(settle::golden::bits(&state), before);
     }
 
     #[test]
@@ -1754,13 +2175,15 @@ mod tests {
     /// round nothing set nothing apart; a second chord 0 to 1 with the
     /// two-node piece {3, 6} on its new side sets 3 and 6 apart from 2
     /// and 4, with node 5 on both arcs and so on the wall.
+    // These boards take several routed moves in turn on fixed positions,
+    // so they run unsettled.
     #[test]
     fn cut_off_counts_the_smaller_side_by_hand() {
-        let mut state = GameState::new(6);
+        let mut state = start(6, 1000, Player::Human, None, 0).unwrap();
         assert_eq!(routed(&mut state, bare(1, 1, vec![2])), 1);
         assert_eq!(routed(&mut state, bare(0, 0, vec![1])), 3);
 
-        let mut state = GameState::new(5);
+        let mut state = start(5, 1000, Player::Human, None, 0).unwrap();
         assert_eq!(routed(&mut state, bare(0, 1, vec![])), 0);
         assert_eq!(routed(&mut state, bare(3, 3, vec![])), 0);
         let split = listed(&state, |m| m.a == 0 && m.b == 1 && m.enclosed == vec![3]);
@@ -1773,7 +2196,7 @@ mod tests {
     /// so it reads 1 from the smaller side although four nodes sit inside.
     #[test]
     fn a_loop_round_the_larger_side_reads_the_smaller() {
-        let mut state = GameState::new(6);
+        let mut state = start(6, 1000, Player::Human, None, 0).unwrap();
         assert_eq!(routed(&mut state, bare(0, 0, vec![1, 2, 3, 4])), 1);
     }
 
@@ -1783,7 +2206,7 @@ mod tests {
     /// counted with the new side it would read 3.
     #[test]
     fn a_node_behind_the_split_boundary_counts_for_neither_side() {
-        let mut state = GameState::new(7);
+        let mut state = start(7, 1000, Player::Human, None, 0).unwrap();
         assert_eq!(routed(&mut state, bare(2, 2, vec![3])), 1);
         let chord = moves_from(&state, 2)
             .moves
@@ -1804,18 +2227,20 @@ mod tests {
             to_node: mv.b,
             polyline: path.clone(),
             new_node_pos: at,
+            segments: None,
         };
         let back = Move {
             from_node: mv.b,
             to_node: mv.a,
             polyline: path.into_iter().rev().collect(),
             new_node_pos: at,
+            segments: None,
         };
         (forward, back)
     }
 
     fn count(state: &mut GameState, mov: Move) -> (usize, FaceMove) {
-        let line = mov.clone().by(state.current_player, state.board_size);
+        let line = enter(mov.clone(), state).unwrap();
         let face = embedding::embed(state, &line).expect("the curve embeds");
         match apply(state, mov) {
             Outcome::Applied { cut_off, .. } => (cut_off, face.into()),
@@ -1828,7 +2253,7 @@ mod tests {
     /// Both read the same count.
     #[test]
     fn cut_off_does_not_depend_on_the_drawing_direction() {
-        let mut state = GameState::new(5);
+        let mut state = start(5, 1000, Player::Human, None, 0).unwrap();
         assert_eq!(routed(&mut state, bare(0, 1, vec![])), 0);
         assert_eq!(routed(&mut state, bare(3, 3, vec![])), 0);
         let split = listed(&state, |m| m.a == 0 && m.b == 1 && m.enclosed == vec![3]);
@@ -1839,7 +2264,7 @@ mod tests {
         assert_eq!(face_back.enclosed, vec![2, 4]);
         assert_eq!((there, and_back), (2, 2));
 
-        let state = GameState::new(6);
+        let state = start(6, 1000, Player::Human, None, 0).unwrap();
         let (forward, back) = both_ways(&state, bare(1, 1, vec![2]));
         let (there, face_there) = count(&mut state.clone(), forward);
         let (and_back, face_back) = count(&mut state.clone(), back);
@@ -1867,12 +2292,14 @@ mod tests {
                         .map(|p| Point::new(p[0], p[1]))
                         .collect(),
                     new_node_pos: Point::new(recorded.new_node[0], recorded.new_node[1]),
+                    segments: None,
                 };
                 let back = Move {
                     from_node: mov.to_node,
                     to_node: mov.from_node,
                     polyline: mov.polyline.iter().rev().copied().collect(),
                     new_node_pos: mov.new_node_pos,
+                    segments: None,
                 };
                 let (reversed, _) = count(&mut state.clone(), back);
                 let Outcome::Applied {

@@ -34,6 +34,8 @@ export interface GameRecord extends Omit<Fixture, "moves"> {
   version: 1;
   firstPlayer: Player;
   cursor: number;
+  // The settle the game was played under; 0 replays with none.
+  settleVersion: number;
   moves: RecordMove[];
 }
 
@@ -57,23 +59,33 @@ export function drawn(move: RecordedMove): boolean {
 }
 
 export type Applied = Extract<Outcome, { kind: "applied" }>;
+// A line as the engine drew it, before the board settled around it.
+type DrawnLine = Pick<Line, "fromNode" | "toNode" | "polyline" | "newNodePos" | "segments">;
 
 export const STORAGE_KEY = "sprouts.game";
 const HASH_PREFIX = "#game=";
 const RECORD_VERSION = 1;
 // Link version 1 carries thinned strokes, version 2 the fitted cubics,
-// version 3 the starting layout when it is not the default, and version 4
-// a move as its face move where the router redraws it; a version 1 or 2
-// link was drawn on the circle layout.
-const LINK_VERSION = 4;
-// Matches ROUTER_VERSION in src/protocol.rs; a version 4 link carries it
-// right after the version byte, and the engine refuses a rehearsal for
-// any other.
+// version 3 the starting layout when it is not the default, version 4 a
+// move as its face move where the router redraws it, and version 5 the
+// settle version; a version 1 or 2 link was drawn on the circle layout
+// and a link before version 5 was played with no settling.
+const LINK_VERSION = 5;
+// Match ROUTER_VERSION and SETTLE_VERSION in src/protocol.rs; a link
+// carries them after the version byte from versions 4 and 5 on.
 export const ROUTER_VERSION = 2;
+export const SETTLE_VERSION = 1;
+const FACE_LINK_VERSION = 4;
 const LAYOUT_LINK_VERSION = 3;
 const CUBIC_LINK_VERSION = 2;
 const STROKE_LINK_VERSION = 1;
-const LINK_VERSIONS = [LINK_VERSION, LAYOUT_LINK_VERSION, CUBIC_LINK_VERSION, STROKE_LINK_VERSION];
+const LINK_VERSIONS = [
+  LINK_VERSION,
+  FACE_LINK_VERSION,
+  LAYOUT_LINK_VERSION,
+  CUBIC_LINK_VERSION,
+  STROKE_LINK_VERSION,
+];
 const FLAG_AI_FIRST = 1;
 const FLAG_LAYOUT = 2;
 // Coordinates travel as tenths of a world unit in a version 1 link.
@@ -116,10 +128,16 @@ export class History {
     public initialNodes: number,
     public boardSize: number,
     public firstPlayer: Player = "human",
+    public settleVersion: number = SETTLE_VERSION,
   ) {}
 
   static from(record: GameRecord): History {
-    const history = new History(record.initialNodes, record.boardSize, record.firstPlayer);
+    const history = new History(
+      record.initialNodes,
+      record.boardSize,
+      record.firstPlayer,
+      record.settleVersion,
+    );
     history.nodes = record.nodes ?? null;
     history.moves = record.moves.map(fromRecordMove);
     history.cursor = Math.min(Math.max(record.cursor, 0), history.moves.length);
@@ -157,7 +175,12 @@ export class History {
 
   // A copy to work on while the game goes on.
   clone(): History {
-    const copy = new History(this.initialNodes, this.boardSize, this.firstPlayer);
+    const copy = new History(
+      this.initialNodes,
+      this.boardSize,
+      this.firstPlayer,
+      this.settleVersion,
+    );
     copy.nodes = this.nodes ? this.nodes.map(([x, y]) => [x, y]) : null;
     copy.moves = this.moves.map(cloneMove);
     copy.cursor = this.cursor;
@@ -168,12 +191,14 @@ export class History {
     this.moves.length = this.cursor;
   }
 
-  // Takes the fitted spline of every line the engine holds for a move that
-  // has none yet; the engine's lines are the moves up to the cursor.
+  // Takes the spline the engine holds for each move up to the cursor. Under
+  // a settle the engine's lines are not the moves as drawn, so only an
+  // unsettled game takes its splines from them.
   adopt(lines: Line[]): void {
+    if (this.settleVersion !== 0) return;
     lines.forEach((line, i) => {
       const move = this.moves[i];
-      if (!move || move.segments) return;
+      if (!move) return;
       if (line.fromNode === move.fromNode && line.toNode === move.toNode) {
         move.segments = line.segments;
       }
@@ -182,7 +207,7 @@ export class History {
 
   // Takes the line the engine drew for move number index + 1 when the move
   // arrived as topology.
-  settle(index: number, line: Line | undefined): void {
+  settle(index: number, line: DrawnLine | undefined): void {
     const move = this.moves[index];
     if (!move || !line || drawn(move)) return;
     if (line.fromNode === move.fromNode && line.toNode === move.toNode) {
@@ -194,7 +219,8 @@ export class History {
 
   // Takes the outcome of applying move number index + 1.
   applied(index: number, outcome: Applied): void {
-    this.settle(index, outcome.snapshot.lines[index]);
+    const { segments } = outcome.mov;
+    if (segments) this.settle(index, { ...outcome.mov, segments });
     const move = this.moves[index];
     if (move) move.cutOff = outcome.cutOff;
   }
@@ -237,6 +263,7 @@ export class History {
       boardSize: this.boardSize,
       ...(this.nodes ? { nodes: this.nodes } : {}),
       firstPlayer: this.firstPlayer,
+      settleVersion: this.settleVersion,
       moves: this.moves.map(toRecordMove),
       cursor: this.cursor,
     };
@@ -263,6 +290,7 @@ export function toMove(move: RecordedMove): Move {
     toNode: move.toNode,
     polyline: move.polyline.map((p) => ({ x: p.x, y: p.y })),
     newNodePos: { x: move.newNodePos.x, y: move.newNodePos.y },
+    ...(move.segments ? { segments: move.segments } : {}),
   };
 }
 
@@ -276,6 +304,7 @@ function toRecordMove(move: RecordedMove): FixtureMove {
     polyline: move.polyline.map((p): [number, number] => [p.x, p.y]),
     newNode: [move.newNodePos.x, move.newNodePos.y],
     ...(move.cutOff !== undefined ? { cutOff: move.cutOff } : {}),
+    ...(move.segments ? { segments: move.segments } : {}),
   };
 }
 
@@ -287,6 +316,7 @@ function fromRecordMove(move: RecordMove): RecordedMove {
       polyline: move.polyline.map(([x, y]) => ({ x, y })),
       newNodePos: { x: move.newNode[0], y: move.newNode[1] },
       ...(move.cutOff !== undefined ? { cutOff: move.cutOff } : {}),
+      ...(move.segments ? { segments: move.segments } : {}),
     };
   }
   return {
@@ -339,6 +369,10 @@ function asRecord(value: unknown): GameRecord | null {
   }
   if (v.cursor > v.moves.length) return null;
   if (v.nodes !== undefined && !isLayout(v.nodes, nodes)) return null;
+  // A record from a newer settle would replay through this one onto
+  // another board.
+  const settleVersion = v.settleVersion ?? 0;
+  if (!isCount(settleVersion) || settleVersion > SETTLE_VERSION) return null;
   return {
     version: 1,
     initialNodes: v.initialNodes,
@@ -346,6 +380,7 @@ function asRecord(value: unknown): GameRecord | null {
     // A record saved without positions was played on the circle layout.
     nodes: v.nodes ?? circleLayout(nodes, v.boardSize),
     firstPlayer: v.firstPlayer,
+    settleVersion,
     moves: v.moves,
     cursor: v.cursor,
   };
@@ -383,7 +418,26 @@ function isRecordMove(value: unknown, nodes: number, halfEdges: number): value i
     Array.isArray(m.polyline) &&
     m.polyline.length >= 2 &&
     m.polyline.every(isPair) &&
-    isPair(m.newNode)
+    isPair(m.newNode) &&
+    (m.segments === undefined || isSegments(m.segments))
+  );
+}
+
+function isSegments(value: unknown): value is Cubic[] {
+  const isPoint = (p: unknown): boolean =>
+    typeof p === "object" &&
+    p !== null &&
+    Number.isFinite((p as { x: unknown }).x) &&
+    Number.isFinite((p as { y: unknown }).y);
+  return (
+    Array.isArray(value) &&
+    value.length > 0 &&
+    value.every(
+      (c: unknown) =>
+        typeof c === "object" &&
+        c !== null &&
+        ["p0", "p1", "p2", "p3"].every((k) => isPoint((c as Record<string, unknown>)[k])),
+    )
   );
 }
 
@@ -413,8 +467,9 @@ function scaleOf(boardSize: number): number {
 }
 
 // Share link layout, little endian: version u8, the router version u8
-// from version 4 on, flags u8 (bit 0 says the AI opens, bit 1 says the
-// starting positions follow the header), initial
+// from version 4 on, the settle version u8 from version 5 on, flags u8
+// (bit 0 says the AI opens, bit 1 says the starting positions follow the
+// header), initial
 // nodes u16, board size u16, move count u16, cursor u16, the starting
 // positions as zigzag varint deltas in link quanta when they are not the
 // default layout, then per move: from and to as varints, a shape u8 and
@@ -440,6 +495,7 @@ export function encodeRecord(history: History): string {
       : null;
   out.u8(LINK_VERSION);
   out.u8(ROUTER_VERSION);
+  out.u8(history.settleVersion);
   out.u8((history.firstPlayer === "ai" ? FLAG_AI_FIRST : 0) | (layout ? FLAG_LAYOUT : 0));
   out.u16(history.initialNodes);
   out.u16(history.boardSize);
@@ -449,10 +505,16 @@ export function encodeRecord(history: History): string {
     const point = deltaWriter(out, quantum);
     for (const [x, y] of layout) point({ x, y });
   }
+  // A settled game stores its splines on the link grid, so the cubics are
+  // exact and the thinned stroke, which is not, stays out of its links
+  // unless a move has nothing else.
+  const exact = history.settleVersion !== 0;
   for (const move of history.moves) {
     out.varint(move.fromNode);
     out.varint(move.toNode);
-    const shapes = [encodeFace(move, scale), encodeCubics(move, scale), encodeStroke(move, scale)];
+    const face = encodeFace(move, scale);
+    const cubics = encodeCubics(move, scale);
+    const shapes = [face, cubics, exact && (face || cubics) ? null : encodeStroke(move, scale)];
     const shortest = shapes.reduce((best, shape) =>
       shape && (!best || shape.length < best.length) ? shape : best,
     );
@@ -526,7 +588,9 @@ export function decodeRecord(payload: string): GameRecord | null {
   try {
     const version = reader.u8();
     if (!LINK_VERSIONS.includes(version)) return null;
-    if (version === LINK_VERSION && reader.u8() !== ROUTER_VERSION) throw new StaleLink();
+    if (version >= FACE_LINK_VERSION && reader.u8() !== ROUTER_VERSION) throw new StaleLink();
+    const settleVersion = version >= LINK_VERSION ? reader.u8() : 0;
+    if (settleVersion > SETTLE_VERSION) throw new StaleLink();
     const flags = reader.u8();
     const initialNodes = reader.u16();
     const boardSize = reader.u16();
@@ -551,7 +615,7 @@ export function decodeRecord(payload: string): GameRecord | null {
       const move =
         version === STROKE_LINK_VERSION
           ? readStrokeMove(reader)
-          : readCurveMove(reader, boardSize, version === LINK_VERSION);
+          : readCurveMove(reader, boardSize, version >= FACE_LINK_VERSION);
       if (!move) return null;
       moves.push(move);
     }
@@ -562,6 +626,7 @@ export function decodeRecord(payload: string): GameRecord | null {
       boardSize,
       nodes,
       firstPlayer: flags & FLAG_AI_FIRST ? "ai" : "human",
+      settleVersion,
       moves,
       cursor,
     });
@@ -592,8 +657,9 @@ function readCurveMove(reader: ByteReader, boardSize: number, faces: boolean): R
   const scale = scaleOf(boardSize);
   const point = deltaReader(reader, LINK_QUANTUM * scale);
   let polyline: Point[];
+  let segments: Cubic[] | undefined;
   if (shape === SHAPE_CUBICS) {
-    const segments: Cubic[] = [];
+    segments = [];
     let p0 = point();
     for (let i = 0; i < count; i++) {
       const cubic = { p0, p1: point(), p2: point(), p3: point() };
@@ -608,7 +674,12 @@ function readCurveMove(reader: ByteReader, boardSize: number, faces: boolean): R
   } else {
     return null;
   }
-  return toRecordMove({ fromNode: from, toNode: to, polyline, newNodePos: point() });
+  const newNodePos = point();
+  return toRecordMove(
+    segments
+      ? { fromNode: from, toNode: to, polyline, newNodePos, segments }
+      : { fromNode: from, toNode: to, polyline, newNodePos },
+  );
 }
 
 function readStrokeMove(reader: ByteReader): RecordMove | null {
@@ -693,6 +764,7 @@ export function classification(history: History): Classification | null {
     boardSize: history.boardSize,
     firstPlayer: history.firstPlayer,
     nodes: history.nodes?.map(([x, y]) => ({ x, y })),
+    settleVersion: history.settleVersion,
     moves: history.moves.map(toMove),
     known: history.moves.map((move) => move.topology),
   };
@@ -705,6 +777,7 @@ export function rehearsal(history: History): Rehearsal | null {
   if (!record) return null;
   return {
     routerVersion: ROUTER_VERSION,
+    settleVersion: record.settleVersion,
     initialNodes: record.initialNodes,
     boardSize: record.boardSize,
     firstPlayer: record.firstPlayer,
@@ -736,16 +809,24 @@ export interface LinkEngine {
 // is replayed as decoded and any topology move the replay refuses,
 // or lands its node more than DRIFT_TOLERANCE from the recorded
 // one, both nodes rounded as a link carries them, goes as geometry
-// until the whole link applies and every routed node holds. A
-// refused drawn move is blamed on the latest topology move before
-// it, whose redraw shifted the board under it; when none precedes
-// it the index comes back so the sharer can be told. A history the
-// engine refuses to classify, as one left with moves past a
-// stopped restore, keeps the face moves the AI reported.
+// until the whole link applies and every routed node holds. The
+// replay settles as the visitor's will, so when `settled`, the
+// board on screen, is given and a node of the rehearsed board sits
+// more than DRIFT_TOLERANCE from it, the latest topology move goes
+// as geometry too, and when none is left `mismatch` says the
+// visitor's board may differ. A share from a review position gives
+// no board, since the rehearsal replays the whole record, and runs
+// the record check only. A refused drawn move is blamed on the latest
+// topology move before it, whose redraw shifted the board under
+// it; when none precedes it the index comes back so the sharer can
+// be told. A history the engine refuses to classify, as one left
+// with moves past a stopped restore, keeps the face moves the AI
+// reported.
 export async function prepareLink(
   source: History,
   engine: LinkEngine,
-): Promise<{ history: History; refusedAt?: number }> {
+  settled?: Point[],
+): Promise<{ history: History; refusedAt?: number; mismatch?: boolean }> {
   const history = source.clone();
   const plan = classification(history);
   if (plan) {
@@ -766,7 +847,8 @@ export async function prepareLink(
   for (;;) {
     const link = rehearsal(history);
     if (!link) return { history };
-    const { refused, nodes } = await engine.rehearse(link);
+    const rehearsed = await engine.rehearse(link);
+    const { refused, nodes } = rehearsed;
     if (refused === undefined) {
       let drifted = false;
       nodes.forEach((node, i) => {
@@ -775,7 +857,15 @@ export async function prepareLink(
           drifted = demote(history, i) || drifted;
         }
       });
-      if (!drifted) return { history };
+      if (drifted) continue;
+      const apart =
+        settled !== undefined &&
+        (settled.length !== rehearsed.settled.length ||
+          settled.some((node, i) => distance(node, rehearsed.settled[i]!) > tolerance));
+      if (!apart) return { history };
+      let latest = history.moves.length - 1;
+      while (latest >= 0 && !demote(history, latest)) latest--;
+      if (latest < 0) return { history, mismatch: true };
       continue;
     }
     if (demote(history, refused)) continue;
@@ -839,7 +929,7 @@ function distanceToSegment(p: Point, a: Point, b: Point): number {
 // router put it, within the drift the share allowed.
 export function sameGame(a: GameRecord, b: GameRecord): boolean {
   if (a.initialNodes !== b.initialNodes || a.boardSize !== b.boardSize) return false;
-  if (a.firstPlayer !== b.firstPlayer) return false;
+  if (a.firstPlayer !== b.firstPlayer || a.settleVersion !== b.settleVersion) return false;
   const scale = scaleOf(a.boardSize);
   const quantum = LINK_QUANTUM * scale;
   if (!sameLayout(a.nodes, b.nodes, a.initialNodes, a.boardSize, quantum)) return false;

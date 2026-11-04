@@ -9,6 +9,9 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 const RECORD_NODES: [usize; 3] = [4, 5, 6];
+/// Node count of the self-play game that measures how long the board
+/// stays drawable for the human side.
+const SELF_PLAY_NODES: usize = 9;
 const RECORD_BOARDS: [usize; 1] = [1000];
 
 fn fixtures_dir() -> PathBuf {
@@ -51,8 +54,8 @@ fn print_table(name: &str, fixture: &Fixture, timings: &[MoveTiming]) -> [f64; P
         fixture.moves.len()
     );
     print!(
-        "{:>4} {:>6} {:>5} {:>6} {:>7}",
-        "move", "player", "over", "failed", "undrawn"
+        "{:>4} {:>6} {:>5} {:>6} {:>7} {:>7} {:>7}",
+        "move", "player", "over", "failed", "undrawn", "clear", "settled"
     );
     for phase in PHASES {
         print!(" {phase:>14}");
@@ -65,9 +68,14 @@ fn print_table(name: &str, fixture: &Fixture, timings: &[MoveTiming]) -> [f64; P
             (false, replay::Player::Human) => "human",
             (false, replay::Player::AI) => "ai",
         };
+        let (before, after) = t
+            .clearance
+            .map_or((String::new(), String::new()), |(b, a)| {
+                (format!("{b:.2}"), format!("{a:.2}"))
+            });
         print!(
-            "{:>4} {:>6} {:>5} {:>6} {:>7}",
-            t.index, player, t.game_over, t.routing_failures, t.undrawn
+            "{:>4} {:>6} {:>5} {:>6} {:>7} {:>7} {:>7}",
+            t.index, player, t.game_over, t.routing_failures, t.undrawn, before, after
         );
         for d in t.phases.as_array() {
             print!(" {:>14.2}", ms(d));
@@ -78,8 +86,8 @@ fn print_table(name: &str, fixture: &Fixture, timings: &[MoveTiming]) -> [f64; P
     let failed: usize = timings.iter().map(|t| t.routing_failures).sum();
     let undrawn = timings.iter().filter(|t| t.undrawn).count();
     print!(
-        "{:>4} {:>6} {:>5} {:>6} {:>7}",
-        "max", "", "", failed, undrawn
+        "{:>4} {:>6} {:>5} {:>6} {:>7} {:>7} {:>7}",
+        "max", "", "", failed, undrawn, "", ""
     );
     for v in max {
         print!(" {v:>14.2}");
@@ -134,6 +142,45 @@ fn run_bench() -> Result<bool, String> {
         "\nnimbers: {forms} forms stored, {hits} hits, {misses} misses ({rate:.1}% hit rate), \
          largest region solved {nodes} nodes with {lives} lives"
     );
+
+    let mut settle_paths: Vec<PathBuf> = std::fs::read_dir(fixtures_dir().join("settle"))
+        .map_err(|e| format!("fixtures/settle: {e}"))?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|p| p.extension().is_some_and(|e| e == "json"))
+        .collect();
+    settle_paths.sort();
+    for path in &settle_paths {
+        let name = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("fixture");
+        let fixture = replay::load(path)?;
+        let times = replay::settle_times(&fixture);
+        let peak = times.iter().copied().fold(0.0, f64::max);
+        println!(
+            "\nsettle only, {name}: {} nodes, {} moves, peak {peak:.2} ms",
+            fixture.initial_nodes,
+            times.len()
+        );
+        let budget = budgets
+            .get("settle_game")
+            .ok_or("fixtures/budgets.json: no budget for settle_game")?;
+        if peak > *budget {
+            failures.push(format!(
+                "{name}: settle {peak:.2} ms over budget {budget:.2} ms"
+            ));
+        }
+    }
+
+    for settled in [false, true] {
+        let (moves, stop) = replay::self_play(SELF_PLAY_NODES, 1000, settled);
+        println!(
+            "\n{SELF_PLAY_NODES} node self-play {} settling: {} moves, stopped at {stop:?}",
+            if settled { "with" } else { "without" },
+            moves.len()
+        );
+    }
 
     let (positions, took) = sprouts::search_rate();
     println!(

@@ -8,6 +8,7 @@ import {
   drawBetween,
   expectDotAt,
   expectNodeDrawnAt,
+  expectNodeDrawnNear,
   failNext,
   findDot,
   fit,
@@ -88,7 +89,7 @@ test("a stroke locks and the dot appears with no further click", async ({ page }
 test("a click away from the dot commits the move and the AI replies", async ({ page }) => {
   const mid = await alongFirstChord(page, 0.5);
   await playExchange(page);
-  await expectNodeDrawnAt(page, mid);
+  await expectNodeDrawnNear(page, mid, 4);
   await expect(page.locator("#cancelBtn")).toBeHidden();
   await expect(page.locator("#undoBtn")).toBeEnabled();
 });
@@ -98,7 +99,7 @@ test("Enter commits the move", async ({ page }) => {
   await expectDotAt(page, mid);
   await page.keyboard.press("Enter");
   await expect(page.locator("#status")).toHaveText("Your turn!", { timeout: 60_000 });
-  await expectNodeDrawnAt(page, mid);
+  await expectNodeDrawnNear(page, mid, 4);
 });
 
 test("dragging the dot moves the committed node", async ({ page }) => {
@@ -117,7 +118,7 @@ test("dragging the dot moves the committed node", async ({ page }) => {
 
   await clickAway(page);
   await expect(page.locator("#status")).toHaveText("Your turn!", { timeout: 60_000 });
-  await expectNodeDrawnAt(page, target);
+  await expectNodeDrawnNear(page, target, 4);
   expect(await nodeSamplesAround(page, mid)).toBeLessThan(6);
 });
 
@@ -191,7 +192,7 @@ test("a touch drag slides the dot under the loupe and a tap elsewhere places it 
 
   await tapAway(page);
   await expect(page.locator("#status")).toHaveText("Your turn!", { timeout: 60_000 });
-  await expectNodeDrawnAt(page, target);
+  await expectNodeDrawnNear(page, target, 4);
 });
 
 test("a pinch during the drag cancels it and leaves the dot where it was", async ({ page }) => {
@@ -238,7 +239,7 @@ test("a pinch during the drag cancels it and leaves the dot where it was", async
 
   await tapAway(page);
   await expect(page.locator("#status")).toHaveText("Your turn!", { timeout: 60_000 });
-  await expectNodeDrawnAt(page, moved);
+  await expectNodeDrawnNear(page, moved, 4, t);
 });
 
 test("Escape while the fit is pending returns to idle", async ({ page }) => {

@@ -5,7 +5,7 @@ import {
   type BrowserContextOptions,
   type Page,
 } from "@playwright/test";
-import { decodeRecord, hasStroke } from "../../web/history";
+import { decodeRecord, DRIFT_TOLERANCE, hasStroke } from "../../web/history";
 import type { Fixture } from "../../web/record";
 
 // Every step here replays moves through the engine, which on the 1000
@@ -13,11 +13,14 @@ import type { Fixture } from "../../web/record";
 const expect = baseExpect.configure({ timeout: 20_000 });
 import {
   awaitReply,
+  boardNodes,
+  boardSettled,
   clickAway,
   expectNodeDrawnAt,
   expectSameStrokes,
   frameOf,
   HASH_PREFIX,
+  interceptWorkerMessages,
   nodeOnScreen,
   openBoard,
   PLACING_HINT,
@@ -138,16 +141,28 @@ test("jumping to a board where the AI is to move enters review and keeps the tai
   await expect(current(page)).toHaveText(/^2\. AI/);
 });
 
+// The exchange travels as topology, so the visitor's router redraws the
+// lines and settles from there; the share is rehearsed until that settled
+// board sits within DRIFT_TOLERANCE of the sharer's, node for node, in
+// units of a 1000 board.
+const SHARED_BOARD_DRIFT_UNITS = DRIFT_TOLERANCE;
+
 test("a share link reopens the game in review and steps through it", async ({ page, browser }) => {
   await openBoard(page);
   await playExchange(page);
+  await boardSettled(page);
+  const source = await boardNodes(page);
   const before = await strokeCells(page);
   const { url, payload } = await share(page, "share-payload-chars");
   expect(payload).toBeLessThan(EXCHANGE_LINK_BUDGET);
+  const shared = decodeRecord(url.slice(url.indexOf(HASH_PREFIX) + HASH_PREFIX.length));
+  expect(shared?.settleVersion).toBeGreaterThan(0);
+  expect(shared?.moves.map(hasStroke)).toEqual([false, false]);
   await shot(page, "history-shared-source");
 
   const visitor = await browser.newContext(visitorOptions());
   const other = await visitor.newPage();
+  await other.addInitScript(interceptWorkerMessages);
   await other.goto(url);
   await expect(other.locator("#status")).toHaveText(/^Reviewing: move 2 of 2/, {
     timeout: 20_000,
@@ -159,6 +174,17 @@ test("a share link reopens the game in review and steps through it", async ({ pa
   await shot(other, "history-shared-visitor");
 
   expectSameStrokes(before, await strokeCells(other));
+  const linked = await boardNodes(other);
+  expect(linked.size).toBe(source.size);
+  let offset = 0;
+  for (const [id, at] of source) {
+    const there = linked.get(id)!;
+    offset = Math.max(offset, Math.hypot(there.x - at.x, there.y - at.y));
+  }
+  test
+    .info()
+    .annotations.push({ type: "shared-node-offset-units", description: offset.toFixed(1) });
+  expect(offset).toBeLessThanOrEqual((SHARED_BOARD_DRIFT_UNITS * shared!.boardSize) / 1000);
 
   await other.locator("#backBtn").click();
   await expect(current(other)).toHaveText("1. You, joins two nodes");
@@ -280,6 +306,7 @@ test("a version 1 link of the saved game reopens the live game", async ({ page }
 });
 
 test("a version 2 link opens on the circle with both moves replayed", async ({ page }) => {
+  await page.addInitScript(interceptWorkerMessages);
   await page.goto("/" + VERSION_2_LINK);
   await expect(page.locator("#status")).toHaveText(/^Reviewing: move 2 of 2/, {
     timeout: 20_000,

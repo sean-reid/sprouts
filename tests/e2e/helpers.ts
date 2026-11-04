@@ -1,4 +1,5 @@
 import { expect, test, type CDPSession, type Page } from "@playwright/test";
+import type { Cubic } from "../../pkg/sprouts";
 import { openingLayout } from "../../web/layout";
 
 export interface Client {
@@ -79,9 +80,95 @@ export function nodeAt(frame: Frame, t: Transform, index: number, count = 4): Cl
   return toClient(frame, t, nodeWorld(index, count, frame.board));
 }
 
-export async function nodeOnScreen(page: Page, index: number, count: number): Promise<Client> {
+// How far the dot a move was committed with may sit from the pointer that
+// dropped it, in CSS px: the dot snaps to the curve.
+const DROP_PX = 10;
+
+interface BoardNode {
+  id: number;
+  x: number;
+  y: number;
+}
+
+interface BoardLine {
+  id: number;
+  fromNode: number;
+  toNode: number;
+  segments: Cubic[];
+}
+
+// Lines of the last board the engine reported, in move order.
+export async function boardLines(page: Page): Promise<BoardLine[]> {
+  return page.evaluate(
+    () => (window as unknown as { latestLines?: BoardLine[] }).latestLines ?? [],
+  );
+}
+
+// The point a share `t` of the way along line `index` of the engine's last
+// board, in client px at the fitted view, with the unit tangent there.
+export async function alongLine(
+  page: Page,
+  index: number,
+  t: number,
+): Promise<{ at: Client; tangent: Client }> {
+  const line = (await boardLines(page))[index];
+  if (!line) throw new Error(`the board has no line ${index}`);
+  const points: { x: number; y: number }[] = [];
+  for (const c of line.segments) {
+    for (let i = 0; i <= 32; i++) {
+      const s = i / 32;
+      const u = 1 - s;
+      points.push({
+        x:
+          u * u * u * c.p0.x + 3 * u * u * s * c.p1.x + 3 * u * s * s * c.p2.x + s * s * s * c.p3.x,
+        y:
+          u * u * u * c.p0.y + 3 * u * u * s * c.p1.y + 3 * u * s * s * c.p2.y + s * s * s * c.p3.y,
+      });
+    }
+  }
+  const arcs = [0];
+  for (let i = 1; i < points.length; i++) {
+    arcs.push(
+      arcs[i - 1]! + Math.hypot(points[i]!.x - points[i - 1]!.x, points[i]!.y - points[i - 1]!.y),
+    );
+  }
+  const want = t * arcs[arcs.length - 1]!;
+  let k = 1;
+  while (k < arcs.length - 1 && arcs[k]! < want) k++;
   const frame = await frameOf(page);
-  return nodeAt(frame, fit(frame), index, count);
+  const f = fit(frame);
+  const at = toClient(frame, f, points[k]!);
+  const before = toClient(frame, f, points[k - 1]!);
+  const length = Math.hypot(at.x - before.x, at.y - before.y) || 1;
+  return { at, tangent: { x: (at.x - before.x) / length, y: (at.y - before.y) / length } };
+}
+
+// Nodes of the last board the engine reported, by id, in world units, as
+// the worker intercept recorded them.
+export async function boardNodes(page: Page): Promise<Map<number, Client>> {
+  const nodes = await page.evaluate(
+    () => (window as unknown as { latestNodes?: BoardNode[] }).latestNodes ?? [],
+  );
+  return new Map(nodes.map((node) => [node.id, { x: node.x, y: node.y }]));
+}
+
+// The canvas takes no stroke while the board eases to its settled shape.
+export async function boardSettled(page: Page): Promise<void> {
+  await expect(page.locator("#canvas")).not.toHaveClass(/settling/);
+}
+
+// The curve of the last fit reply the worker sent.
+export async function latestCurve(page: Page): Promise<Cubic[]> {
+  return page.evaluate(() => (window as unknown as { latestCurve?: Cubic[] }).latestCurve ?? []);
+}
+
+// Where a starting node is drawn: where the engine's last board puts it,
+// else its layout spot, at the fitted view, once the board has settled.
+export async function nodeOnScreen(page: Page, index: number, count: number): Promise<Client> {
+  await boardSettled(page);
+  const frame = await frameOf(page);
+  const settled = (await boardNodes(page)).get(index);
+  return toClient(frame, fit(frame), settled ?? nodeWorld(index, count, frame.board));
 }
 
 // Counts node-disc samples, active blue or spent grey, on a ring 5 px out
@@ -116,6 +203,27 @@ export async function expectNodeDrawnAt(page: Page, at: Client): Promise<void> {
   await expect.poll(() => nodeSamplesAround(page, at)).toBeGreaterThanOrEqual(6);
 }
 
+// The record keeps node `id` where the move dropped it, at `at`, and the
+// board draws it where the settle put it, under the fitted view unless the
+// test's view is given.
+export async function expectNodeDrawnNear(
+  page: Page,
+  at: Client,
+  id: number,
+  view?: Transform,
+): Promise<void> {
+  const record = await savedRecord(page);
+  const frame = await frameOf(page);
+  const t = view ?? fit(frame);
+  const made = record.moves[id - (record.nodes?.length ?? 0)];
+  expect(made).toBeDefined();
+  const dropped = toClient(frame, t, { x: made!.newNode[0], y: made!.newNode[1] });
+  expect(Math.hypot(dropped.x - at.x, dropped.y - at.y)).toBeLessThanOrEqual(DROP_PX);
+  const settled = (await boardNodes(page)).get(id);
+  expect(settled).toBeDefined();
+  await expectNodeDrawnAt(page, toClient(frame, t, settled!));
+}
+
 export const PLACING_HINT = /Drag the dot/;
 
 // Sets the starting node count and starts a game with it. The value goes
@@ -135,11 +243,17 @@ export async function recordedNodeOnScreen(
   index: number,
 ): Promise<Client> {
   const frame = await frameOf(page);
-  const [x, y] = record.nodes![index]!;
-  const scale = Math.min(frame.width, frame.height) / record.boardSize;
+  const settled = (await boardNodes(page)).get(index);
+  const [x, y] = settled ? [settled.x, settled.y] : record.nodes![index]!;
+  return recordPointOnScreen(frame, record.boardSize, x, y);
+}
+
+// A world point of a record at the fitted view of its board.
+function recordPointOnScreen(frame: Frame, boardSize: number, x: number, y: number): Client {
+  const scale = Math.min(frame.width, frame.height) / boardSize;
   return {
-    x: frame.left + (frame.width - record.boardSize * scale) / 2 + x * scale,
-    y: frame.top + (frame.height - record.boardSize * scale) / 2 + y * scale,
+    x: frame.left + (frame.width - boardSize * scale) / 2 + x * scale,
+    y: frame.top + (frame.height - boardSize * scale) / 2 + y * scale,
   };
 }
 
@@ -295,12 +409,54 @@ export async function plainWheel(page: Page, deltaY: number): Promise<number> {
 // worker back, so the worker answers a newer request first, or fail one
 // with an error reply the worker never saw.
 export function interceptWorkerMessages(): void {
+  const hooks = window as unknown as {
+    holdNext: typeof holdNext;
+    failNext: typeof failNext;
+    latestNodes?: BoardNode[];
+    latestLines?: BoardLine[];
+    latestCurve?: Cubic[];
+    intercepted?: boolean;
+  };
+  if (hooks.intercepted) return;
+  hooks.intercepted = true;
   const post = Worker.prototype.postMessage;
   let hold: { method: string; ms: number } | null = null;
   let fail: { method: string; error: string } | null = null;
-  const hooks = window as unknown as { holdNext: typeof holdNext; failNext: typeof failNext };
   hooks.holdNext = holdNext;
   hooks.failNext = failNext;
+  // Every reply that carries a board leaves its nodes on the window, so a
+  // test reads node positions from the engine rather than the layout; a
+  // fit reply leaves its curve.
+  interface Reported {
+    nodes?: { id: number; position: { x: number; y: number } }[];
+    lines?: BoardLine[];
+    snapshot?: Reported;
+    segments?: Cubic[];
+    mov?: unknown;
+  }
+  const RealWorker = Worker;
+  window.Worker = class extends RealWorker {
+    constructor(...args: ConstructorParameters<typeof Worker>) {
+      super(...args);
+      this.addEventListener("message", (event: MessageEvent<{ result?: Reported }>) => {
+        const result = event.data?.result;
+        const nodes = result?.nodes ?? result?.snapshot?.nodes;
+        if (nodes) {
+          hooks.latestNodes = nodes.map((n) => ({ id: n.id, x: n.position.x, y: n.position.y }));
+        }
+        const lines = result?.lines ?? result?.snapshot?.lines;
+        if (lines) {
+          hooks.latestLines = lines.map((l) => ({
+            id: l.id,
+            fromNode: l.fromNode,
+            toNode: l.toNode,
+            segments: l.segments,
+          }));
+        }
+        if (result?.segments && !result.mov) hooks.latestCurve = result.segments;
+      });
+    }
+  };
   function holdNext(method: string, ms: number): void {
     hold = { method, ms };
   }
@@ -522,6 +678,7 @@ export async function shot(page: Page, name: string): Promise<Buffer> {
 }
 
 export async function openBoard(page: Page, path = "/"): Promise<void> {
+  await page.addInitScript(interceptWorkerMessages);
   await page.goto(path);
   // Fetching and compiling the wasm takes a few seconds on a shared runner.
   await expect(page.locator("#status")).toHaveText("Draw a line between two nodes", {
@@ -652,16 +809,16 @@ export interface NodeRecord {
   moves: { from: number; to: number; newNode: [number, number] }[];
 }
 
-// Every node of a record on screen at the fitted view, by id: the starting
-// ones from the layout, then one per move where it put its node.
+// Every node of a record on screen, by id: where the engine's last board
+// puts it, else the starting layout and then each move's node.
 export async function recordNodesOnScreen(page: Page, record: NodeRecord): Promise<Client[]> {
   const frame = await frameOf(page);
-  const scale = Math.min(frame.width, frame.height) / record.boardSize;
+  const settled = await boardNodes(page);
   const world = [...(record.nodes ?? []), ...record.moves.map((m) => m.newNode)];
-  return world.map(([x, y]) => ({
-    x: frame.left + (frame.width - record.boardSize * scale) / 2 + x * scale,
-    y: frame.top + (frame.height - record.boardSize * scale) / 2 + y * scale,
-  }));
+  return world.map(([x, y], id) => {
+    const at = settled.get(id);
+    return recordPointOnScreen(frame, record.boardSize, at?.x ?? x, at?.y ?? y);
+  });
 }
 
 export function savedRecord(page: Page): Promise<NodeRecord> {

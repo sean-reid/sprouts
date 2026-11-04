@@ -3,5 +3,7 @@
   "enumeration": 1,
   "routing": 400,
   "search": 1000,
-  "validation": 1
+  "validation": 1,
+  "settle": 80,
+  "settle_game": 800
 }

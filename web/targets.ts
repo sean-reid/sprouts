@@ -86,9 +86,10 @@ export class NodeTargets {
     if (lostFocus) this.fallback.focus({ preventScroll: true });
   }
 
-  // Puts every button over its node at the current view.
+  // Puts every button over its node as drawn at the current view, which
+  // while a settle animates is the interpolated board.
   place(): void {
-    for (const node of this.state.nodes) {
+    for (const node of (this.state.settling ?? this.state).nodes) {
       const button = this.buttons.get(node.id);
       if (!button) continue;
       const at = this.view.toScreen(node.position);

@@ -1,6 +1,7 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { expect, test, type Page } from "@playwright/test";
 import {
+  boardSettled,
   clickAway,
   drawBetween,
   expectDotAt,
@@ -130,6 +131,7 @@ test("plus on an untouched board re-lays it at once and arrows step the field", 
 
 test("once a move is played the count waits on the start button", async ({ page }) => {
   await playExchange(page);
+  await boardSettled(page);
   const before = await strokeCells(page);
   const canvas = await page.locator("#canvas").boundingBox();
   await page.locator("#moreBtn").click();

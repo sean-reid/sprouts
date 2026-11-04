@@ -1,9 +1,10 @@
 import { expect, test, type Page } from "@playwright/test";
 import {
+  alongLine,
+  boardNodes,
   expectNodeDrawnAt,
-  fit,
   frameOf,
-  nodeAt,
+  nodeOnScreen,
   openBoard,
   playExchange,
   ringPixels,
@@ -107,15 +108,11 @@ async function clearSpot(page: Page, frame: Frame): Promise<Client> {
   throw new Error("no clear spot on the board");
 }
 
-// A point 10 px inside the first chord, three tenths of the way along it.
-function besideFirstChord(frame: Frame): Client {
-  const t = fit(frame);
-  const a = nodeAt(frame, t, 0);
-  const b = nodeAt(frame, t, 1);
-  const along = { x: a.x + (b.x - a.x) * 0.3, y: a.y + (b.y - a.y) * 0.3 };
-  const length = Math.hypot(b.x - a.x, b.y - a.y);
-  const inward = { x: -(b.y - a.y) / length, y: (b.x - a.x) / length };
-  return { x: along.x + inward.x * 10, y: along.y + inward.y * 10 };
+// A point 10 px beside the first line, three tenths of the way along it,
+// on the board as the engine settled it.
+async function besideFirstChord(page: Page): Promise<Client> {
+  const { at, tangent } = await alongLine(page, 0, 0.3);
+  return { x: at.x - tangent.y * 10, y: at.y + tangent.x * 10 };
 }
 
 test.beforeEach(async ({ page }) => {
@@ -128,8 +125,8 @@ test("a touch stroke near an existing line shows the loupe and clears away from 
 }) => {
   test.skip(!test.info().project.use.hasTouch, "touch only");
   const frame = await frameOf(page);
-  const start = nodeAt(frame, fit(frame), 3);
-  const near = besideFirstChord(frame);
+  const start = await nodeOnScreen(page, 3, 4);
+  const near = await besideFirstChord(page);
   const clear = await clearSpot(page, frame);
   const cdp = await page.context().newCDPSession(page);
 
@@ -156,9 +153,8 @@ test("a touch stroke near an existing line shows the loupe and clears away from 
 });
 
 test("a mouse stroke along the same path shows no loupe", async ({ page }) => {
-  const frame = await frameOf(page);
-  const start = nodeAt(frame, fit(frame), 3);
-  const near = besideFirstChord(frame);
+  const start = await nodeOnScreen(page, 3, 4);
+  const near = await besideFirstChord(page);
   await page.mouse.move(start.x, start.y);
   await page.mouse.down();
   await page.mouse.move(near.x, near.y, { steps: 20 });
@@ -197,9 +193,9 @@ test("a stroke from a node with a line opens no lens until the finger is clear o
 }) => {
   test.skip(!test.info().project.use.hasTouch, "touch only");
   const frame = await frameOf(page);
-  const start = nodeAt(frame, fit(frame), 0);
+  const start = await nodeOnScreen(page, 0, 4);
   const out = (px: number): Client => ({ x: start.x + px, y: start.y });
-  const near = besideFirstChord(frame);
+  const near = await besideFirstChord(page);
   const cdp = await page.context().newCDPSession(page);
 
   await cdp.send("Input.dispatchTouchEvent", {
@@ -224,14 +220,17 @@ test("a stroke from a node with a line opens no lens until the finger is clear o
 test("the lens flips below the finger near the top edge", async ({ page }) => {
   test.skip(!test.info().project.use.hasTouch, "touch only");
   const frame = await frameOf(page);
-  const t = fit(frame);
-  // Node 2 is the highest on the board and sits within the lens's lift
-  // and radius of the top edge at the fitted view.
-  const top = nodeAt(frame, t, 2);
+  // The highest node on the settled board sits within the lens's lift and
+  // radius of the top edge at the fitted view.
+  const nodes = await boardNodes(page);
+  const highest = [...nodes.entries()].reduce((best, entry) =>
+    entry[1].y < best[1].y ? entry : best,
+  );
+  const top = await nodeOnScreen(page, highest[0], nodes.size);
   await expectNodeDrawnAt(page, top);
   const cdp = await page.context().newCDPSession(page);
 
-  const start = nodeAt(frame, t, 0);
+  const start = await nodeOnScreen(page, highest[0] === 0 ? 3 : 0, nodes.size);
   const near = { x: top.x, y: top.y - 12 };
   const lens = lensCentre(frame, near);
   expect(lens.y).toBeGreaterThan(near.y);

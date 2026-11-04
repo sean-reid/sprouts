@@ -40,7 +40,8 @@ describe("the wasm router", () => {
         known: fixture.moves.map(() => undefined),
       };
     });
-    const game = new SproutsGame(4, 1000, "human");
+    // Recorded positions replay with no settle.
+    const game = new SproutsGame(4, 1000, "human", undefined, 0);
     expect(game.hashRoutes({ plans })).toBe(golden);
   });
 });

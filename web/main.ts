@@ -40,6 +40,8 @@ import {
   type BoardLocation,
   type Cubic,
   type GameState,
+  type Geometry,
+  type Line,
   type Node,
   type PlacementDot,
   type Point,
@@ -53,6 +55,9 @@ function minStrokeLength(boardSize: number): number {
   return 20 * (boardSize / 1000);
 }
 const AI_ANIMATION_MS = 500;
+// The board eases from the last snapshot to the settled one in this long,
+// with canvas input held until it lands.
+const SETTLE_MS = 500;
 const FLASH_MS = 600;
 // How long the board points out the move a seek landed on.
 const HIGHLIGHT_MS = 2000;
@@ -133,6 +138,8 @@ let gameEpoch = 0;
 let submitting = false;
 let seeking = false;
 let booted = false;
+// Bumped per settle animation so a frame from an older one stops.
+let settleRun = 0;
 // Settles once the locked stroke's dot is shown or the stroke is abandoned.
 let suggestion: Promise<void> = Promise.resolve();
 // Settles once the last drag of the dot has been answered.
@@ -374,7 +381,7 @@ function handleStart(world: Point, kind: PointerKind): boolean {
     if (state.gameOver && timeline.atEnd) openDialog();
     return false;
   }
-  if (state.mode !== "idle" || state.thinking || state.gameOver || seeking) return false;
+  if (busy() || state.settling !== null || state.gameOver) return false;
   const node = findNodeAt(world, kind === "touch" ? 30 : 15);
   if (!node || !state.activeNodes.has(node.id)) return false;
   keys.reset();
@@ -549,6 +556,9 @@ async function executeMove(): Promise<void> {
     polyline: state.lockedPath,
     newNodePos: state.placementDot.position,
   };
+  const drawn: Drawn | undefined = state.lockedSegments
+    ? { segments: state.lockedSegments, newNodePos: move.newNodePos }
+    : undefined;
   cancelBtn.hidden = true;
 
   const epoch = gameEpoch;
@@ -567,15 +577,24 @@ async function executeMove(): Promise<void> {
     return;
   }
 
-  recordMove(move, outcome);
+  recordMove(outcome, drawn);
   clearStroke();
   if (state.gameOver) showGameOver();
   else startAITurn();
 }
 
-function recordMove(move: Move, outcome: Applied, topology?: FaceMove): void {
-  timeline.push(move, topology, outcome.cutOff);
-  applySnapshot(outcome.snapshot);
+// The curve and node a move was drawn with, where the settle animation
+// starts from for the line the move added.
+interface Drawn {
+  segments: Cubic[];
+  newNodePos: Point;
+}
+
+// Records the move as the engine applied it, on its grid with the spline
+// it committed as, so a replay sends the engine its own input.
+function recordMove(outcome: Applied, drawn?: Drawn, topology?: FaceMove): void {
+  timeline.push(outcome.mov, topology, outcome.cutOff);
+  applySnapshot(outcome.snapshot, drawn);
   persist();
 }
 
@@ -583,15 +602,25 @@ function recordMove(move: Move, outcome: Applied, topology?: FaceMove): void {
 // an idle board or with a routed candidate up and nothing else pending.
 function canPlay(): boolean {
   const free = state.mode === "idle" || (state.mode === "placing" && state.routed);
-  const settled = !state.thinking && !submitting && !seeking;
+  const settled = !state.thinking && !submitting && !seeking && state.settling === null;
   return free && settled && !state.gameOver && !state.reviewing && state.currentPlayer === "human";
 }
 
 // A board that changes under a stroke or a candidate takes it down with it.
-function applySnapshot(snapshot: Snapshot): void {
+function applySnapshot(snapshot: Snapshot, drawn?: Drawn): void {
   timeline.adopt(snapshot.lines);
+  // A snapshot that lands mid-animation eases on from what is on screen.
+  const shown = state.settling ?? state;
+  const before: Geometry = { nodes: [...shown.nodes], lines: [...shown.lines] };
+  const added = snapshot.lines.at(-1);
+  if (drawn && added && !before.lines.some((line) => line.id === added.id)) {
+    before.lines.push({ ...added, segments: drawn.segments, newNodePos: drawn.newNodePos });
+    const node = snapshot.nodes.at(-1);
+    if (node) before.nodes.push({ ...node, position: drawn.newNodePos });
+  }
   state.nodes = snapshot.nodes;
   state.lines = snapshot.lines;
+  animateSettle(before);
   state.currentPlayer = snapshot.currentPlayer;
   state.activeNodes = new Set(snapshot.activeNodes);
   state.gameOver = snapshot.gameOver;
@@ -600,6 +629,96 @@ function applySnapshot(snapshot: Snapshot): void {
   targets.sync();
   updateTurn();
   updateControls();
+}
+
+function lerp(a: Point, b: Point, t: number): Point {
+  return { x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t };
+}
+
+function samePoint(a: Point, b: Point): boolean {
+  return a.x === b.x && a.y === b.y;
+}
+
+function sameCubic(a: Cubic, b: Cubic): boolean {
+  return samePoint(a.p1, b.p1) && samePoint(a.p2, b.p2) && samePoint(a.p3, b.p3);
+}
+
+// Eases the nodes and lines the last snapshot already had from where they
+// were to where the settle put them; new ones appear in place. Nothing
+// animates when nothing moved or motion is reduced.
+function animateSettle(before: Geometry): void {
+  const nodes = new Map(before.nodes.map((node) => [node.id, node]));
+  const lines = new Map(
+    before.lines
+      .filter((line) => state.lines.some((now) => now.id === line.id))
+      .map((line) => [line.id, line]),
+  );
+  const moved =
+    state.nodes.some((node) => {
+      const was = nodes.get(node.id);
+      return was !== undefined && !samePoint(was.position, node.position);
+    }) ||
+    state.lines.some((line) => {
+      const was = lines.get(line.id);
+      return (
+        was !== undefined &&
+        was.segments.length === line.segments.length &&
+        was.segments.some((c, i) => !sameCubic(c, line.segments[i]!))
+      );
+    });
+  settleRun++;
+  if (!moved || state.reducedMotion) {
+    state.settling = null;
+    canvas.classList.remove("settling");
+    return;
+  }
+  const run = settleRun;
+  const epoch = gameEpoch;
+  const target = state.nodes;
+  const started = performance.now();
+  // The board part way from the previous one to the settled one.
+  const shown = (eased: number): Geometry => ({
+    nodes: state.nodes.map((node) => {
+      const was = nodes.get(node.id);
+      return was ? { ...node, position: lerp(was.position, node.position, eased) } : node;
+    }),
+    lines: state.lines.map((line): Line => {
+      const was = lines.get(line.id);
+      if (!was || was.segments.length !== line.segments.length) return line;
+      return {
+        ...line,
+        newNodePos: lerp(was.newNodePos, line.newNodePos, eased),
+        segments: line.segments.map((c, i) => {
+          const from = was.segments[i]!;
+          return {
+            p0: lerp(from.p0, c.p0, eased),
+            p1: lerp(from.p1, c.p1, eased),
+            p2: lerp(from.p2, c.p2, eased),
+            p3: lerp(from.p3, c.p3, eased),
+          };
+        }),
+      };
+    }),
+  });
+  state.settling = shown(0);
+  canvas.classList.add("settling");
+  const frame = (now: number): void => {
+    if (run !== settleRun) return;
+    if (epoch !== gameEpoch || state.nodes !== target) {
+      state.settling = null;
+      canvas.classList.remove("settling");
+      return;
+    }
+    const t = Math.min(1, (now - started) / SETTLE_MS);
+    state.settling = shown(1 - (1 - t) * (1 - t));
+    if (t < 1) requestAnimationFrame(frame);
+    else {
+      state.settling = null;
+      canvas.classList.remove("settling");
+    }
+    targets.place();
+  };
+  requestAnimationFrame(frame);
 }
 
 async function refreshBoard(): Promise<void> {
@@ -659,6 +778,9 @@ async function performAIMove(): Promise<void> {
 async function finishAIMove(move: Move, topology: FaceMove, epoch: number): Promise<void> {
   const outcome = await engine.call("applyMove", move).catch(describe);
   if (epoch !== gameEpoch) return;
+  const drawn: Drawn | undefined = state.animatingLine
+    ? { segments: state.animatingLine.segments, newNodePos: move.newNodePos }
+    : undefined;
   state.mode = "idle";
   state.animatingLine = null;
   if (typeof outcome === "string") {
@@ -666,7 +788,7 @@ async function finishAIMove(move: Move, topology: FaceMove, epoch: number): Prom
   } else if (outcome.kind === "rejected") {
     setStatus("AI error: " + outcome.rejection.message, "lose");
   } else {
-    recordMove(move, outcome, topology);
+    recordMove(outcome, drawn, topology);
     if (state.gameOver) showGameOver();
     else setStatus("Your turn!");
   }
@@ -856,18 +978,27 @@ async function share(): Promise<void> {
   shareBtn.disabled = true;
   setStatus("Checking the link");
   try {
-    const prepared = prepareLink(timeline, {
-      classify: (plan) => engine.call("classify", plan),
-      rehearse: (plan) => engine.call("rehearse", plan),
-    });
+    const prepared = prepareLink(
+      timeline,
+      {
+        classify: (plan) => engine.call("classify", plan),
+        rehearse: (plan) => engine.call("rehearse", plan),
+      },
+      // A review position is not the record's last board, which the rehearsal settles to.
+      timeline.atEnd ? state.nodes.map((node) => node.position) : undefined,
+    );
     const copied = copyLater(prepared.then(({ history }) => shareUrl(history)));
-    const { history, refusedAt } = await prepared;
+    const { history, refusedAt, mismatch } = await prepared;
     const url = shareUrl(history);
     window.history.replaceState(null, "", url);
     const warning =
-      refusedAt === undefined ? "" : ` A visitor's replay may stop at move ${refusedAt + 1}.`;
+      refusedAt !== undefined
+        ? ` A visitor's replay may stop at move ${refusedAt + 1}.`
+        : mismatch
+          ? " A visitor's board may differ from this one."
+          : "";
     if (await copied) {
-      setStatus("Link copied." + warning, refusedAt === undefined ? "win" : "");
+      setStatus("Link copied." + warning, warning ? "" : "win");
     } else {
       shareUrlEl.hidden = false;
       shareUrlEl.value = url;
@@ -971,7 +1102,14 @@ async function newGame(nodeCount: number, fresh = true, hint = DRAW_HINT): Promi
   renderMoveList();
   setStatus("Initializing...");
   try {
-    await engine.call("init", nodeCount, timeline.boardSize, firstPlayer);
+    await engine.call(
+      "init",
+      nodeCount,
+      timeline.boardSize,
+      firstPlayer,
+      undefined,
+      timeline.settleVersion,
+    );
     if (epoch !== gameEpoch) return;
     await refreshBoard();
     if (epoch !== gameEpoch) return;
@@ -1001,7 +1139,14 @@ async function restore(record: GameRecord, fromLink: boolean): Promise<void> {
   setBoardSize(timeline.boardSize);
   setStatus("Initializing...");
   const layout = timeline.nodes ? { nodes: timeline.nodes.map(([x, y]) => ({ x, y })) } : undefined;
-  await engine.call("init", timeline.initialNodes, timeline.boardSize, firstPlayer, layout);
+  await engine.call(
+    "init",
+    timeline.initialNodes,
+    timeline.boardSize,
+    firstPlayer,
+    layout,
+    timeline.settleVersion,
+  );
   if (epoch !== gameEpoch) return;
   state.reviewing = fromLink;
   const reached = await seek(target);
@@ -1187,6 +1332,10 @@ trackCanvasSize(canvas, view, () => {
   invalidate();
 });
 wireInput();
-wireRecording(state, () => timeline.boardSize);
+// The saved game stops at the board shown, not at a redo tail.
+wireRecording(() => {
+  const record = timeline.record();
+  return { ...record, moves: record.moves.slice(0, record.cursor) };
+});
 requestAnimationFrame(frame);
 void boot();

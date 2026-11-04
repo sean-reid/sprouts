@@ -5,6 +5,7 @@ use crate::face::{Component, Move as FaceMove};
 use crate::nimber::Nimbers;
 use crate::route;
 use crate::types::{GameState, Move, Player};
+use crate::{embedding, validation};
 
 #[cfg(test)]
 mod tests;
@@ -98,7 +99,11 @@ pub(crate) fn draw_within(
             return (Err(Undrawn::OutOfTime), failures);
         }
         if elapsed > ROUTE_BUDGET_MS {
-            if let Ok(mov) = router.route_cheap(state, listed) {
+            if let Some(mov) = router
+                .route_cheap(state, listed)
+                .ok()
+                .and_then(|m| stored(state, m))
+            {
                 return (Ok(mov), failures);
             }
             failures += 1;
@@ -106,7 +111,11 @@ pub(crate) fn draw_within(
         }
         let tries = std::iter::once(listed.clone()).chain(class_members(state, listed));
         for attempt in tries {
-            if let Ok(mov) = router.route(state, &attempt) {
+            if let Some(mov) = router
+                .route(state, &attempt)
+                .ok()
+                .and_then(|m| stored(state, m))
+            {
                 return (Ok(mov), failures);
             }
             let elapsed = clock.elapsed_ms();
@@ -120,6 +129,14 @@ pub(crate) fn draw_within(
         failures += 1;
     }
     (Err(Undrawn::Exhausted), failures)
+}
+
+/// The routed move as the board will store it, if it still passes the
+/// checks apply makes; a settling game rounds it to the grid first.
+fn stored(state: &GameState, mov: Move) -> Option<Move> {
+    let mov = state.entering(mov);
+    (validation::validate_ai_move(state, &mov).is_ok() && embedding::embed(state, &mov).is_ok())
+        .then_some(mov)
 }
 
 /// Other moves reaching the same position as `rep` up to relabelling the
