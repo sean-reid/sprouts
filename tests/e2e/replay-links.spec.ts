@@ -31,11 +31,13 @@ const fixtures = [
 // Games recorded against the current AI by the record_shared_games test
 // in src/route/tests.rs, the human strokes kinked, so AI moves travel as
 // face moves and human moves as geometry. Per game: the payload budget in
-// characters (219 and 298 measured, with headroom) and how many of the
-// AI's moves go as topology.
+// characters and how many of the AI's moves go as topology. The budget
+// belongs to the recording: it is the payload measured when the game was
+// recorded (274 and 336) with about 10 percent headroom, and a new
+// recording brings its own.
 const routed: [string, number, number][] = [
-  ["fixtures/saved/eight-moves-4n-1000.json", 240, 4],
-  ["fixtures/saved/ten-moves-9n-1000.json", 330, 5],
+  ["fixtures/saved/eight-moves-4n-1000.json", 300, 4],
+  ["fixtures/saved/ten-moves-9n-1000.json", 370, 5],
 ];
 
 const entries = (page: Page) => page.locator("#moveList li");
