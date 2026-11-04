@@ -481,7 +481,7 @@ pub fn rehearse(plan: Rehearsal) -> Result<Option<usize>, String> {
 /// flattenings stay within the fit tolerance of each other. The node is
 /// carried with the move, since the best spot on a curve can jump far for
 /// a small change in it.
-fn redraws(state: &GameState, face: &face::Move, mov: &types::Move) -> bool {
+pub(crate) fn redraws(state: &GameState, face: &face::Move, mov: &types::Move) -> bool {
     let tolerance = curve::tolerance(state.board_size);
     let Ok(drawn) = route::route(state, face) else {
         return false;

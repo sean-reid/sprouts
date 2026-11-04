@@ -295,10 +295,11 @@ const CASES: u32 = 4;
 #[cfg(not(debug_assertions))]
 const CASES: u32 = 24;
 const SEED: u64 = 7;
-/// Most read-back mismatches the seeded sweep may show; the release sweep
-/// reads 14 as the AI and 11 as the human, 22 of them chords from a node
-/// to the new node on one of its own lines.
-const TOPOLOGY_CEILING: usize = 17;
+/// Read-back mismatches the seeded sweep shows as the AI and as the
+/// human. The sweep is seeded and platform-exact, so these are the
+/// measured values, and a router change that moves them is recorded here.
+const TOPOLOGY_CEILING: usize = 4;
+const HUMAN_TOPOLOGY_CEILING: usize = 2;
 
 proptest! {
     #![proptest_config(Config {
@@ -335,6 +336,7 @@ proptest! {
         total.add(&tally.unwrap());
         eprintln!("human {total}");
         prop_assert_eq!(total.bug, 0);
+        prop_assert!(total.topology <= HUMAN_TOPOLOGY_CEILING, "{}", total);
     }
 }
 
@@ -567,7 +569,11 @@ fn record_shared_game(nodes: usize, moves: usize, pick: usize, path: &std::path:
                     );
                     protocol::check(&state, &mov).ok()?;
                     let drawn = crate::embedding::embed(&state, &mov).ok()?;
-                    (drawn.enclosed.len() == face.enclosed.len()).then_some(mov)
+                    // A stroke the router happens to redraw would travel
+                    // as topology, so the game takes the next chord.
+                    (drawn.enclosed.len() == face.enclosed.len()
+                        && !protocol::redraws(&state, face, &mov))
+                    .then_some(mov)
                 })
                 .unwrap_or_else(|| panic!("no human move at move {index}"))
         } else {
@@ -624,13 +630,13 @@ fn record_shared_games() {
     record_shared_game(
         4,
         8,
-        pick("SPROUTS_PICK_4", 5),
+        pick("SPROUTS_PICK_4", 16),
         &dir.join("eight-moves-4n-1000.json"),
     );
     record_shared_game(
         9,
         10,
-        pick("SPROUTS_PICK_9", 13),
+        pick("SPROUTS_PICK_9", 22),
         &dir.join("ten-moves-9n-1000.json"),
     );
 }
@@ -683,10 +689,9 @@ fn record_topology_positions() {
     eprintln!("{written} positions written");
 }
 
-/// Read-back mismatches the four recorded positions showed when recorded,
-/// every one a chord from a node to the node on its own spoke through the
-/// corner beside that spoke.
-const RECORDED_TOPOLOGY: usize = 9;
+/// Read-back mismatches the four recorded positions show; the measured
+/// value, since the positions and the router are exact.
+const RECORDED_TOPOLOGY: usize = 1;
 
 /// Positions where a route read back as another move when recorded. No
 /// route fails as a bug, and the mismatches do not grow.
@@ -709,6 +714,7 @@ fn recorded_topology_positions_stay_bounded() {
         }
     }
     eprintln!("{tally}");
+    eprintln!("recorded {tally}");
     assert!(tally.topology <= RECORDED_TOPOLOGY, "{tally}");
 }
 
@@ -780,7 +786,7 @@ const SWEEP_FIXTURE: &str = "fixtures/routing/sweep-6n-6m.json";
 /// The final routing hash a Mac records; the Linux runner and the wasm
 /// build (tests/unit/route-hash.test.ts) have to produce the same one,
 /// since a share link is redrawn on the visitor's device.
-const ROUTING_HASH: u64 = 0xaaef_97a6_92ff_3032;
+const ROUTING_HASH: u64 = 0xf549_cf18_4d0d_3fb9;
 
 #[test]
 fn routing_hashes_the_same_on_every_platform() {
