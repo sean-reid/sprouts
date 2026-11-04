@@ -365,13 +365,10 @@ fn point2(p: Point) -> Point2<f64> {
 /// Largest displacement of a clearance curve vertex, in board units.
 const JITTER: f64 = 1e-3;
 
-/// The `k`th vertex of a clearance curve moved a hair by a fixed function
-/// of `k`. A drawn line runs exactly a clearance from the walls it hugged,
-/// so the next erosion's offset of it lands exactly on those walls, and
-/// overlapping constraints break the triangulation's splitting; the
-/// displacement is far under the fit tolerance and keeps the curves
-/// apart. It depends on the index and not the coordinates, so a board
-/// that differs by a rounding error erodes to the same arena.
+/// The `k`th vertex of a clearance curve moved a hair by a function of
+/// `k` alone, so a board a rounding error off erodes to the same arena. A
+/// drawn line runs exactly a clearance from the walls it hugged, so the
+/// next offset of it would land on those walls and break the splitting.
 fn jitter(p: Point, k: usize) -> Point {
     let t = k as f64;
     Point::new(
@@ -477,26 +474,29 @@ fn subdivide_closed(corners: &[Point], step: f64) -> Vec<Point> {
     out
 }
 
+/// The path of half-edge `h` from its origin node's position to its head
+/// node's. A drawn stroke ends within the validator's tolerance of its
+/// node, not on it, so the nodes stand in for the path's ends and every
+/// spoke of a node meets at one point.
+fn spoke_path(state: &GameState, h: HalfEdgeId) -> Vec<Point> {
+    let model = &state.face;
+    let mut path = half_edge_path(state, h);
+    if let Some(first) = path.first_mut() {
+        *first = state.nodes[model.origin(h)].position;
+    }
+    if let Some(last) = path.last_mut() {
+        *last = state.nodes[model.head(h)].position;
+    }
+    path
+}
+
 /// The closed polyline of a cycle component, every half-edge from origin
 /// to head with the node positions at the joins.
 fn cycle_polygon(state: &GameState, start: HalfEdgeId) -> Vec<Point> {
-    let model = &state.face;
     let mut out = Vec::new();
-    let cycle = model.cycle(start);
-    let nodes: Vec<Point> = cycle
-        .iter()
-        .map(|&h| state.nodes[model.origin(h)].position)
-        .collect();
-    for h in cycle {
-        let mut path = half_edge_path(state, h);
+    for h in state.face.cycle(start) {
+        let mut path = spoke_path(state, h);
         path.pop();
-        // A flattening starts and ends a rounding error off its node;
-        // the node's own position stands in so every spoke meets there.
-        for p in &mut path {
-            if let Some(n) = nodes.iter().find(|n| n.distance_to(p) < SAME_POINT * 1e3) {
-                *p = *n;
-            }
-        }
         out.extend(path);
     }
     tidy(out)
@@ -857,14 +857,16 @@ impl Arena {
 
     /// Where a path may enter the free region from node `v` through the
     /// corner that follows spoke `at`: the node itself when it sits in the
-    /// free region, else the nearest free vertices a straight leg reaches
-    /// without crossing a wall, heading out between the corner's spokes.
+    /// free region, else the free vertices a straight leg reaches without
+    /// crossing a wall, heading out between the corner's spokes, the ones
+    /// costing the least detour towards `target` first.
     pub(super) fn entries(
         &self,
         state: &GameState,
         v: NodeId,
         at: Option<HalfEdgeId>,
         c: f64,
+        target: Point,
     ) -> Vec<Entry> {
         let a = state.nodes[v].position;
         if at.is_none() {
@@ -882,7 +884,7 @@ impl Arena {
             .face
             .rotation(v)
             .iter()
-            .map(|&h| half_edge_path(state, h))
+            .map(|&h| spoke_path(state, h))
             .collect();
         // A narrow corner gets a narrower margin; the leg is straight, so
         // the embedding reads its heading exactly.
@@ -890,7 +892,7 @@ impl Arena {
             let rotation = state.face.rotation(v);
             let k = rotation.iter().position(|&x| x == h).expect("own spoke");
             let next = rotation[(k + 1) % rotation.len()];
-            let angle = |h| leaving_angle(a, &half_edge_path(state, h), radius);
+            let angle = |h| leaving_angle(a, &spoke_path(state, h), radius);
             let from = angle(h);
             let span = if next == h {
                 std::f64::consts::TAU
@@ -910,7 +912,8 @@ impl Arena {
             .filter_map(|vertex| {
                 let p = point(vertex.position());
                 let d = p.distance_to(&a);
-                (d > radius + LEG_PAST && d <= reach).then_some((d, vertex.fix()))
+                (d > radius + LEG_PAST && d <= reach)
+                    .then_some((d + p.distance_to(&target), vertex.fix()))
             })
             .collect();
         candidates.sort_by(|x, y| x.0.total_cmp(&y.0).then(x.1.index().cmp(&y.1.index())));

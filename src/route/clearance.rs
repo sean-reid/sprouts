@@ -38,17 +38,29 @@ const MIDDLE: f64 = 0.25;
 /// Path points about this fraction of the clearance apart.
 const SPACING: f64 = 0.5;
 
+/// The distances a relaxed path keeps.
+#[derive(Clone, Copy)]
+pub(super) struct Rooms {
+    pub clearance: f64,
+    /// Distance the validator demands from every node other than the ends.
+    pub node_clearance: f64,
+    /// Room wanted from every node other than the ends.
+    pub node_room: f64,
+    /// Room the middle of the path wants from the end nodes.
+    pub end_room: f64,
+}
+
 pub(super) struct Obstacles<'a> {
     segments: &'a [(Point, Point)],
     nodes: Vec<Point>,
     ends: [Point; 2],
     clearance: f64,
-    /// Distance the validator demands from every node other than the ends.
     node_clearance: f64,
-    /// Room wanted from every node other than the ends.
     node_room: f64,
-    /// Room the middle of the path wants from the end nodes.
     end_room: f64,
+    /// Unit normal to the chord between the ends on the side the middle
+    /// bows out to.
+    bow: (f64, f64),
 }
 
 /// A feature a point is short of its room from: where it is, how far, how
@@ -64,19 +76,54 @@ impl<'a> Obstacles<'a> {
         segments: &'a [(Point, Point)],
         nodes: Vec<Point>,
         ends: [Point; 2],
-        clearance: f64,
-        node_clearance: f64,
-        node_room: f64,
-        end_room: f64,
+        rooms: Rooms,
+        path: &[Point],
     ) -> Self {
-        Self {
+        let mut obstacles = Self {
             segments,
             nodes,
             ends,
-            clearance,
-            node_clearance,
-            node_room,
-            end_room,
+            clearance: rooms.clearance,
+            node_clearance: rooms.node_clearance,
+            node_room: rooms.node_room,
+            end_room: rooms.end_room,
+            bow: normal(ends[0], ends[1]),
+        };
+        obstacles.bow = obstacles.bow_side(path);
+        obstacles
+    }
+
+    /// The side of the chord between the ends the middle of the path bows
+    /// out to: the side the taut path already leans to by a clearance, else
+    /// the side with more room at the chord's midpoint. A hair's lean
+    /// decides nothing, so a board a rounding error off bows the same way.
+    fn bow_side(&self, path: &[Point]) -> (f64, f64) {
+        let [a, b] = self.ends;
+        let n = normal(a, b);
+        let lean: f64 = path
+            .iter()
+            .map(|p| (p.x - a.x) * n.0 + (p.y - a.y) * n.1)
+            .sum::<f64>()
+            / path.len().max(1) as f64;
+        if lean.abs() > self.clearance {
+            return if lean > 0.0 { n } else { (-n.0, -n.1) };
+        }
+        let mid = Point::new((a.x + b.x) / 2.0, (a.y + b.y) / 2.0);
+        let probe = self.end_room / 2.0;
+        let room = |side: (f64, f64)| {
+            let q = Point::new(mid.x + side.0 * probe, mid.y + side.1 * probe);
+            let walls = self
+                .nearest_line(q)
+                .map_or(f64::INFINITY, |(_, distance)| distance);
+            self.nodes
+                .iter()
+                .map(|v| v.distance_to(&q))
+                .fold(walls, f64::min)
+        };
+        if room(n) >= room((-n.0, -n.1)) {
+            n
+        } else {
+            (-n.0, -n.1)
         }
     }
 
@@ -163,14 +210,7 @@ impl<'a> Obstacles<'a> {
         if (i as f64 - centre).abs() <= MIDDLE * path.len() as f64 {
             // The push is square to the chord between the ends, so a short
             // straight line bows out instead of stretching along itself.
-            let [a, b] = self.ends;
-            let (foot, _) = closest_point_on_segment(&a, &b, &p);
-            let from = if foot.distance_to(&p) > 1e-6 {
-                foot
-            } else {
-                let (nx, ny) = normal(a, b);
-                Point::new(p.x - nx, p.y - ny)
-            };
+            let from = Point::new(p.x - self.bow.0, p.y - self.bow.1);
             for e in &self.ends {
                 consider(from, e.distance_to(&p), self.end_room);
             }

@@ -145,8 +145,9 @@ fn plan(
         .corner_face(mv.a, mv.at_a)
         .map_err(|_| Unroutable::Bug("corner"))?;
     let arena = erode::Arena::build(state, face, mv.a, mv.b, c, want.node_clearance)?;
-    let entries = arena.entries(state, mv.a, mv.at_a, c);
-    let exits = arena.entries(state, mv.b, mv.at_b, c);
+    let (pa, pb) = (state.nodes[mv.a].position, state.nodes[mv.b].position);
+    let entries = arena.entries(state, mv.a, mv.at_a, c, pb);
+    let exits = arena.entries(state, mv.b, mv.at_b, c, pa);
     if entries.is_empty() || exits.is_empty() {
         return Err(Unroutable::Room);
     }
@@ -199,15 +200,13 @@ fn relax(
     // The relaxation settles a little short of its room, so the room sits a
     // line clearance above what the validator demands.
     let room = (NODE_ROOM * want.spacing).max(want.node_clearance + want.clearance);
-    let obstacles = clearance::Obstacles::new(
-        arena.walls(),
-        nodes,
-        ends,
-        eroded_by(state, want),
-        want.node_clearance,
-        room,
-        want.spacing,
-    );
+    let rooms = clearance::Rooms {
+        clearance: eroded_by(state, want),
+        node_clearance: want.node_clearance,
+        node_room: room,
+        end_room: want.spacing,
+    };
+    let obstacles = clearance::Obstacles::new(arena.walls(), nodes, ends, rooms, path);
     clearance::push(path.to_vec(), &obstacles)
 }
 
@@ -273,8 +272,9 @@ pub(crate) fn explain(state: &GameState, mv: &FaceMove) -> String {
                 if let Ok(arena) =
                     erode::Arena::build(state, face, mv.a, mv.b, c, want.node_clearance)
                 {
-                    let entries = arena.entries(state, mv.a, mv.at_a, c);
-                    let exits = arena.entries(state, mv.b, mv.at_b, c);
+                    let (pa, pb) = (state.nodes[mv.a].position, state.nodes[mv.b].position);
+                    let entries = arena.entries(state, mv.a, mv.at_a, c, pb);
+                    let exits = arena.entries(state, mv.b, mv.at_b, c, pa);
                     let _ = writeln!(
                         out,
                         "  {} entries {:?}, {} exits {:?}",
@@ -318,7 +318,7 @@ pub(crate) fn explain(state: &GameState, mv: &FaceMove) -> String {
             let dense = densify(&decimate_polyline(&candidate, tolerance), want.clearance);
             let segments = curve::fit(&dense, tolerance);
             let flat = curve::flatten(&segments, tolerance);
-            if let Some(node) = place_node(state, &flat, want.spacing) {
+            if let Some(node) = place_node(state, &segments, &flat, want.spacing) {
                 let mov =
                     Move::from_segments(mv.a, mv.b, dense, segments, node, state.current_player);
                 let _ = writeln!(
@@ -426,7 +426,7 @@ pub(crate) fn finish(
     let path = densify(&decimate_polyline(&path, tolerance), clearance);
     let segments = curve::fit(&path, tolerance);
     let flat = curve::flatten(&segments, tolerance);
-    let node = place_node(state, &flat, spacing).ok_or(Unroutable::Room)?;
+    let node = place_node(state, &segments, &flat, spacing).ok_or(Unroutable::Room)?;
     let ends = [state.nodes[mv.a].position, state.nodes[mv.b].position];
     // Two passes the relaxation could not pull apart touch, and the fit
     // can cross where they touch: no room for both.
@@ -586,13 +586,22 @@ fn self_touching(flat: &[Point], ends: [Point; 2], c: f64) -> bool {
 
 /// The best-ranked spot on the curve a clear disc from every node, else
 /// the best at the node spacing, in each case a human spacing in from the
-/// board edge; none when the curve offers no such spot.
-fn place_node(state: &GameState, flat: &[Point], spacing: f64) -> Option<Point> {
+/// board edge; none when the curve offers no such spot. Spots are measured
+/// where the move will snap them, on the curve itself.
+fn place_node(
+    state: &GameState,
+    segments: &[curve::Cubic],
+    flat: &[Point],
+    spacing: f64,
+) -> Option<Point> {
     let s = scale(state.board_size);
     let dense = resample_polyline(flat, MIN_PATH_CLEARANCE_AI * s / 2.0);
     let inset = MIN_NODE_SPACING * s;
     let far = state.board_size as f64 - inset;
-    let ranked = rank_node_placements(&dense, state);
+    let ranked: Vec<Point> = rank_node_placements(&dense, state)
+        .into_iter()
+        .map(|q| curve::nearest(segments, &q).map_or(q, |hit| hit.point))
+        .collect();
     let spot = |apart: f64| {
         ranked.iter().copied().find(|q| {
             (inset..=far).contains(&q.x)
