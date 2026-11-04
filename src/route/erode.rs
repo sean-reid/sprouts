@@ -87,9 +87,6 @@ pub(super) struct Arena {
     /// The move's end nodes, which only the legs may come near.
     ends: Vec<Point>,
     end_clearance: f64,
-    /// The wall clearance the face was eroded by.
-    #[cfg(test)]
-    clearance: f64,
     rim: Vec<FixedVertexHandle>,
 }
 
@@ -290,8 +287,7 @@ impl Arrangement {
                 cdt.add_constraint_and_split(u, v, |p| p);
             }
         }
-        // A wall piece the triangulation left uncovered would let the free
-        // region leak through it.
+        // An uncovered wall piece would let the free region through.
         for &(u, v, wall) in &pieces {
             let covered = spade::LineIntersectionIterator::new_from_handles(&cdt, u, v).all(
                 |hit| match hit {
@@ -326,9 +322,8 @@ impl Arrangement {
     }
 }
 
-/// Points already in the triangulation, so a point computed a rounding
-/// error off one of them becomes that vertex and not a second one beside
-/// it, which the constraint splitting cannot tell apart.
+/// Points already in the triangulation; one computed a rounding error off
+/// another becomes that vertex, since the splitting cannot tell them apart.
 #[derive(Default)]
 struct Snap {
     cells: BTreeMap<(i64, i64), Vec<Point>>,
@@ -365,10 +360,8 @@ fn point2(p: Point) -> Point2<f64> {
 /// Largest displacement of a clearance curve vertex, in board units.
 const JITTER: f64 = 1e-3;
 
-/// The `k`th vertex of a clearance curve moved a hair by a function of
-/// `k` alone, so a board a rounding error off erodes to the same arena. A
-/// drawn line runs exactly a clearance from the walls it hugged, so the
-/// next offset of it would land on those walls and break the splitting.
+/// The `k`th vertex of a clearance curve moved a hair by `k` alone: a line
+/// drawn a clearance from a wall offsets back onto it otherwise.
 fn jitter(p: Point, k: usize) -> Point {
     let t = k as f64;
     Point::new(
@@ -474,10 +467,8 @@ fn subdivide_closed(corners: &[Point], step: f64) -> Vec<Point> {
     out
 }
 
-/// The path of half-edge `h` from its origin node's position to its head
-/// node's. A drawn stroke ends within the validator's tolerance of its
-/// node, not on it, so the nodes stand in for the path's ends and every
-/// spoke of a node meets at one point.
+/// The path of half-edge `h` with the node positions as its ends; a drawn
+/// stroke ends within the validator's tolerance of its node.
 fn spoke_path(state: &GameState, h: HalfEdgeId) -> Vec<Point> {
     let model = &state.face;
     let mut path = half_edge_path(state, h);
@@ -589,8 +580,6 @@ impl Arena {
             node_clearance,
             ends,
             end_clearance,
-            #[cfg(test)]
-            clearance: c,
             rim,
         };
         arena.classify(c);
@@ -655,72 +644,6 @@ impl Arena {
 
     pub(super) fn walls(&self) -> &[(Point, Point)] {
         &self.walls.segments
-    }
-
-    /// The arena as an SVG: free triangles filled, constraints grey, walls
-    /// black, for diagnosis.
-    #[cfg(test)]
-    pub(super) fn svg(&self, board: f64) -> String {
-        let mut out = format!(
-            "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"1000\" height=\"1000\" viewBox=\"0 0 {board} {board}\"><rect width=\"100%\" height=\"100%\" fill=\"white\"/>"
-        );
-        for t in self.cdt.inner_faces() {
-            if self.free[t.fix().index()] {
-                let [p, q, r] = t.positions();
-                let wrong = self.walls.distance(self.centroid(t.fix()), self.clearance)
-                    < self.clearance - 1e-7;
-                let fill = if wrong { "#f66" } else { "#cfc" };
-                out.push_str(&format!(
-                    "<polygon points=\"{:.2},{:.2} {:.2},{:.2} {:.2},{:.2}\" fill=\"{fill}\" stroke=\"#9c9\" stroke-width=\"0.3\"/>",
-                    p.x, p.y, q.x, q.y, r.x, r.y
-                ));
-            }
-        }
-        for e in self.cdt.undirected_edges() {
-            if !e.is_constraint_edge() {
-                continue;
-            }
-            let [p, q] = e.positions();
-            let colour = if self.wall_edge[e.fix().index()] {
-                "black"
-            } else {
-                "#999"
-            };
-            out.push_str(&format!(
-                "<line x1=\"{:.2}\" y1=\"{:.2}\" x2=\"{:.2}\" y2=\"{:.2}\" stroke=\"{colour}\" stroke-width=\"0.8\"/>",
-                p.x, p.y, q.x, q.y
-            ));
-        }
-        out.push_str("</svg>");
-        out
-    }
-
-    /// Free and total triangle counts, and any free triangle touching a
-    /// wall, for diagnosis.
-    #[cfg(test)]
-    pub(super) fn describe(&self) -> String {
-        let mut touching = Vec::new();
-        for t in self.cdt.inner_faces() {
-            if !self.free[t.fix().index()] {
-                continue;
-            }
-            for p in t.positions().map(point) {
-                if self.walls.distance(p, 1.0) < 1e-6 {
-                    let c = self.centroid(t.fix());
-                    touching.push(format!(
-                        "{p:?} (centroid {c:?} at {:.2} from a wall)",
-                        self.walls.distance(c, 100.0)
-                    ));
-                }
-            }
-        }
-        format!(
-            "{} of {} triangles free, {} walls, {} nodes kept clear; free triangles on wall vertices: {touching:?}",
-            self.free.iter().filter(|f| **f).count(),
-            self.cdt.num_inner_faces(),
-            self.walls.segments.len(),
-            self.nodes.len()
-        )
     }
 
     pub(super) fn vertex_point(&self, v: FixedVertexHandle) -> Point {

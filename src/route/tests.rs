@@ -131,8 +131,7 @@ fn a_chord_keeps_its_clearance_from_a_loop_it_rounds() {
     let loop_flat = state.lines[0].flat.clone();
     let moves = listed(&state, 0, other);
     assert!(!moves.is_empty());
-    let mov = route(&state, &moves[0])
-        .unwrap_or_else(|e| panic!("{e:?}: {:?}\n{}", moves[0], explain(&state, &moves[0])));
+    let mov = route(&state, &moves[0]).unwrap_or_else(|e| panic!("{e:?}: {:?}", moves[0]));
     assert_eq!(protocol::check(&state, &mov), Ok(()));
     let a = state.nodes[0].position;
     let nearest = mov
@@ -470,82 +469,6 @@ fn routing_gives_the_same_curves_in_another_process() {
                 .find(|(a, b)| a != b)
                 .unwrap_or(("", ""));
             panic!("run {run} routed differently:\n{ours}\n{theirs}");
-        }
-    }
-}
-
-/// Prints every failing game of the bench's seeded sweep with its
-/// reasons: `cargo test --release bench_sweep_failures -- --ignored
-/// --nocapture`.
-#[test]
-#[ignore]
-fn bench_sweep_failures() {
-    for (i, (nodes, picks)) in sweep::games(7, 24).into_iter().enumerate() {
-        if let Err(e) = sweep::game(nodes, &picks) {
-            eprintln!("game {i} ({nodes} nodes): {e}");
-        }
-    }
-}
-
-/// Replays one random game of the sweep from SPROUTS_NODES and the
-/// comma-separated SPROUTS_PICKS, for working a failure down by hand.
-#[test]
-#[ignore]
-fn replay_picks() {
-    let (Ok(nodes), Ok(picks)) = (
-        std::env::var("SPROUTS_NODES"),
-        std::env::var("SPROUTS_PICKS"),
-    ) else {
-        return;
-    };
-    let picks: Vec<u32> = picks
-        .split(',')
-        .map(|p| p.trim().parse().unwrap())
-        .collect();
-    match sweep::game(nodes.parse().unwrap(), &picks) {
-        Ok(tally) => eprintln!("{tally}"),
-        Err(e) => eprintln!("{e}"),
-    }
-}
-
-/// Routes every search move of the fixture named by SPROUTS_FIXTURE and
-/// prints how each went, for working a failure down by hand.
-#[test]
-#[ignore]
-fn diagnose_fixture() {
-    let Ok(path) = std::env::var("SPROUTS_FIXTURE") else {
-        return;
-    };
-    let state = position(std::path::Path::new(&path));
-    for line in &state.lines {
-        eprintln!(
-            "line {} ({}): {} to {} via node at {:?}, {} flat points",
-            line.id,
-            line.player as u8,
-            line.from_node,
-            line.to_node,
-            line.new_node_pos,
-            line.flat.len()
-        );
-    }
-    for f in 0..state.face.face_count() {
-        eprintln!("face {f}: {:?}", state.face.components(f));
-    }
-    for (v, node) in state.nodes.iter().enumerate() {
-        eprintln!(
-            "node {v} at {:?} degree {} home {:?}",
-            node.position,
-            state.face.degree(v),
-            state.face.corner_face(v, None).ok()
-        );
-    }
-    for mv in state.face.search_moves() {
-        let members = crate::ai::class_members(&state, &mv);
-        for mv in std::iter::once(mv).chain(members) {
-            match route(&state, &mv) {
-                Ok(mov) => eprintln!("{mv:?}: drawn, {} points", mov.polyline.len()),
-                Err(why) => eprintln!("{mv:?}: {why:?}\n{}", explain(&state, &mv)),
-            }
         }
     }
 }
