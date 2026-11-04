@@ -144,15 +144,19 @@ test("rows count the nodes a chord cuts off or a loop encloses", async ({ page }
     !["mobile", "desktop"].includes(test.info().project.name),
     "the text does not depend on the viewport",
   );
-  const record = await readFile("fixtures/saved/ten-moves-9n-1000.json", "utf8");
+  // The bench fixture as a saved game: it never changes, and its chords
+  // 5 to 4, 0 to 6 and 9 to 7 each wall off one node, 11 to 2 two.
+  const fixture = JSON.parse(await readFile("fixtures/games/false-game-over-4n-1000.json", "utf8"));
+  const record = JSON.stringify({ ...fixture, firstPlayer: "human", cursor: fixture.moves.length });
   await page.addInitScript((saved) => localStorage.setItem("sprouts.game", saved), record);
   await page.goto("/");
   await awaitReply(page);
   await expect(rows(page).nth(0)).toHaveText("1. You, joins two nodes");
-  await expect(rows(page).nth(1)).toHaveText("2. AI, loop on one node, encloses 3");
-  await expect(rows(page).nth(3)).toHaveText("4. AI, joins two nodes, cuts off 1");
-  await expect(rows(page).nth(6)).toHaveText("7. You, joins two nodes, cuts off 3");
+  await expect(rows(page).nth(2)).toHaveText("3. You, joins two nodes, cuts off 1");
+  await expect(rows(page).nth(4)).toHaveText("5. You, loop on one node");
+  await expect(rows(page).nth(5)).toHaveText("6. AI, joins two nodes, cuts off 1");
+  await expect(rows(page).nth(6)).toHaveText("7. You, joins two nodes, cuts off 1");
   await expect(rows(page).nth(8)).toHaveText("9. You, joins two nodes, cuts off 2");
-  await rows(page).nth(6).scrollIntoViewIfNeeded();
+  await rows(page).nth(8).scrollIntoViewIfNeeded();
   await shot(page, "cut-off-rows");
 });

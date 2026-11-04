@@ -246,7 +246,12 @@ test("a review with moves the engine has not refitted still shares", async ({ pa
   await expect(other.locator("#status")).toHaveText(/^Reviewing: move 9 of 9/, {
     timeout: 60_000,
   });
-  await expect(entries(other)).toHaveText(await entries(page).allTextContents());
+  // Rows past the sharer's cursor carry no cut-off count yet, so the ids
+  // in the titles are what both pages agree on.
+  const titles = (p: Page) =>
+    p.locator("#moveList li button").evaluateAll((b) => b.map((x) => x.getAttribute("title")));
+  expect(await titles(other)).toEqual(await titles(page));
+  await expect(entries(other).nth(1)).toHaveText(await entries(page).nth(1).innerText());
   await visitor.close();
 });
 

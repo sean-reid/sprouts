@@ -267,47 +267,86 @@ fn topology(state: &GameState, mov: &types::Move) -> Result<face::Move, Rejectio
 pub fn apply(state: &mut GameState, mov: Move) -> Outcome {
     let mov = mov.by(state.current_player, state.board_size);
     match topology(state, &mov) {
-        Ok(face) => commit(state, &face, mov),
+        Ok(_) => commit(state, mov),
         Err(rejection) => Outcome::Rejected { rejection },
     }
 }
 
-/// Applies a line whose face move is `face`.
-fn commit(state: &mut GameState, face: &face::Move, line: types::Move) -> Outcome {
-    let cut_off = cut_off(&state.face, face);
+/// Applies a line that has passed every check.
+fn commit(state: &mut GameState, line: types::Move) -> Outcome {
     match state.apply_move(line) {
         Ok(()) => Outcome::Applied {
+            cut_off: cut_off(&state.face),
             snapshot: snapshot(state),
-            cut_off,
         },
         Err(rejection) => Outcome::Rejected { rejection },
     }
 }
 
-/// Nodes on the boundary pieces `mv.enclosed` names, read off the model
-/// before the move is applied.
-fn cut_off(model: &face::FaceModel, mv: &face::Move) -> usize {
-    let Ok(face) = model.corner_face(mv.a, mv.at_a) else {
+/// Nodes the last move set apart, read off the model after it is applied.
+/// The line and the boundary it left from are a wall; a node whose faces
+/// all sit with the new face is on one side, one whose faces all sit
+/// with the old face on the other, and the smaller side is the count.
+/// The ends and the new node are on the wall, and a move that merged two
+/// boundaries sets nothing apart.
+fn cut_off(model: &face::FaceModel) -> usize {
+    let half_edges = 2 * model.edge_count();
+    let h_am = half_edges - 4;
+    let h_bm = h_am + 3;
+    let (new_face, old_face) = (model.face_of(h_am), model.face_of(h_bm));
+    if new_face == old_face {
         return 0;
-    };
-    model
-        .components(face)
-        .iter()
-        .filter(|comp| mv.enclosed.contains(&model.lowest_node(**comp)))
-        .map(|comp| match *comp {
-            face::Component::Node(_) => 1,
-            face::Component::Cycle(start) => {
-                let mut nodes: Vec<usize> = model
-                    .cycle(start)
-                    .into_iter()
-                    .map(|h| model.origin(h))
-                    .collect();
-                nodes.sort_unstable();
-                nodes.dedup();
-                nodes.len()
+    }
+    let mut wall = vec![false; half_edges];
+    for h in model.cycle(h_am).into_iter().chain(model.cycle(h_bm)) {
+        wall[h] = true;
+        wall[model.twin(h)] = true;
+    }
+    let mut by_face = vec![Vec::new(); model.face_count()];
+    for h in 0..half_edges {
+        by_face[model.face_of(h)].push(h);
+    }
+    let side = |start: usize| {
+        let mut reached = vec![false; model.face_count()];
+        let mut stack = vec![start];
+        reached[start] = true;
+        while let Some(f) = stack.pop() {
+            for &h in &by_face[f] {
+                let across = model.face_of(model.twin(h));
+                if !wall[h] && !reached[across] {
+                    reached[across] = true;
+                    stack.push(across);
+                }
             }
-        })
-        .sum()
+        }
+        reached
+    };
+    let (with_new, with_old) = (side(new_face), side(old_face));
+    let m = model.node_count() - 1;
+    let (a, b) = (model.origin(h_am), model.origin(h_bm));
+    let (mut on_new, mut on_old) = (0, 0);
+    for v in 0..model.node_count() {
+        if v == a || v == b || v == m {
+            continue;
+        }
+        let faces: Vec<usize> = if model.degree(v) == 0 {
+            model.corner_face(v, None).into_iter().collect()
+        } else {
+            model
+                .rotation(v)
+                .iter()
+                .map(|&h| model.face_of(h))
+                .collect()
+        };
+        let new_side = faces.iter().any(|&f| with_new[f]);
+        let old_side = faces.iter().any(|&f| with_old[f]);
+        match (new_side, old_side) {
+            (true, false) => on_new += 1,
+            (false, true) => on_old += 1,
+            _ => {}
+        }
+    }
+    on_new.min(on_old)
 }
 
 /// Changes whenever the router draws a different curve for the same face
@@ -446,10 +485,10 @@ pub fn apply_face_move(state: &mut GameState, mov: FaceMove, at: Point) -> Outco
                 at,
                 routed.player,
             );
-            topology(state, &line).map(|face| (face, line))
+            topology(state, &line).map(|_| line)
         });
     match drawn {
-        Ok((face, line)) => commit(state, &face, line),
+        Ok(line) => commit(state, line),
         Err(rejection) => Outcome::Rejected { rejection },
     }
 }
@@ -1601,46 +1640,115 @@ mod tests {
         let path = route::route(state, &mv.clone().into())
             .expect("the move routes")
             .polyline;
+        apply_face_move(state, mv, third_along(&path))
+    }
+
+    fn third_along(path: &[Point]) -> Point {
         let total: f64 = path.windows(2).map(|w| w[0].distance_to(&w[1])).sum();
         let mut left = total / 3.0;
-        let mut at = path[path.len() - 1];
         for w in path.windows(2) {
             let d = w[0].distance_to(&w[1]);
             if left <= d {
                 let f = left / d;
-                at = Point::new(
+                return Point::new(
                     w[0].x + (w[1].x - w[0].x) * f,
                     w[0].y + (w[1].y - w[0].y) * f,
                 );
-                break;
             }
             left -= d;
         }
-        apply_face_move(state, mv, at)
+        path[path.len() - 1]
     }
 
-    /// A chord that merges two pieces cuts nothing off; one that splits a
-    /// face reports the nodes on the far side; a loop reports its inside.
+    fn bare(a: usize, b: usize, enclosed: Vec<usize>) -> FaceMove {
+        FaceMove {
+            a,
+            at_a: None,
+            b,
+            at_b: None,
+            enclosed,
+        }
+    }
+
+    /// Six nodes: a loop on 1 round bare node 2 sets 2 apart from 0, 3, 4
+    /// and 5. A loop on 0 round that piece then sets 1, 6 and the nested 2
+    /// apart from 3, 4 and 5. Five nodes: a chord 0 to 1 and a loop on 3
+    /// round nothing set nothing apart; a second chord 0 to 1 with the
+    /// two-node piece {3, 6} on its new side sets 3 and 6 apart from 2
+    /// and 4, with node 5 on both arcs and so on the wall.
     #[test]
-    fn applied_counts_the_nodes_cut_off() {
-        let mut state = GameState::new(4);
-        let merge = listed(&state, |m| m.b == 1 && m.enclosed.is_empty());
-        assert_eq!(routed(&mut state, merge), 0);
-        let mut looped = state.clone();
-        let around = listed(&looped, |m| m.a == m.b && m.enclosed == vec![2, 3]);
-        assert_eq!(routed(&mut looped, around), 2);
-        let split = listed(&state, |m| m.a == 0 && m.b == 1 && m.enclosed == vec![2]);
-        assert_eq!(routed(&mut state, split), 1);
-        let merge = listed(&state, |m| m.a != m.b && m.enclosed.is_empty());
-        let wire = serde_json::to_value(drawn(&mut state, merge)).unwrap();
+    fn cut_off_counts_the_smaller_side_by_hand() {
+        let mut state = GameState::new(6);
+        assert_eq!(routed(&mut state, bare(1, 1, vec![2])), 1);
+        assert_eq!(routed(&mut state, bare(0, 0, vec![1])), 3);
+
+        let mut state = GameState::new(5);
+        assert_eq!(routed(&mut state, bare(0, 1, vec![])), 0);
+        assert_eq!(routed(&mut state, bare(3, 3, vec![])), 0);
+        let split = listed(&state, |m| m.a == 0 && m.b == 1 && m.enclosed == vec![3]);
+        let wire = serde_json::to_value(drawn(&mut state, split)).unwrap();
         assert_eq!(wire["kind"], json!("applied"));
-        assert_eq!(wire["cutOff"], json!(0));
+        assert_eq!(wire["cutOff"], json!(2));
     }
 
-    /// Every recorded move reports the count its own embedding gives, and
-    /// the fixtures between them hold chords that split a face.
+    /// The same curve as a drawn move, one way and the other.
+    fn both_ways(state: &GameState, mv: FaceMove) -> (Move, Move) {
+        let path = route::route(state, &mv.clone().into())
+            .expect("the move routes")
+            .polyline;
+        let at = third_along(&path);
+        let forward = Move {
+            from_node: mv.a,
+            to_node: mv.b,
+            polyline: path.clone(),
+            new_node_pos: at,
+        };
+        let back = Move {
+            from_node: mv.b,
+            to_node: mv.a,
+            polyline: path.into_iter().rev().collect(),
+            new_node_pos: at,
+        };
+        (forward, back)
+    }
+
+    fn count(state: &mut GameState, mov: Move) -> (usize, FaceMove) {
+        let line = mov.clone().by(state.current_player, state.board_size);
+        let face = embedding::embed(state, &line).expect("the curve embeds");
+        match apply(state, mov) {
+            Outcome::Applied { cut_off, .. } => (cut_off, face.into()),
+            Outcome::Rejected { rejection } => panic!("rejected: {}", rejection.message),
+        }
+    }
+
+    /// A chord drawn from b to a lists the other side of the face as
+    /// enclosed; a loop drawn the other way round is the same face move.
+    /// Both read the same count.
     #[test]
-    fn fixtures_report_the_count_their_embedding_gives() {
+    fn cut_off_does_not_depend_on_the_drawing_direction() {
+        let mut state = GameState::new(5);
+        assert_eq!(routed(&mut state, bare(0, 1, vec![])), 0);
+        assert_eq!(routed(&mut state, bare(3, 3, vec![])), 0);
+        let split = listed(&state, |m| m.a == 0 && m.b == 1 && m.enclosed == vec![3]);
+        let (forward, back) = both_ways(&state, split);
+        let (there, face_there) = count(&mut state.clone(), forward);
+        let (and_back, face_back) = count(&mut state.clone(), back);
+        assert_eq!(face_there.enclosed, vec![3]);
+        assert_eq!(face_back.enclosed, vec![2, 4]);
+        assert_eq!((there, and_back), (2, 2));
+
+        let state = GameState::new(6);
+        let (forward, back) = both_ways(&state, bare(1, 1, vec![2]));
+        let (there, face_there) = count(&mut state.clone(), forward);
+        let (and_back, face_back) = count(&mut state.clone(), back);
+        assert_eq!(face_there, face_back);
+        assert_eq!((there, and_back), (1, 1));
+    }
+
+    /// Every recorded move applies, reads the same count drawn the other
+    /// way, and the fixtures between them hold chords that split a face.
+    #[test]
+    fn fixtures_count_the_same_either_way() {
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/games");
         let mut chords_cut = 0;
         for entry in std::fs::read_dir(dir).unwrap() {
@@ -1658,15 +1766,20 @@ mod tests {
                         .collect(),
                     new_node_pos: Point::new(recorded.new_node[0], recorded.new_node[1]),
                 };
-                let line = mov.clone().by(state.current_player, state.board_size);
-                let expected = cut_off(&state.face, &embedding::embed(&state, &line).unwrap());
+                let back = Move {
+                    from_node: mov.to_node,
+                    to_node: mov.from_node,
+                    polyline: mov.polyline.iter().rev().copied().collect(),
+                    new_node_pos: mov.new_node_pos,
+                };
+                let (reversed, _) = count(&mut state.clone(), back);
                 let Outcome::Applied {
                     cut_off: reported, ..
                 } = apply(&mut state, mov)
                 else {
                     panic!("{} rejected a recorded move", path.display());
                 };
-                assert_eq!(reported, expected, "{}", path.display());
+                assert_eq!(reported, reversed, "{}", path.display());
                 if recorded.from != recorded.to && reported > 0 {
                     chords_cut += 1;
                 }
