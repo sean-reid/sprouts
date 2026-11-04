@@ -34,8 +34,7 @@ export interface GameRecord extends Omit<Fixture, "moves"> {
   version: 1;
   firstPlayer: Player;
   cursor: number;
-  // The settle the game was played under; 0 is a game recorded with no
-  // settling, which replays with none so its strokes still fit.
+  // The settle the game was played under; 0 replays with none.
   settleVersion: number;
   moves: RecordMove[];
 }
@@ -72,12 +71,9 @@ const RECORD_VERSION = 1;
 // settle version; a version 1 or 2 link was drawn on the circle layout
 // and a link before version 5 was played with no settling.
 const LINK_VERSION = 5;
-// Matches ROUTER_VERSION in src/protocol.rs; a version 4 or later link
-// carries it right after the version byte, and the engine refuses a
-// rehearsal for any other.
+// Match ROUTER_VERSION and SETTLE_VERSION in src/protocol.rs; a link
+// carries them after the version byte from versions 4 and 5 on.
 export const ROUTER_VERSION = 2;
-// Matches SETTLE_VERSION in src/protocol.rs: the settle a new game is
-// played under, carried after the router byte from link version 5 on.
 export const SETTLE_VERSION = 1;
 const FACE_LINK_VERSION = 4;
 const LAYOUT_LINK_VERSION = 3;

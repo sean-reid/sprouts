@@ -814,10 +814,8 @@ fn relax(state: &mut GameState) -> Undo {
     let mut crossings = layout.crossings(tolerance);
     let unit = MIN_NODE_SPACING * scale(state.board_size);
     let mut stride = STRIDE_START * unit;
-    // A stride that collapses after progress starts again from the top,
-    // since a short accepted step leaves it too small to try the long
-    // ones; a collapse with no progress since the last start ends the
-    // settle.
+    // A collapsed stride restarts after progress, since a short accepted
+    // step leaves it too small to try the long ones.
     let mut progressed = false;
     for _ in 0..ROUNDS {
         let level = least + HEADROOM;
