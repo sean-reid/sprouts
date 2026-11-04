@@ -569,15 +569,20 @@ fn shared_game(nodes: usize, moves: usize, pick: usize) -> Result<SharedGame, St
                     let routed = Router::new()
                         .route_at(&state, face, &slack, Parity::Search)
                         .ok()?;
-                    // One kink in the middle, so the thinned stroke stays
-                    // short and still differs from the router's line.
-                    let n = routed.polyline.len();
+                    // One smooth bulge along the length, so the stroke
+                    // still fits in a few cubics and differs from the
+                    // router's line.
+                    let mut along = vec![0.0];
+                    for pair in routed.polyline.windows(2) {
+                        along.push(along.last().unwrap() + pair[0].distance_to(&pair[1]));
+                    }
+                    let length = *along.last().unwrap();
                     let bent: Vec<Point> = routed
                         .polyline
                         .iter()
-                        .enumerate()
-                        .map(|(i, q)| {
-                            let t = 1.0 - (2.0 * i as f64 / (n - 1) as f64 - 1.0).abs();
+                        .zip(&along)
+                        .map(|(q, s)| {
+                            let t = (std::f64::consts::PI * s / length).sin();
                             Point::new(q.x + kink * t, q.y + kink * t)
                         })
                         .collect();
@@ -814,7 +819,7 @@ fn record_shared_games() {
     record_shared_game(
         4,
         8,
-        pick("SPROUTS_PICK_4", 15),
+        pick("SPROUTS_PICK_4", 0),
         &dir.join("eight-moves-4n-1000.json"),
     );
     record_shared_game(
