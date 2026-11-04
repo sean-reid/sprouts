@@ -3,7 +3,11 @@
 //! values below were recorded. Only sums, products, divisions and square
 //! roots go into the strokes, which every platform rounds the same.
 
+#[cfg(test)]
+use crate::curve;
 use crate::protocol::{self, Outcome};
+#[cfg(test)]
+use crate::settle;
 use crate::types::{GameState, Player, Point};
 
 /// The settled board of the seeded 7-node game. A change means version 1
@@ -181,4 +185,85 @@ pub fn seeded_hashes(nodes: usize) -> Vec<u64> {
         }
     }
     hashes
+}
+
+#[cfg(test)]
+fn fold_points<'a>(points: impl Iterator<Item = &'a Point>) -> u64 {
+    let mut h = 0xcbf29ce484222325u64;
+    for p in points {
+        h = (h ^ p.x.to_bits()).wrapping_mul(0x100000001b3);
+        h = (h ^ p.y.to_bits()).wrapping_mul(0x100000001b3);
+    }
+    h
+}
+
+#[cfg(test)]
+fn fold_cubics(cubics: &[curve::Cubic]) -> u64 {
+    let points: Vec<Point> = cubics
+        .iter()
+        .flat_map(|c| [c.p0, c.p1, c.p2, c.p3])
+        .collect();
+    fold_points(points.iter())
+}
+
+/// Hashes along the pipeline of applied move `index` of the seeded game
+/// of `nodes` nodes: the stroke as generated, the fit as kurbo returns
+/// it, the cubics and node after grid rounding, the board before the
+/// settle and after each of its rounds, and the board after it, so one
+/// run on another platform shows the first stage that differs.
+#[cfg(test)]
+pub fn stages(nodes: usize, index: usize) -> Vec<(String, u64)> {
+    let mut state = GameState::with_board_size(nodes, 1000);
+    state.current_player = Player::Human;
+    let mut applied = 0;
+    for pick in seeded_picks(nodes as u64, 40) {
+        if state.face.is_game_over() {
+            break;
+        }
+        let Some(wire) = random_move(&state, pick) else {
+            continue;
+        };
+        if applied < index {
+            if let Outcome::Applied { .. } = protocol::apply(&mut state, wire) {
+                applied += 1;
+            }
+            continue;
+        }
+        let mut out = vec![
+            ("board before".to_string(), hash(&state)),
+            ("stroke".to_string(), fold_points(wire.polyline.iter())),
+        ];
+        let fit = curve::fit(&wire.polyline, curve::tolerance(state.board_size));
+        out.push(("fit".to_string(), fold_cubics(&fit)));
+        let Ok(entered) = protocol::enter(wire, &state) else {
+            out.push(("enter".to_string(), 0));
+            return out;
+        };
+        out.push(("rounded cubics".to_string(), fold_cubics(&entered.segments)));
+        out.push((
+            "rounded node".to_string(),
+            fold_points(std::iter::once(&entered.new_node_pos)),
+        ));
+        if state.apply_move(entered).is_err() {
+            out.push(("apply".to_string(), 0));
+            return out;
+        }
+        out.push(("applied".to_string(), hash(&state)));
+        for (round, h) in settle::settle_traced(&mut state).into_iter().enumerate() {
+            out.push((format!("round {round}"), h));
+        }
+        out.push(("settled".to_string(), hash(&state)));
+        return out;
+    }
+    Vec::new()
+}
+
+/// `stages` as one line of text.
+#[cfg(test)]
+pub fn stage_report(nodes: usize, index: usize) -> String {
+    stages(nodes, index)
+        .iter()
+        .map(|(name, h)| format!("{name} {h:#x}"))
+        .collect::<Vec<_>>()
+        .join(", ")
 }

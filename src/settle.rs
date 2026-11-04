@@ -829,12 +829,43 @@ pub fn settle(state: &mut GameState) {
             ..Undo::default()
         }
     } else {
-        relax(state)
+        relax(state, None)
     };
     state.settles.push(undo);
 }
 
-fn relax(state: &mut GameState) -> Undo {
+/// Settles like `settle` and returns a hash of the layout after every
+/// round, accepted or refused, for finding where two platforms part.
+#[cfg(test)]
+pub(crate) fn settle_traced(state: &mut GameState) -> Vec<u64> {
+    let mut trace = Vec::new();
+    let undo = relax(state, Some(&mut trace));
+    state.settles.push(undo);
+    trace
+}
+
+/// A 64-bit fold of every coordinate of a layout.
+#[cfg(test)]
+fn layout_hash(layout: &Layout) -> u64 {
+    let mut h = 0xcbf29ce484222325u64;
+    let mut fold = |v: f64| h = (h ^ v.to_bits()).wrapping_mul(0x100000001b3);
+    for p in &layout.nodes {
+        fold(p.x);
+        fold(p.y);
+    }
+    for chain in &layout.lines {
+        for p in &chain.pts {
+            fold(p.x);
+            fold(p.y);
+        }
+    }
+    h
+}
+
+fn relax(
+    state: &mut GameState,
+    #[allow(unused_mut, unused_variables)] mut trace: Option<&mut Vec<u64>>,
+) -> Undo {
     let mut undo = Undo {
         board: state.lines.len(),
         ..Undo::default()
@@ -887,6 +918,10 @@ fn relax(state: &mut GameState) -> Undo {
         let roomier = after.least > least + EPS;
         let evener = after.least + EPS >= least && after.energy <= now.energy + EPS;
         let crossed = next.crossings(tolerance);
+        #[cfg(test)]
+        if let Some(trace) = trace.as_deref_mut() {
+            trace.push(layout_hash(&next));
+        }
         if moved > 0.0
             && (roomier || evener)
             && crossed <= crossings

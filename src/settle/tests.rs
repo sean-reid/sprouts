@@ -1,5 +1,6 @@
 use super::golden::{
-    bits, hash, play_random, seeded_hashes, seeded_picks, VERSION_1_GOLDEN, VERSION_1_SEEDED_GAME,
+    bits, hash, play_random, seeded_hashes, seeded_picks, stage_report, VERSION_1_GOLDEN,
+    VERSION_1_SEEDED_GAME,
 };
 use super::*;
 use crate::protocol::{self, SETTLE_VERSION};
@@ -410,7 +411,13 @@ fn version_1_settles_the_seeded_game_to_the_golden_board() {
     let (state, moves) = play_random(7, &seeded_picks(7, 40));
     assert!(moves.len() >= 6, "{} moves", moves.len());
     assert_eq!(state.settle_version, SETTLE_VERSION);
-    assert_eq!(hash(&state), VERSION_1_GOLDEN, "{:#x}", hash(&state));
+    assert_eq!(
+        hash(&state),
+        VERSION_1_GOLDEN,
+        "{:#x}; stages of move 1: {}",
+        hash(&state),
+        stage_report(7, 1)
+    );
 }
 
 /// A link rounds every point to a whole unit. The moves a settled game
@@ -464,7 +471,8 @@ fn version_1_settles_the_seeded_game_the_same_on_every_platform() {
     assert_eq!(
         hashes.as_slice(),
         VERSION_1_SEEDED_GAME,
-        "first differing move {first:?}; got {}",
-        printed.join(" ")
+        "first differing move {first:?}; got {}; stages of that move: {}",
+        printed.join(" "),
+        stage_report(9, first.unwrap_or(0))
     );
 }
