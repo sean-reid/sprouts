@@ -397,6 +397,32 @@ pub fn classify(plan: Classification) -> Result<Classified, String> {
     Ok(Classified { topology: out })
 }
 
+/// Positions whose routes are hashed together.
+#[derive(Debug, Clone, Deserialize, Tsify)]
+pub struct RouteHashPlan {
+    pub plans: Vec<Classification>,
+}
+
+/// The routing hash of the given positions, as hex: each plan replayed
+/// with the AI to move, then every search move routed and its flattening
+/// and node fed to one FNV-1a. The native test records the value a
+/// platform must match.
+pub fn route_hash(plan: RouteHashPlan) -> Result<String, String> {
+    let mut fnv = route::Fnv::default();
+    for plan in plan.plans {
+        let mut state = start(plan.initial_nodes, plan.board_size, Player::AI, plan.nodes)?;
+        for (index, mov) in plan.moves.into_iter().enumerate() {
+            state.current_player = Player::AI;
+            state
+                .apply_move(mov.by(Player::AI, state.board_size))
+                .map_err(|e| format!("move {index}: {}", e.message))?;
+        }
+        state.current_player = Player::AI;
+        route::hash_routes(&mut fnv, &state);
+    }
+    Ok(format!("{:#018x}", fnv.0))
+}
+
 /// A move as a share link carries it: drawn, or routed from its face move
 /// with its node.
 #[derive(Debug, Clone, Deserialize, Tsify)]

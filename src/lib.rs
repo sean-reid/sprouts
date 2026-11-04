@@ -17,8 +17,8 @@ mod validation;
 
 use protocol::{
     AiReply, AutoPlacement, AutoPlacementQuery, Classification, Classified, Curve, FaceMove,
-    FitQuery, Layout, Move, MovesFrom, Outcome, Placement, PlacementQuery, Rehearsal, RouteReply,
-    Snapshot,
+    FitQuery, Layout, Move, MovesFrom, Outcome, Placement, PlacementQuery, Rehearsal,
+    RouteHashPlan, RouteReply, Snapshot,
 };
 use tsify::{Ts, Tsify};
 use types::{GameState, Player, Point};
@@ -80,6 +80,14 @@ impl SproutsGame {
     #[wasm_bindgen(js_name = hashBoard)]
     pub fn hash_board(&self) -> String {
         protocol::hash_board(&self.state)
+    }
+
+    /// The routing hash of the given positions, for the determinism check
+    /// against the native build.
+    #[cfg(feature = "hash")]
+    #[wasm_bindgen(js_name = hashRoutes)]
+    pub fn hash_routes(&self, plan: Ts<RouteHashPlan>) -> Result<String, JsError> {
+        protocol::route_hash(plan.to_rust()?).map_err(|e| JsError::new(&e))
     }
 
     pub fn undo(&mut self) -> bool {
