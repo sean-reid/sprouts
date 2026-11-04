@@ -75,7 +75,9 @@ const undoBtn = byId<HTMLButtonElement>("undoBtn");
 const nodeCountEl = byId<HTMLInputElement>("nodeCount");
 const fewerBtn = byId<HTMLButtonElement>("fewerBtn");
 const moreBtn = byId<HTMLButtonElement>("moreBtn");
+const countNote = byId<HTMLElement>("countNote");
 const startBtn = byId<HTMLButtonElement>("startBtn");
+const startCount = byId<HTMLElement>("startCount");
 const turnEl = byId<HTMLElement>("turn");
 const turnText = byId<HTMLElement>("turnText");
 const firstPlayerButtons = document.querySelectorAll<HTMLButtonElement>("button[data-first]");
@@ -119,6 +121,8 @@ let recentMove: number | null = null;
 let highlightTimer: ReturnType<typeof setTimeout> | null = null;
 // A page opened from a share link reviews that game and leaves the saved one alone.
 let shared = false;
+// The board shown after a failed load keeps the saved game for the next move.
+let fallback = false;
 // A review the player opened, a link, or a finished game stays a review
 // until Undo; one entered by stepping onto an AI-to-move board does not.
 let pinnedReview = false;
@@ -907,34 +911,42 @@ function chosenNodeCount(): number {
   return count;
 }
 
-// The start button names the count only while it differs from the game
-// on the table.
+// Below 768 px the count shows as a badge drawn from data-count.
 function showNodeCount(count: number): void {
   nodeCountEl.value = String(count);
   fewerBtn.disabled = count <= Number(nodeCountEl.min);
   moreBtn.disabled = count >= Number(nodeCountEl.max);
-  startBtn.textContent = count === timeline.initialNodes ? "New Game" : `New game, ${count} nodes`;
+  const pending = count !== timeline.initialNodes;
+  startBtn.classList.toggle("pending", pending);
+  startBtn.dataset.count = String(count);
+  startCount.textContent = pending ? `, ${count} nodes` : "";
+  startBtn.setAttribute("aria-label", pending ? `New game, ${count} nodes` : "New game");
+  for (const button of [fewerBtn, moreBtn]) {
+    if (button.disabled && document.activeElement === button) nodeCountEl.focus();
+  }
 }
 
-// A board with nothing played on it re-lays at the new count; any other
-// board stays and the count waits on the start button.
+// The status line describes the board, so a pending count goes to the note.
 function setNodeCount(count: number): void {
   showNodeCount(count);
-  if (busy()) return;
-  if (timeline.moves.length > 0 || state.reviewing) {
-    setStatus(`${count} nodes`);
-  } else if (count !== timeline.initialNodes) {
-    void newGame(count, true, `${count} nodes. ${DRAW_HINT}`);
+  const untouched = timeline.moves.length === 0 && !state.reviewing && !busy();
+  if (untouched) {
+    if (count !== timeline.initialNodes) {
+      void newGame(count, !fallback, `${count} nodes. ${DRAW_HINT}`);
+    }
+  } else {
+    countNote.textContent = `Next game: ${count} nodes`;
   }
 }
 
 function stepCount(delta: number): void {
-  setNodeCount(clampCount(nodeCountEl.valueAsNumber + delta));
+  setNodeCount(clampCount(clampCount(nodeCountEl.valueAsNumber) + delta));
 }
 
 // A fresh game forgets the saved one and the link; the fallback after a
 // failed load keeps both so the next move, not the failure, replaces them.
 async function newGame(nodeCount: number, fresh = true, hint = DRAW_HINT): Promise<void> {
+  fallback = !fresh;
   resetTable();
   shared = false;
   pinnedReview = false;
@@ -1108,12 +1120,6 @@ function wireInput(): void {
   startBtn.addEventListener("click", () => void newGame(chosenNodeCount()));
   fewerBtn.addEventListener("click", () => stepCount(-1));
   moreBtn.addEventListener("click", () => stepCount(1));
-  // A typed value counts once it is whole and in range; anything else
-  // waits for the field to settle and is held to the range then.
-  nodeCountEl.addEventListener("input", () => {
-    const typed = nodeCountEl.valueAsNumber;
-    if (Number.isInteger(typed) && typed === clampCount(typed)) setNodeCount(typed);
-  });
   nodeCountEl.addEventListener("change", () => setNodeCount(chosenNodeCount()));
   nodeCountEl.addEventListener("keydown", (e) => {
     if (e.key === "Enter") void newGame(chosenNodeCount());

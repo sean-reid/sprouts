@@ -70,17 +70,23 @@ h1 {
   min-height: 44px;
 }
 
-/* The start label grows with the count, so it breaks inside the button
-   rather than adding a row above the board. */
+/* The start label grows with the count and must not add a row above the
+   board, so the row never wraps. */
 .controls.game {
   flex-wrap: nowrap;
 }
 
 #startBtn {
-  flex: 1 1 auto;
-  min-width: 0;
-  padding: 4px 10px;
-  line-height: 1.3;
+  white-space: nowrap;
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
 }
 
 .node-count {
@@ -115,16 +121,33 @@ h1 {
   font-variant-numeric: tabular-nums;
 }
 
-/* The word does not fit the 375 wide row beside the stepper, New Game and
-   Undo; the group keeps its name for assistive tech. */
+/* The word and the full pending label do not fit the 375 wide row beside
+   the stepper and Undo; the group keeps its name and the button its
+   aria-label for assistive tech, and the count shows as a badge. */
 @media (max-width: 767px) {
-  #nodeCountLabel {
+  #nodeCountLabel,
+  #startCount {
     position: absolute;
     width: 1px;
     height: 1px;
     overflow: hidden;
     clip-path: inset(50%);
     white-space: nowrap;
+  }
+
+  #startBtn.pending::after {
+    content: attr(data-count);
+    display: inline-block;
+    min-width: 18px;
+    margin-left: 6px;
+    padding: 0 5px;
+    border-radius: 9px;
+    background: #2a2a2a;
+    color: #ffffff;
+    font-size: 10px;
+    line-height: 18px;
+    letter-spacing: 0;
+    vertical-align: middle;
   }
 }
 
