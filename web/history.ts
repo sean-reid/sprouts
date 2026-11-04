@@ -60,6 +60,8 @@ export function drawn(move: RecordedMove): boolean {
 }
 
 export type Applied = Extract<Outcome, { kind: "applied" }>;
+// A line as the engine drew it, before the board settled around it.
+type DrawnLine = Pick<Line, "fromNode" | "toNode" | "polyline" | "newNodePos" | "segments">;
 
 export const STORAGE_KEY = "sprouts.game";
 const HASH_PREFIX = "#game=";
@@ -166,11 +168,12 @@ export class History {
 
   // A move made from the cursor discards whatever was ahead of it; the
   // AI's move comes with the face move it was drawn from.
-  push(move: Move, topology?: FaceMove, cutOff?: number): void {
+  push(move: Move, topology?: FaceMove, cutOff?: number, segments?: Cubic[]): void {
     this.moves.length = this.cursor;
     const kept = cloneMove(move);
     if (cutOff !== undefined) kept.cutOff = cutOff;
     if (topology) kept.topology = topology;
+    if (segments) kept.segments = segments;
     this.moves.push(kept);
     this.cursor = this.moves.length;
   }
@@ -196,7 +199,10 @@ export class History {
   // Takes the spline the engine holds for each move up to the cursor; the
   // board settles after every move and undo, so the spline a move showed
   // last time may not be the one it shows now.
+  // Under a settle the engine's lines are not the moves as drawn, so only
+  // an unsettled game takes its splines from them.
   adopt(lines: Line[]): void {
+    if (this.settleVersion !== 0) return;
     lines.forEach((line, i) => {
       const move = this.moves[i];
       if (!move) return;
@@ -208,7 +214,7 @@ export class History {
 
   // Takes the line the engine drew for move number index + 1 when the move
   // arrived as topology.
-  settle(index: number, line: Line | undefined): void {
+  settle(index: number, line: DrawnLine | undefined): void {
     const move = this.moves[index];
     if (!move || !line || drawn(move)) return;
     if (line.fromNode === move.fromNode && line.toNode === move.toNode) {
@@ -220,7 +226,7 @@ export class History {
 
   // Takes the outcome of applying move number index + 1.
   applied(index: number, outcome: Applied): void {
-    this.settle(index, outcome.snapshot.lines[index]);
+    this.settle(index, { ...outcome.mov, segments: outcome.segments });
     const move = this.moves[index];
     if (move) move.cutOff = outcome.cutOff;
   }

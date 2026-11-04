@@ -239,7 +239,7 @@ test("a pinch during the drag cancels it and leaves the dot where it was", async
 
   await tapAway(page);
   await expect(page.locator("#status")).toHaveText("Your turn!", { timeout: 60_000 });
-  await expectNodeDrawnNear(page, moved, 4);
+  await expectNodeDrawnNear(page, moved, 4, t);
 });
 
 test("Escape while the fit is pending returns to idle", async ({ page }) => {

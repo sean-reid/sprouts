@@ -62,15 +62,33 @@ pub struct Snapshot {
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum Outcome {
     /// `cut_off` counts the nodes the move put on its new side: inside a
-    /// loop, or on the face a splitting chord closes off.
+    /// loop, or on the face a splitting chord closes off. `mov` is the move
+    /// as it was drawn with the spline it committed as, which a replay
+    /// sends again.
     #[serde(rename_all = "camelCase")]
     Applied {
         snapshot: Snapshot,
         cut_off: usize,
+        mov: Move,
+        segments: Vec<Cubic>,
     },
     Rejected {
         rejection: Rejection,
     },
+}
+
+/// The outcome of a move just applied and settled.
+fn applied(state: &GameState) -> Outcome {
+    let last = state
+        .move_history
+        .last()
+        .expect("an applied move is recorded");
+    Outcome::Applied {
+        snapshot: snapshot(state),
+        cut_off: cut_off(&state.face),
+        mov: Move::from(last.clone()),
+        segments: last.segments.clone(),
+    }
 }
 
 /// The AI's answer: a move with the spline it commits as, so the page
@@ -285,10 +303,7 @@ fn commit(state: &mut GameState, line: types::Move) -> Outcome {
     match state.apply_move(line) {
         Ok(()) => {
             settle::settle(state);
-            Outcome::Applied {
-                cut_off: cut_off(&state.face),
-                snapshot: snapshot(state),
-            }
+            applied(state)
         }
         Err(rejection) => Outcome::Rejected { rejection },
     }
@@ -815,7 +830,7 @@ mod tests {
     /// but has nobody to reach, so it is not active either.
     #[test]
     fn snapshot_of_a_finished_game() {
-        let mut state = start(1, 1000, Player::Human, None, SETTLE_VERSION).unwrap();
+        let mut state = start(1, 1000, Player::Human, None, 0).unwrap();
         let a = state.nodes[0].position;
         let ring: Vec<Point> = (0..=48)
             .map(|i| {
@@ -1339,12 +1354,12 @@ mod tests {
             polyline: path,
             new_node_pos: placed.position,
         };
-        let Outcome::Applied { snapshot, .. } = apply(&mut state, mov) else {
+        let Outcome::Applied { .. } = apply(&mut state, mov) else {
             panic!("wavy chord rejected");
         };
-        assert_eq!(snapshot.lines[0].segments, shown);
-        assert_eq!(snapshot.lines[0].new_node_pos, placed.position);
-        assert_eq!(snapshot.nodes[4].position, placed.position);
+        let committed = state.move_history.last().unwrap();
+        assert_eq!(committed.segments, shown);
+        assert_eq!(committed.new_node_pos, placed.position);
         let line = &state.lines[0];
         assert_eq!(line.flat, line.flatten(curve::tolerance(state.board_size)));
     }
@@ -1369,15 +1384,15 @@ mod tests {
         let AiReply::Move { mov, segments, .. } = ai_move(&mut state) else {
             panic!("the AI has a move on an open board");
         };
-        let Outcome::Applied { snapshot, .. } = apply(&mut state, mov) else {
+        let Outcome::Applied { .. } = apply(&mut state, mov) else {
             panic!("the AI's own move was rejected");
         };
-        assert_eq!(snapshot.lines.last().unwrap().segments, segments);
+        assert_eq!(state.move_history.last().unwrap().segments, segments);
     }
 
     #[test]
     fn a_line_on_the_wire_carries_its_stroke_and_segments_but_not_the_flattening() {
-        let mut state = GameState::new(4);
+        let mut state = start(4, 1000, Player::Human, None, 0).unwrap();
         let path = wavy(state.nodes[0].position, state.nodes[1].position);
         let new_node_pos = path[20];
         let mov = Move {
@@ -1719,10 +1734,10 @@ mod tests {
                 "{listed:?} read back as {read:?}"
             );
             let mut played = state.clone();
-            let Outcome::Applied { snapshot, .. } = apply(&mut played, mov) else {
+            let Outcome::Applied { .. } = apply(&mut played, mov) else {
                 panic!("the routed move for {listed:?} was rejected");
             };
-            assert_eq!(snapshot.lines[0].segments, segments);
+            assert_eq!(played.move_history[0].segments, segments);
         }
         let wire = serde_json::to_value(route_move(&state, face_move(0, 1, vec![]))).unwrap();
         assert_eq!(wire["kind"], json!("routed"));

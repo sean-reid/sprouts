@@ -13,6 +13,8 @@ import type { Fixture } from "../../web/record";
 const expect = baseExpect.configure({ timeout: 20_000 });
 import {
   awaitReply,
+  boardNodes,
+  boardSettled,
   clickAway,
   expectNodeDrawnAt,
   expectSameStrokes,
@@ -139,16 +141,23 @@ test("jumping to a board where the AI is to move enters review and keeps the tai
   await expect(current(page)).toHaveText(/^2\. AI/);
 });
 
+// A link rounds the drawn geometry to its quantum and the visitor's board
+// settles from that, so a settled game comes back within this many world
+// units per node rather than stroke for stroke.
+const SETTLED_REPLAY_UNITS = 20;
+
 test("a share link reopens the game in review and steps through it", async ({ page, browser }) => {
   await openBoard(page);
   await playExchange(page);
-  const before = await strokeCells(page);
+  await boardSettled(page);
+  const source = await boardNodes(page);
   const { url, payload } = await share(page, "share-payload-chars");
   expect(payload).toBeLessThan(EXCHANGE_LINK_BUDGET);
   await shot(page, "history-shared-source");
 
   const visitor = await browser.newContext(visitorOptions());
   const other = await visitor.newPage();
+  await other.addInitScript(interceptWorkerMessages);
   await other.goto(url);
   await expect(other.locator("#status")).toHaveText(/^Reviewing: move 2 of 2/, {
     timeout: 20_000,
@@ -159,7 +168,17 @@ test("a share link reopens the game in review and steps through it", async ({ pa
   await expect(other.locator("#backBtn")).toBeEnabled();
   await shot(other, "history-shared-visitor");
 
-  expectSameStrokes(before, await strokeCells(other));
+  const linked = await boardNodes(other);
+  expect(linked.size).toBe(source.size);
+  let offset = 0;
+  for (const [id, at] of source) {
+    const there = linked.get(id)!;
+    offset = Math.max(offset, Math.hypot(there.x - at.x, there.y - at.y));
+  }
+  test
+    .info()
+    .annotations.push({ type: "shared-node-offset-units", description: offset.toFixed(1) });
+  expect(offset).toBeLessThanOrEqual(SETTLED_REPLAY_UNITS);
 
   await other.locator("#backBtn").click();
   await expect(current(other)).toHaveText("1. You, joins two nodes");

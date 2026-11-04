@@ -1,14 +1,19 @@
 import { expect, test, type Page } from "@playwright/test";
+import type { Cubic } from "../../pkg/sprouts";
+import { decodeRecord, hasStroke, LINK_QUANTUM, STROKE_TOLERANCE } from "../../web/history";
 import {
   clickAway,
   findDot,
   fit,
   frameOf,
+  HASH_PREFIX,
   holdNext,
   interceptWorkerMessages,
+  latestCurve,
   nodeWorld,
   openBoard,
   PLACING_HINT,
+  share,
   shot,
   toClient,
   wheelZoomTo,
@@ -65,50 +70,6 @@ function captureBlue(page: Page, key: string, exclude: Exclusion[]): Promise<num
   );
 }
 
-// Counts pixels of one mask with no pixel of the other within `radius`
-// device pixels, in both directions.
-function compareBlue(
-  page: Page,
-  a: string,
-  b: string,
-  radius: number,
-): Promise<{ aMissing: number; bMissing: number }> {
-  return page.evaluate(
-    ({ a, b, radius }) => {
-      const store = window as unknown as Record<string, { mask: Uint8Array; width: number }>;
-      const missing = (from: string, to: string): number => {
-        const source = store[from];
-        const target = store[to];
-        if (!source || !target) return Number.MAX_SAFE_INTEGER;
-        const { width } = source;
-        const height = source.mask.length / width;
-        let count = 0;
-        for (let i = 0; i < source.mask.length; i++) {
-          if (!source.mask[i]) continue;
-          const x = i % width;
-          const y = Math.floor(i / width);
-          let found = false;
-          for (let dy = -radius; dy <= radius && !found; dy++) {
-            for (let dx = -radius; dx <= radius; dx++) {
-              const nx = x + dx;
-              const ny = y + dy;
-              if (nx < 0 || ny < 0 || nx >= width || ny >= height) continue;
-              if (target.mask[ny * width + nx]) {
-                found = true;
-                break;
-              }
-            }
-          }
-          if (!found) count++;
-        }
-        return count;
-      };
-      return { aMissing: missing(a, b), bMissing: missing(b, a) };
-    },
-    { a, b, radius },
-  );
-}
-
 test.beforeEach(async ({ page }) => {
   await page.addInitScript(interceptWorkerMessages);
   await openBoard(page);
@@ -153,10 +114,33 @@ test("a click that lands before the fit returns still places the node", async ({
   await expect(page.locator("#undoBtn")).toBeEnabled({ timeout: 60_000 });
 });
 
-test("the locked curve is the line the move commits, at fit zoom and at 4x", async ({ page }) => {
+// Distance from a point to a chain of cubics, sampled.
+function offCurve(p: { x: number; y: number }, curve: Cubic[]): number {
+  let best = Infinity;
+  for (const c of curve) {
+    for (let i = 0; i <= 64; i++) {
+      const t = i / 64;
+      const u = 1 - t;
+      const x =
+        u * u * u * c.p0.x + 3 * u * u * t * c.p1.x + 3 * u * t * t * c.p2.x + t * t * t * c.p3.x;
+      const y =
+        u * u * u * c.p0.y + 3 * u * u * t * c.p1.y + 3 * u * t * t * c.p2.y + t * t * t * c.p3.y;
+      best = Math.min(best, Math.hypot(p.x - x, p.y - y));
+    }
+  }
+  return best;
+}
+
+// The board settles once the move is in, so the committed line moves; the
+// curve the page showed locked is the one the game records and shares.
+test("the locked curve is the curve the move is recorded with, at fit zoom and at 4x", async ({
+  page,
+}) => {
   const { frame, fitted, along } = await lockArc(page);
   await page.waitForTimeout(400);
   await shot(page, "curve-locked-fit");
+  const shown = await latestCurve(page);
+  expect(shown.length).toBeGreaterThan(0);
 
   const mid = along(0.5);
   const zoomed = await wheelZoomTo(page, frame, fitted, toClient(frame, fitted, mid), 4);
@@ -171,13 +155,16 @@ test("the locked curve is the line the move commits, at fit zoom and at 4x", asy
   const locked = await captureBlue(page, "locked", exclude);
   expect(locked).toBeGreaterThan(500);
 
-  await holdNext(page, "aiMove", 10_000);
   await clickAway(page);
-  await expect(page.locator("#status")).toHaveText(/AI is thinking/);
-  const committed = await captureBlue(page, "committed", exclude);
+  await expect(page.locator("#status")).toHaveText("Your turn!", { timeout: 60_000 });
   await shot(page, "curve-committed-4x");
 
-  const { aMissing, bMissing } = await compareBlue(page, "locked", "committed", 2);
-  expect(aMissing / locked).toBeLessThan(0.02);
-  expect(bMissing / committed).toBeLessThan(0.02);
+  const { url } = await share(page, "curve-link-chars");
+  const linked = decodeRecord(url.slice(url.indexOf(HASH_PREFIX) + HASH_PREFIX.length));
+  const first = linked?.moves[0];
+  if (!first || !hasStroke(first)) throw new Error("the first move did not decode as geometry");
+  const slack = STROKE_TOLERANCE + LINK_QUANTUM;
+  for (const [x, y] of first.polyline) {
+    expect(offCurve({ x, y }, shown)).toBeLessThanOrEqual(slack);
+  }
 });

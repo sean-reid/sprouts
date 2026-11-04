@@ -1,5 +1,6 @@
 import { expect, test, type Page } from "@playwright/test";
 import {
+  boardSettled,
   clickAway,
   drawBetween,
   expectDotAt,
@@ -44,6 +45,7 @@ test("the first-player toggle restarts an empty board and waits on one in play",
   await expect(page.locator("#moveList li")).toHaveText([/^1\. AI, /]);
   await expect.poll(() => inkPixels(page)).toBeGreaterThan(empty);
 
+  await boardSettled(page);
   const opened = await strokeCells(page);
   await page.locator('button[data-first="human"]').click();
   await expect(page.locator("#status")).toHaveText("You start next game");
@@ -64,6 +66,7 @@ test("the first-player toggle restarts an empty board and waits on one in play",
   await clickAway(page);
   await expect(page.locator("#status")).toHaveText("Your turn!", { timeout: 60_000 });
 
+  await boardSettled(page);
   const played = await strokeCells(page);
   await page.locator('button[data-first="human"]').click();
   await expect(page.locator("#status")).toHaveText("You start next game");

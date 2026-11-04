@@ -240,9 +240,7 @@ function stopThinking(): void {
 }
 
 function busy(): boolean {
-  return (
-    state.mode !== "idle" || state.thinking || submitting || seeking || state.settling !== null
-  );
+  return state.mode !== "idle" || state.thinking || submitting || seeking;
 }
 
 function updateControls(): void {
@@ -383,7 +381,7 @@ function handleStart(world: Point, kind: PointerKind): boolean {
     if (state.gameOver && timeline.atEnd) openDialog();
     return false;
   }
-  if (busy() || state.gameOver) return false;
+  if (busy() || state.settling !== null || state.gameOver) return false;
   const node = findNodeAt(world, kind === "touch" ? 30 : 15);
   if (!node || !state.activeNodes.has(node.id)) return false;
   keys.reset();
@@ -593,7 +591,7 @@ interface Drawn {
 }
 
 function recordMove(move: Move, outcome: Applied, drawn?: Drawn, topology?: FaceMove): void {
-  timeline.push(move, topology, outcome.cutOff);
+  timeline.push(move, topology, outcome.cutOff, drawn?.segments);
   applySnapshot(outcome.snapshot, drawn);
   persist();
 }
@@ -667,43 +665,53 @@ function animateSettle(before: Geometry): void {
   settleRun++;
   if (!moved || state.reducedMotion) {
     state.settling = null;
+    canvas.classList.remove("settling");
     return;
   }
   const run = settleRun;
   const epoch = gameEpoch;
   const target = state.nodes;
   const started = performance.now();
+  // The board the frames ease from: the previous one, so strokes are held
+  // from the moment the snapshot lands rather than from the first frame.
+  const shown = (eased: number): Geometry => ({
+    nodes: state.nodes.map((node) => {
+      const was = nodes.get(node.id);
+      return was ? { ...node, position: lerp(was.position, node.position, eased) } : node;
+    }),
+    lines: state.lines.map((line): Line => {
+      const was = lines.get(line.id);
+      if (!was || was.segments.length !== line.segments.length) return line;
+      return {
+        ...line,
+        newNodePos: lerp(was.newNodePos, line.newNodePos, eased),
+        segments: line.segments.map((c, i) => {
+          const from = was.segments[i]!;
+          return {
+            p0: lerp(from.p0, c.p0, eased),
+            p1: lerp(from.p1, c.p1, eased),
+            p2: lerp(from.p2, c.p2, eased),
+            p3: lerp(from.p3, c.p3, eased),
+          };
+        }),
+      };
+    }),
+  });
+  state.settling = shown(0);
+  canvas.classList.add("settling");
   const frame = (now: number): void => {
-    if (run !== settleRun || epoch !== gameEpoch || state.nodes !== target) return;
+    if (run !== settleRun) return;
+    if (epoch !== gameEpoch || state.nodes !== target) {
+      state.settling = null;
+      canvas.classList.remove("settling");
+      return;
+    }
     const t = Math.min(1, (now - started) / SETTLE_MS);
-    const eased = 1 - (1 - t) * (1 - t);
-    state.settling = {
-      nodes: state.nodes.map((node) => {
-        const was = nodes.get(node.id);
-        return was ? { ...node, position: lerp(was.position, node.position, eased) } : node;
-      }),
-      lines: state.lines.map((line): Line => {
-        const was = lines.get(line.id);
-        if (!was || was.segments.length !== line.segments.length) return line;
-        return {
-          ...line,
-          newNodePos: lerp(was.newNodePos, line.newNodePos, eased),
-          segments: line.segments.map((c, i) => {
-            const from = was.segments[i]!;
-            return {
-              p0: lerp(from.p0, c.p0, eased),
-              p1: lerp(from.p1, c.p1, eased),
-              p2: lerp(from.p2, c.p2, eased),
-              p3: lerp(from.p3, c.p3, eased),
-            };
-          }),
-        };
-      }),
-    };
+    state.settling = shown(1 - (1 - t) * (1 - t));
     if (t < 1) requestAnimationFrame(frame);
     else {
       state.settling = null;
-      updateControls();
+      canvas.classList.remove("settling");
     }
     targets.place();
   };

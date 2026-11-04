@@ -94,7 +94,8 @@ test("a row reached with Tab highlights its move and Enter seeks to it", async (
   await page.keyboard.press("Enter");
   await expect(page.locator("#status")).toHaveText("Reviewing: move 1 of 2.");
   await expect(rows(page).nth(0)).toHaveAttribute("aria-current", "step");
-  await expectRing(page, a);
+  // The board after move 1 settled on its own, so node 0 sits elsewhere.
+  await expectRing(page, await nodeOnScreen(page, 0, 4));
 });
 
 test("tapping a row points out the move it lands on for two seconds", async ({ page }) => {
