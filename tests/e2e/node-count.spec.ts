@@ -283,3 +283,46 @@ test("the stepper and the start button are touch targets", async ({ page }) => {
   }
   await shot(page, "node-count-mobile");
 });
+
+// The field's right third, inside the border, where a browser spin button
+// would sit; the digit is centred and never reaches it.
+async function litPixelsRightOfCount(page: Page): Promise<number> {
+  const field = page.locator("#nodeCount");
+  await field.hover();
+  const box = await field.boundingBox();
+  if (!box) throw new Error("the count field has no box");
+  const png = await page.screenshot({ clip: box });
+  return page.evaluate(
+    async ({ data, width }) => {
+      const img = new Image();
+      img.src = `data:image/png;base64,${data}`;
+      await img.decode();
+      const canvas = document.createElement("canvas");
+      canvas.width = img.naturalWidth;
+      canvas.height = img.naturalHeight;
+      const ctx = canvas.getContext("2d");
+      if (!ctx) throw new Error("no 2d context");
+      ctx.drawImage(img, 0, 0);
+      const scale = canvas.width / width;
+      const x0 = Math.round((width - 14) * scale);
+      const x1 = Math.round((width - 2) * scale);
+      const y0 = Math.round(2 * scale);
+      const y1 = canvas.height - y0;
+      const px = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
+      let lit = 0;
+      for (let y = y0; y < y1; y++) {
+        for (let x = x0; x < x1; x++) {
+          const i = (y * canvas.width + x) * 4;
+          if (Math.max(px[i] ?? 0, px[i + 1] ?? 0, px[i + 2] ?? 0) > 80) lit++;
+        }
+      }
+      return lit;
+    },
+    { data: png.toString("base64"), width: box.width },
+  );
+}
+
+test("the count field draws no spinner arrows beside the number", async ({ page }) => {
+  expect(await litPixelsRightOfCount(page)).toBe(0);
+  await shot(page, "node-count-field");
+});
