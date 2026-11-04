@@ -528,6 +528,13 @@ struct SharedGame {
 fn shared_game(nodes: usize, moves: usize, pick: usize) -> Result<SharedGame, String> {
     let mut state = GameState::with_board_size(nodes, 1000);
     state.current_player = Player::Human;
+    // The layout a record carries is where the nodes started; the settle
+    // moves them as the game goes on.
+    let layout: Vec<[f64; 2]> = state
+        .nodes
+        .iter()
+        .map(|n| [n.position.x, n.position.y])
+        .collect();
     let kink = 4.0 * curve::tolerance(state.board_size);
     let human = rules(&state);
     let slack = Rules {
@@ -614,12 +621,7 @@ fn shared_game(nodes: usize, moves: usize, pick: usize) -> Result<SharedGame, St
         version: crate::replay::FIXTURE_VERSION,
         initial_nodes: state.initial_node_count,
         board_size: state.board_size,
-        nodes: Some(
-            state.nodes[..state.initial_node_count]
-                .iter()
-                .map(|n| [n.position.x, n.position.y])
-                .collect(),
-        ),
+        nodes: Some(layout),
         settle_version: state.settle_version,
         moves: record,
     };
@@ -714,7 +716,10 @@ fn rehearse_shared_game(game: &SharedGame) -> Drift {
         initial_nodes: fixture.initial_nodes,
         board_size: fixture.board_size,
         first_player: Player::Human,
-        nodes: None,
+        nodes: fixture
+            .nodes
+            .as_ref()
+            .map(|nodes| nodes.iter().map(|q| round(p(q[0], q[1]))).collect()),
         moves,
     })
     .unwrap();
