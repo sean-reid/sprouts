@@ -3,6 +3,8 @@ import type {
   Classified,
   Cubic,
   FaceMove,
+  Indexed,
+  IndexedMove,
   Line,
   Move,
   Outcome,
@@ -25,7 +27,15 @@ export interface TopologyMove {
   node: [number, number];
 }
 
-export type RecordMove = FixtureMove | TopologyMove;
+// A move a link carried as its index in the engine's move list for the
+// position, with its node's place along the routed curve; the engine
+// lists and draws it on load, so its ends are unknown until then.
+export interface IndexedRecordMove {
+  index: number;
+  along: number;
+}
+
+export type RecordMove = FixtureMove | TopologyMove | IndexedRecordMove;
 
 // A replay fixture plus the fields a resumed session needs, so a saved
 // game loads in the bench unchanged; a record decoded from a link may hold
@@ -43,16 +53,25 @@ export function hasStroke(move: RecordMove): move is FixtureMove {
   return "polyline" in move;
 }
 
+export function isIndexed(move: RecordMove): move is IndexedRecordMove {
+  return "index" in move;
+}
+
 // A move with what the engine reported about it: the spline it fitted, the
-// face move the router draws this very line from, when it does, and the
-// nodes it cut off, unknown until the engine has applied it. The saved
+// face move the router draws this very line from, when it does, the
+// nodes it cut off, unknown until the engine has applied it, and its
+// index in the move list when a link is to carry it that way. The saved
 // record keeps the stroke and the count. A move that arrived as topology
-// has an empty polyline until the engine has drawn it.
+// or by index has an empty polyline until the engine has drawn it, and
+// one that arrived by index has UNKNOWN_NODE for its ends until then.
 export interface RecordedMove extends Move {
   segments?: Cubic[];
   topology?: FaceMove;
   cutOff?: number;
+  indexed?: IndexedMove;
 }
+
+export const UNKNOWN_NODE = -1;
 
 export function drawn(move: RecordedMove): boolean {
   return move.polyline.length > 0;
@@ -70,17 +89,21 @@ const RECORD_VERSION = 1;
 // move as its face move where the router redraws it, and version 5 the
 // settle version; a version 1 or 2 link was drawn on the circle layout
 // and a link before version 5 was played with no settling.
-const LINK_VERSION = 5;
-// Match ROUTER_VERSION and SETTLE_VERSION in src/protocol.rs; a link
+const LINK_VERSION = 6;
+// Match ROUTER_VERSION, SETTLE_VERSION and MOVE_LIST_VERSION in
+// src/protocol.rs; a link
 // carries them after the version byte from versions 4 and 5 on.
 export const ROUTER_VERSION = 4;
 export const SETTLE_VERSION = 1;
+export const MOVE_LIST_VERSION = 1;
+const SHAPES_LINK_VERSION = 5;
 const FACE_LINK_VERSION = 4;
 const LAYOUT_LINK_VERSION = 3;
 const CUBIC_LINK_VERSION = 2;
 const STROKE_LINK_VERSION = 1;
 const LINK_VERSIONS = [
   LINK_VERSION,
+  SHAPES_LINK_VERSION,
   FACE_LINK_VERSION,
   LAYOUT_LINK_VERSION,
   CUBIC_LINK_VERSION,
@@ -101,6 +124,8 @@ export const STROKE_TOLERANCE = 1.5;
 const SHAPE_STROKE = 0;
 const SHAPE_CUBICS = 1;
 const SHAPE_FACE = 2;
+// Bit 0 of an indexed move's varint says a place along the curve follows.
+const HAS_PLACE = 1;
 // Each move adds four half-edges to the face model.
 const HALF_EDGES_PER_MOVE = 4;
 // Points travel in whole units, which moves one by at most 0.71.
@@ -210,6 +235,10 @@ export class History {
   settle(index: number, line: DrawnLine | undefined): void {
     const move = this.moves[index];
     if (!move || !line || drawn(move)) return;
+    if (move.fromNode === UNKNOWN_NODE) {
+      move.fromNode = line.fromNode;
+      move.toNode = line.toNode;
+    }
     if (line.fromNode === move.fromNode && line.toNode === move.toNode) {
       move.polyline = line.polyline.map((p) => ({ x: p.x, y: p.y }));
       move.newNodePos = { x: line.newNodePos.x, y: line.newNodePos.y };
@@ -245,6 +274,7 @@ export class History {
     const move = this.moves[index];
     if (!move) return "";
     const who = this.moverOf(index) === "human" ? "You" : "AI";
+    if (move.fromNode === UNKNOWN_NODE) return `${index + 1}. ${who}`;
     const loop = move.fromNode === move.toNode;
     return `${index + 1}. ${who}, ${shapeText(loop, move.cutOff ?? 0)}`;
   }
@@ -253,6 +283,7 @@ export class History {
   ids(index: number): string {
     const move = this.moves[index];
     if (!move) return "";
+    if (move.fromNode === UNKNOWN_NODE) return `new node ${this.newNodeOf(index)}`;
     return `${move.fromNode} to ${move.toNode}, new node ${this.newNodeOf(index)}`;
   }
 
@@ -275,12 +306,18 @@ function cloneMove(move: RecordedMove): RecordedMove {
   if (move.segments) clone.segments = move.segments;
   if (move.topology) clone.topology = move.topology;
   if (move.cutOff !== undefined) clone.cutOff = move.cutOff;
+  if (move.indexed) clone.indexed = move.indexed;
   return clone;
 }
 
 // The face move to send for a move the engine has yet to draw.
 export function pendingFace(move: RecordedMove): FaceMove | undefined {
   return drawn(move) ? undefined : move.topology;
+}
+
+// The indexed move to send for a move the engine has yet to list and draw.
+export function pendingIndex(move: RecordedMove): IndexedMove | undefined {
+  return drawn(move) ? undefined : move.indexed;
 }
 
 // The move as the engine takes it, without the segments the page keeps.
@@ -309,6 +346,15 @@ function toRecordMove(move: RecordedMove): FixtureMove {
 }
 
 function fromRecordMove(move: RecordMove): RecordedMove {
+  if (isIndexed(move)) {
+    return {
+      fromNode: UNKNOWN_NODE,
+      toNode: UNKNOWN_NODE,
+      polyline: [],
+      newNodePos: { x: 0, y: 0 },
+      indexed: { index: move.index, along: move.along },
+    };
+  }
   if (hasStroke(move)) {
     return {
       fromNode: move.from,
@@ -411,6 +457,7 @@ function isLayout(value: unknown, count: number): value is [number, number][] {
 function isRecordMove(value: unknown, nodes: number, halfEdges: number): value is RecordMove {
   if (typeof value !== "object" || value === null) return false;
   const m = value as Record<string, unknown>;
+  if ("index" in m) return isCount(m.index) && isCount(m.along) && m.along <= 255;
   if (!isCount(m.from) || !isCount(m.to) || m.from >= nodes || m.to >= nodes) return false;
   if ("face" in m) return isPair(m.node) && isFace(m.face, m.from, m.to, nodes, halfEdges);
   if (m.cutOff !== undefined && !isCount(m.cutOff)) return false;
@@ -467,23 +514,26 @@ function scaleOf(boardSize: number): number {
 }
 
 // Share link layout, little endian: version u8, the router version u8
-// from version 4 on, the settle version u8 from version 5 on, flags u8
-// (bit 0 says the AI opens, bit 1 says the starting positions follow the
-// header), initial
-// nodes u16, board size u16, move count u16, cursor u16, the starting
-// positions as zigzag varint deltas in link quanta when they are not the
-// default layout, then per move: from and to as varints, a shape u8 and
-// the shape. Shapes 0 and 1 carry a varint count, the shape's points and
-// the new node, every point as zigzag varint deltas from the previous
-// point in link quanta, starting at the origin; a stroke counts its
-// points, cubics count segments and carry the first start then the other
-// three control points of each. Shape 2 carries the face move: the spoke
-// at each end as a varint one above the half-edge id with 0 for none, the
-// enclosed node ids as a varint count and varints, then the new node as a
-// point. A move travels as
-// whichever encodes shorter. A version 1 link has from, to and point
-// count as u16, the first point as two u16 tenths, later points as zigzag
-// varint deltas in tenths, and the new node as two u16 tenths.
+// from version 4 on, the settle version u8 from version 5 on, the move
+// list version u8 in version 6, flags u8 (bit 0 says the AI opens, bit 1
+// says the starting positions follow the header), initial nodes u16,
+// board size u16, move count u16, cursor u16, the starting positions as
+// zigzag varint deltas in link quanta when they are not the default
+// layout, then the moves. A version 6 link carries every move as a
+// varint, twice its index in the engine's move list for the position
+// plus HAS_PLACE when a u8 follows naming the node's place along the
+// routed curve. A version 5 link carries per move from and to as varints,
+// a shape u8 and the shape. Shapes 0 and 1 carry a varint count, the
+// shape's points and the new node, every point as zigzag varint deltas
+// from the previous point in link quanta, starting at the origin; a
+// stroke counts its points, cubics count segments and carry the first
+// start then the other three control points of each. Shape 2 carries the
+// face move: the spoke at each end as a varint one above the half-edge id
+// with 0 for none, the enclosed node ids as a varint count and varints,
+// then the new node as a point. A move travels as whichever encodes
+// shorter. A version 1 link has from, to and point count as u16, the
+// first point as two u16 tenths, later points as zigzag varint deltas in
+// tenths, and the new node as two u16 tenths.
 export function encodeRecord(history: History): string {
   const out = new ByteWriter();
   const scale = scaleOf(history.boardSize);
@@ -493,9 +543,11 @@ export function encodeRecord(history: History): string {
     !sameLayout(history.nodes, undefined, history.initialNodes, history.boardSize, quantum / 2)
       ? history.nodes
       : null;
-  out.u8(LINK_VERSION);
+  const indices = history.moves.length > 0 && history.moves.every((move) => move.indexed);
+  out.u8(indices ? LINK_VERSION : SHAPES_LINK_VERSION);
   out.u8(ROUTER_VERSION);
   out.u8(history.settleVersion);
+  if (indices) out.u8(MOVE_LIST_VERSION);
   out.u8((history.firstPlayer === "ai" ? FLAG_AI_FIRST : 0) | (layout ? FLAG_LAYOUT : 0));
   out.u16(history.initialNodes);
   out.u16(history.boardSize);
@@ -504,6 +556,14 @@ export function encodeRecord(history: History): string {
   if (layout) {
     const point = deltaWriter(out, quantum);
     for (const [x, y] of layout) point({ x, y });
+  }
+  if (indices) {
+    for (const move of history.moves) {
+      const { index, along } = move.indexed!;
+      out.varint(index * 2 + (along > 0 ? HAS_PLACE : 0));
+      if (along > 0) out.u8(along);
+    }
+    return base64url(out.bytes());
   }
   // A settled game stores its splines on the link grid, so the cubics are
   // exact and the thinned stroke, which is not, stays out of its links
@@ -589,8 +649,10 @@ export function decodeRecord(payload: string): GameRecord | null {
     const version = reader.u8();
     if (!LINK_VERSIONS.includes(version)) return null;
     if (version >= FACE_LINK_VERSION && reader.u8() !== ROUTER_VERSION) throw new StaleLink();
-    const settleVersion = version >= LINK_VERSION ? reader.u8() : 0;
+    const settleVersion = version >= SHAPES_LINK_VERSION ? reader.u8() : 0;
     if (settleVersion > SETTLE_VERSION) throw new StaleLink();
+    const indices = version >= LINK_VERSION;
+    if (indices && reader.u8() !== MOVE_LIST_VERSION) throw new StaleLink();
     const flags = reader.u8();
     const initialNodes = reader.u16();
     const boardSize = reader.u16();
@@ -612,8 +674,9 @@ export function decodeRecord(payload: string): GameRecord | null {
     }
     const moves: RecordMove[] = [];
     for (let m = 0; m < count; m++) {
-      const move =
-        version === STROKE_LINK_VERSION
+      const move = indices
+        ? readIndexedMove(reader)
+        : version === STROKE_LINK_VERSION
           ? readStrokeMove(reader)
           : readCurveMove(reader, boardSize, version >= FACE_LINK_VERSION);
       if (!move) return null;
@@ -636,7 +699,13 @@ export function decodeRecord(payload: string): GameRecord | null {
   }
 }
 
-// A move of a version 2 or later link; the face shape only from version 4.
+function readIndexedMove(reader: ByteReader): RecordMove {
+  const raw = reader.varint();
+  const along = raw & HAS_PLACE ? reader.u8() : 0;
+  return { index: Math.floor(raw / 2), along };
+}
+
+// A move of a version 2 to 5 link; the face shape only from version 4.
 function readCurveMove(reader: ByteReader, boardSize: number, faces: boolean): RecordMove | null {
   const from = reader.varint();
   const to = reader.varint();
@@ -778,14 +847,17 @@ export function rehearsal(history: History): Rehearsal | null {
   return {
     routerVersion: ROUTER_VERSION,
     settleVersion: record.settleVersion,
+    listVersion: MOVE_LIST_VERSION,
     initialNodes: record.initialNodes,
     boardSize: record.boardSize,
     firstPlayer: record.firstPlayer,
     nodes: record.nodes?.map(([x, y]) => ({ x, y })),
     moves: record.moves.map((move) =>
-      hasStroke(move)
-        ? { kind: "drawn", mov: fromRecordMove(move) }
-        : { kind: "routed", face: move.face, at: { x: move.node[0], y: move.node[1] } },
+      isIndexed(move)
+        ? { kind: "indexed", index: move.index, along: move.along }
+        : hasStroke(move)
+          ? { kind: "drawn", mov: fromRecordMove(move) }
+          : { kind: "routed", face: move.face, at: { x: move.node[0], y: move.node[1] } },
     ),
   };
 }
@@ -801,10 +873,17 @@ export function demote(history: History, index: number): boolean {
 // The engine requests a share needs.
 export interface LinkEngine {
   classify(plan: Classification): Promise<Classified>;
+  index(plan: Classification): Promise<Indexed>;
   rehearse(plan: Rehearsal): Promise<Rehearsed>;
 }
 
-// The game as the link will carry it, worked out on a copy: the
+// The game as the link will carry it, worked out on a copy. First
+// every move is named by its index in the engine's move list and
+// the link is replayed on a fresh board, which routes and settles
+// each move itself; when every move applies the link goes out that
+// way, and the visitor's board is that regenerated board rather than
+// this one. When a move is refused, or the engine cannot index the
+// game, the link carries shapes instead: the
 // engine says which drawn moves the router redraws, then the link
 // is replayed as decoded and any topology move the replay refuses,
 // or lands its node more than DRIFT_TOLERANCE from the recorded
@@ -828,8 +907,21 @@ export async function prepareLink(
   settled?: Point[],
 ): Promise<{ history: History; refusedAt?: number; mismatch?: boolean }> {
   const history = source.clone();
+  for (const move of history.moves) delete move.indexed;
   const plan = classification(history);
   if (plan) {
+    try {
+      const { moves } = await engine.index(plan);
+      moves.forEach((indexed, i) => {
+        const move = history.moves[i];
+        if (move) move.indexed = indexed;
+      });
+      const link = rehearsal(history);
+      if (link && (await engine.rehearse(link)).refused === undefined) return { history };
+    } catch {
+      // A game the engine cannot index travels as shapes.
+    }
+    for (const move of history.moves) delete move.indexed;
     try {
       const { topology } = await engine.classify(plan);
       topology.forEach((face, i) => {
@@ -947,13 +1039,16 @@ function sameMove(
   drift: number,
 ): boolean {
   if (!a || !b) return false;
+  if (isIndexed(a) || isIndexed(b)) {
+    return isIndexed(a) && isIndexed(b) && a.index === b.index && a.along === b.along;
+  }
   if (a.from !== b.from || a.to !== b.to) return false;
   const [ax, ay] = nodeOf(a);
   const [bx, by] = nodeOf(b);
   return Math.hypot(ax - bx, ay - by) <= (hasStroke(a) && hasStroke(b) ? quantum : drift);
 }
 
-function nodeOf(move: RecordMove): [number, number] {
+function nodeOf(move: FixtureMove | TopologyMove): [number, number] {
   return hasStroke(move) ? move.newNode : move.node;
 }
 

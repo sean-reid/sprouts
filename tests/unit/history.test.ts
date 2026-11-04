@@ -2,6 +2,7 @@ import { readdirSync, readFileSync } from "node:fs";
 import { basename, join } from "node:path";
 import { describe, expect, it } from "vitest";
 import type { Cubic, FaceMove, Line, Point, Rehearsal } from "../../pkg/sprouts";
+import type { Indexed } from "../../pkg/sprouts";
 import {
   CURVE_TOLERANCE,
   decodeRecord,
@@ -10,7 +11,10 @@ import {
   encodeRecord,
   hasStroke,
   History,
+  isIndexed,
   LINK_QUANTUM,
+  MOVE_LIST_VERSION,
+  pendingIndex,
   loadSaved,
   pendingFace,
   prepareLink,
@@ -39,6 +43,7 @@ const FLAGS_OFFSET = 3;
 const SHAPE_STROKE = 0;
 const SHAPE_CUBICS = 1;
 const SHAPE_FACE = 2;
+// The shapes link version; version 6 carries indices.
 const LINK_VERSION = 5;
 const FACE_LINK_VERSION = 4;
 const VERSION_1_PAYLOAD =
@@ -106,9 +111,17 @@ function only(record: GameRecord | null) {
 
 function faceOf(move: RecordMove | undefined): FaceMove {
   if (!move) throw new Error("no move decoded");
-  if (hasStroke(move)) throw new Error("the move decoded with a stroke");
+  if (hasStroke(move) || isIndexed(move)) throw new Error("the move decoded without a face");
   return move.face;
 }
+
+// The ends of each move, null for one that travelled by index.
+function ends(moves: RecordMove[] | undefined): ([number, number] | null)[] | undefined {
+  return moves?.map((m) => (isIndexed(m) ? null : [m.from, m.to]));
+}
+
+// An engine that cannot index a game, so a link travels as shapes.
+const noIndex = (): Promise<Indexed> => Promise.reject(new Error("no index"));
 
 describe("the share link codec", () => {
   it("sends a hand-drawn move with a fit as cubics", () => {
@@ -376,7 +389,7 @@ describe("the share link codec", () => {
   it("decodes a version 3 link", () => {
     const record = decodeRecord(VERSION_3_PAYLOAD);
     expect(record?.nodes).toHaveLength(4);
-    expect(record?.moves.map((m) => [m.from, m.to])).toEqual([
+    expect(ends(record?.moves)).toEqual([
       [0, 1],
       [2, 0],
     ]);
@@ -386,7 +399,7 @@ describe("the share link codec", () => {
   it("decodes a version 1 link", () => {
     const record = decodeRecord(VERSION_1_PAYLOAD);
     expect(record?.boardSize).toBe(500);
-    expect(record?.moves.map((m) => [m.from, m.to])).toEqual([
+    expect(ends(record?.moves)).toEqual([
       [0, 1],
       [2, 0],
     ]);
@@ -424,7 +437,10 @@ describe("sameGame", () => {
 
   it("tells apart a node a quantum away or a different endpoint", () => {
     expect(sameGame(nudged(0.6, 0), linked)).toBe(false);
-    const other = { ...linked, moves: linked.moves.map((m) => ({ ...m, to: m.to + 1 })) };
+    const other = {
+      ...linked,
+      moves: linked.moves.map((m) => (isIndexed(m) ? m : { ...m, to: m.to + 1 })),
+    };
     expect(sameGame(other, linked)).toBe(false);
   });
 
@@ -516,6 +532,7 @@ describe("a move that arrives as topology", () => {
         expect(plan.moves).toHaveLength(faces.length);
         return Promise.resolve({ topology: faces });
       },
+      index: noIndex,
       rehearse: () =>
         Promise.resolve({ refused: refusals[seen.rehearsed++], nodes: [], settled: board }),
     };
@@ -529,6 +546,7 @@ describe("a move that arrives as topology", () => {
     const seen = { rehearsed: 0 };
     const engine: LinkEngine = {
       classify: () => Promise.resolve({ topology: [chord, second] }),
+      index: noIndex,
       rehearse: (plan) => {
         seen.rehearsed++;
         const routed = plan.moves[1]?.kind === "routed";
@@ -604,6 +622,7 @@ describe("a move that arrives as topology", () => {
     const seen = { rehearsed: 0 };
     const engine: LinkEngine = {
       classify: () => Promise.resolve({ topology: [chord, second] }),
+      index: noIndex,
       rehearse: (plan) =>
         Promise.resolve({
           refused: undefined,
@@ -680,6 +699,7 @@ describe("a move that arrives as topology", () => {
     let rehearsed: Rehearsal | undefined;
     const engine: LinkEngine = {
       classify: () => Promise.reject(new Error("move 1: Path crosses an existing line")),
+      index: noIndex,
       rehearse: (plan) => {
         rehearsed = plan;
         return Promise.resolve({ refused: undefined, nodes: [], settled: [] });
@@ -694,6 +714,7 @@ describe("a move that arrives as topology", () => {
   it("passes a failing rehearsal on to the caller", async () => {
     const engine: LinkEngine = {
       classify: (plan) => Promise.resolve({ topology: plan.moves.map(() => undefined) }),
+      index: noIndex,
       rehearse: () => Promise.reject(new Error("Worker call 'rehearse' timed out")),
     };
     await expect(prepareLink(twoDrawnMoves(), engine)).rejects.toThrow(/timed out/);
@@ -722,6 +743,177 @@ describe("a move that arrives as topology", () => {
     );
     expect(bytesOf(encodeRecord(history))[SHAPE_OFFSET]).toBe(SHAPE_FACE);
     expect(stroke(history.record().moves[0]).polyline).toHaveLength(2);
+  });
+});
+
+// Header: version, router version, settle version, move list version,
+// flags, initial nodes, board size, move count and cursor.
+const INDEX_HEADER = 13;
+const LIST_OFFSET = 3;
+
+describe("a link that names moves by index", () => {
+  function twoMoves(): History {
+    const history = new History(4, 1000);
+    history.push({
+      fromNode: 0,
+      toNode: 1,
+      polyline: [at(300, 500), at(700, 500)],
+      newNodePos: at(500, 500),
+    });
+    history.push({
+      fromNode: 2,
+      toNode: 3,
+      polyline: [at(500, 300), at(500, 700)],
+      newNodePos: at(500, 650),
+    });
+    return history;
+  }
+
+  // An engine that indexes the two moves and answers the rehearsals in
+  // turn, the first for the indexed link.
+  function indexing(refusals: (number | undefined)[]) {
+    const seen = { indexed: 0, classified: 0, rehearsed: 0, kinds: [] as string[][] };
+    const engine: LinkEngine = {
+      classify: (plan) => {
+        seen.classified++;
+        return Promise.resolve({ topology: plan.moves.map(() => undefined) });
+      },
+      index: (plan) => {
+        seen.indexed++;
+        expect(plan.moves).toHaveLength(2);
+        return Promise.resolve({
+          moves: [
+            { index: 3, along: 128 },
+            { index: 200, along: 0 },
+          ],
+        });
+      },
+      rehearse: (plan) => {
+        seen.kinds.push(plan.moves.map((m) => m.kind));
+        if (plan.moves[0]?.kind === "indexed") expect(plan.listVersion).toBe(MOVE_LIST_VERSION);
+        return Promise.resolve({
+          refused: refusals[seen.rehearsed++],
+          nodes: [],
+          settled: [],
+        });
+      },
+    };
+    return { engine, seen };
+  }
+
+  it("encodes each move as its index and place and reads them back", () => {
+    const history = twoMoves();
+    history.moves[0]!.indexed = { index: 3, along: 128 };
+    history.moves[1]!.indexed = { index: 200, along: 0 };
+    const payload = encodeRecord(history);
+    const bytes = bytesOf(payload);
+    expect(bytes[0]).toBe(6);
+    expect(bytes[LIST_OFFSET]).toBe(MOVE_LIST_VERSION);
+    // 3 * 2 + 1 with its place, then 400 as a two-byte varint.
+    expect([...bytes.slice(INDEX_HEADER)]).toEqual([7, 128, 0x90, 0x03]);
+    const decoded = decodeRecord(payload);
+    expect(decoded?.moves).toEqual([
+      { index: 3, along: 128 },
+      { index: 200, along: 0 },
+    ]);
+    expect(decoded?.cursor).toBe(2);
+    expect(decoded?.settleVersion).toBe(SETTLE_VERSION);
+    if (!decoded) throw new Error("the link does not decode");
+    expect(sameGame(decoded, decoded)).toBe(true);
+    expect(sameGame(decoded, { ...decoded, moves: [{ index: 3, along: 127 }] })).toBe(false);
+  });
+
+  it("refuses a link counting in another move list order", () => {
+    const history = twoMoves();
+    for (const move of history.moves) move.indexed = { index: 0, along: 0 };
+    const bytes = bytesOf(encodeRecord(history));
+    bytes[LIST_OFFSET] = MOVE_LIST_VERSION + 1;
+    expect(() => decodeRecord(payloadOf(bytes))).toThrow(StaleLink);
+  });
+
+  it("sends the moves as shapes while one lacks an index", () => {
+    const history = twoMoves();
+    history.moves[0]!.indexed = { index: 3, along: 128 };
+    expect(bytesOf(encodeRecord(history))[0]).toBe(LINK_VERSION);
+  });
+
+  it("holds an indexed move as pending until the engine draws it", () => {
+    const history = twoMoves();
+    for (const move of history.moves) move.indexed = { index: 1, along: 0 };
+    const visitor = History.from(decodeRecord(encodeRecord(history))!);
+    const first = visitor.moves[0]!;
+    expect(pendingIndex(first)).toEqual({ index: 1, along: 0 });
+    expect(pendingFace(first)).toBeUndefined();
+    expect(visitor.label(0)).toBe("1. You");
+    expect(visitor.ids(0)).toBe("new node 4");
+    expect(() => visitor.record()).toThrow(RangeError);
+    visitor.settle(0, {
+      fromNode: 0,
+      toNode: 1,
+      polyline: [at(300, 500), at(700, 500)],
+      segments: [],
+      newNodePos: at(500, 500),
+    });
+    expect(pendingIndex(first)).toBeUndefined();
+    expect(visitor.label(0)).toBe("1. You, joins two nodes");
+    expect(visitor.ids(0)).toBe("0 to 1, new node 4");
+    expect(visitor.positionOf(4)).toEqual(at(500, 500));
+  });
+
+  it("prepares an index link when the regenerated board takes every move", async () => {
+    const { engine, seen } = indexing([undefined]);
+    const { history, refusedAt, mismatch } = await prepareLink(twoMoves(), engine);
+    expect(refusedAt).toBeUndefined();
+    expect(mismatch).toBeUndefined();
+    expect(seen).toEqual({
+      indexed: 1,
+      classified: 0,
+      rehearsed: 1,
+      kinds: [["indexed", "indexed"]],
+    });
+    expect(history.moves.map((m) => m.indexed)).toEqual([
+      { index: 3, along: 128 },
+      { index: 200, along: 0 },
+    ]);
+    expect(bytesOf(encodeRecord(history))[0]).toBe(6);
+  });
+
+  it("falls back to shapes when the regenerated board refuses a move", async () => {
+    const { engine, seen } = indexing([1, undefined]);
+    const { history, refusedAt } = await prepareLink(twoMoves(), engine);
+    expect(refusedAt).toBeUndefined();
+    expect(seen.indexed).toBe(1);
+    expect(seen.classified).toBe(1);
+    expect(seen.kinds).toEqual([
+      ["indexed", "indexed"],
+      ["drawn", "drawn"],
+    ]);
+    expect(history.moves.every((m) => m.indexed === undefined)).toBe(true);
+    expect(bytesOf(encodeRecord(history))[0]).toBe(LINK_VERSION);
+  });
+
+  it("falls back to shapes when the engine cannot index the game", async () => {
+    const seen = { rehearsed: 0 };
+    const engine: LinkEngine = {
+      classify: (plan) => Promise.resolve({ topology: plan.moves.map(() => undefined) }),
+      index: noIndex,
+      rehearse: () => {
+        seen.rehearsed++;
+        return Promise.resolve({ refused: undefined, nodes: [], settled: [] });
+      },
+    };
+    const { history } = await prepareLink(twoMoves(), engine);
+    expect(seen.rehearsed).toBe(1);
+    expect(bytesOf(encodeRecord(history))[0]).toBe(LINK_VERSION);
+  });
+
+  it("drops indices a history arrived with before indexing it again", async () => {
+    const source = twoMoves();
+    for (const move of source.moves) move.indexed = { index: 9, along: 9 };
+    const { engine } = indexing([undefined]);
+    const { history } = await prepareLink(source, engine);
+    expect(history.moves[0]?.indexed).toEqual({ index: 3, along: 128 });
+    expect(source.moves[0]?.indexed).toEqual({ index: 9, along: 9 });
   });
 });
 
@@ -841,7 +1033,7 @@ describe("starting positions in a link", () => {
     expect(decodeRecord(VERSION_1_PAYLOAD)?.nodes).toEqual(circleLayout(4, 500));
     const second = decodeRecord(VERSION_2_PAYLOAD);
     expect(second?.nodes).toEqual(circleLayout(4, 1000));
-    expect(second?.moves.map((m) => [m.from, m.to])).toEqual([
+    expect(ends(second?.moves)).toEqual([
       [0, 1],
       [2, 0],
     ]);

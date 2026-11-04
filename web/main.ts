@@ -16,6 +16,7 @@ import {
   History,
   loadSaved,
   pendingFace,
+  pendingIndex,
   prepareLink,
   recordFromHash,
   sameGame,
@@ -863,9 +864,12 @@ async function seek(target: number): Promise<boolean> {
       let outcome: Outcome;
       try {
         const face = pendingFace(move);
-        outcome = face
-          ? await engine.call("applyFaceMove", face, move.newNodePos)
-          : await engine.call("applyMove", toMove(move));
+        const indexed = pendingIndex(move);
+        outcome = indexed
+          ? await engine.call("applyIndexedMove", indexed)
+          : face
+            ? await engine.call("applyFaceMove", face, move.newNodePos)
+            : await engine.call("applyMove", toMove(move));
       } catch (error) {
         if (epoch === gameEpoch) setStatus("Replay failed: " + describe(error), "lose");
         return false;
@@ -1025,6 +1029,7 @@ async function share(): Promise<void> {
       timeline,
       {
         classify: (plan) => engine.call("classify", plan),
+        index: (plan) => engine.call("indexMoves", plan),
         rehearse: (plan) => engine.call("rehearse", plan),
       },
       // A review position is not the record's last board, which the rehearsal settles to.
