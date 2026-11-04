@@ -199,6 +199,11 @@ impl FaceModel {
         self.half_edges[h ^ 1].origin
     }
 
+    /// The half-edge running the other way along the same edge.
+    pub fn twin(&self, h: HalfEdgeId) -> HalfEdgeId {
+        h ^ 1
+    }
+
     /// Face on the left of `h`.
     pub fn face_of(&self, h: HalfEdgeId) -> FaceId {
         self.half_edges[h].face

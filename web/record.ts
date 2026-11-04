@@ -8,6 +8,8 @@ export interface FixtureMove {
   to: number;
   polyline: [number, number][];
   newNode: [number, number];
+  // Nodes the move cut off, as the engine reported; absent when unknown.
+  cutOff?: number;
 }
 
 export interface Fixture {

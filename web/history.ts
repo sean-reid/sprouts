@@ -12,7 +12,7 @@ import type {
 } from "../pkg/sprouts";
 import { circleLayout, openingLayout, sameLayout, type Position } from "./layout";
 import type { Fixture, FixtureMove } from "./record";
-import { enclosedCount, shapeText } from "./shape";
+import { shapeText } from "./shape";
 
 // A move a link carried as its face move and node; the engine draws the
 // curve on load.
@@ -39,20 +39,22 @@ export function hasStroke(move: RecordMove): move is FixtureMove {
   return "polyline" in move;
 }
 
-// A move with what the engine reported about it: the spline it fitted, and
-// the face move the router draws this very line from, when it does. The
-// saved record keeps only the stroke. A move that arrived as topology has
-// an empty polyline until the engine has drawn it.
+// A move with what the engine reported about it: the spline it fitted, the
+// face move the router draws this very line from, when it does, and the
+// nodes it cut off, unknown until the engine has applied it. The saved
+// record keeps the stroke and the count. A move that arrived as topology
+// has an empty polyline until the engine has drawn it.
 export interface RecordedMove extends Move {
   segments?: Cubic[];
   topology?: FaceMove;
+  cutOff?: number;
 }
 
 export function drawn(move: RecordedMove): boolean {
   return move.polyline.length > 0;
 }
 
-type Applied = Extract<Outcome, { kind: "applied" }>;
+export type Applied = Extract<Outcome, { kind: "applied" }>;
 
 export const STORAGE_KEY = "sprouts.game";
 const HASH_PREFIX = "#game=";
@@ -139,9 +141,10 @@ export class History {
 
   // A move made from the cursor discards whatever was ahead of it; the
   // AI's move comes with the face move it was drawn from.
-  push(move: Move, topology?: FaceMove): void {
+  push(move: Move, topology?: FaceMove, cutOff?: number): void {
     this.moves.length = this.cursor;
     const kept = cloneMove(move);
+    if (cutOff !== undefined) kept.cutOff = cutOff;
     if (topology) kept.topology = topology;
     this.moves.push(kept);
     this.cursor = this.moves.length;
@@ -187,6 +190,8 @@ export class History {
   // Takes the outcome of applying move number index + 1.
   applied(index: number, outcome: Applied): void {
     this.settle(index, outcome.snapshot.lines[index]);
+    const move = this.moves[index];
+    if (move) move.cutOff = outcome.cutOff;
   }
 
   // The id of the node move number index + 1 created.
@@ -210,15 +215,7 @@ export class History {
     if (!move) return "";
     const who = this.moverOf(index) === "human" ? "You" : "AI";
     const loop = move.fromNode === move.toNode;
-    let enclosed = 0;
-    if (loop && this.nodes) {
-      const before = Array.from({ length: this.newNodeOf(index) }, (_, id) => id)
-        .filter((id) => id !== move.fromNode)
-        .map((id) => this.positionOf(id))
-        .filter((p): p is Point => p !== null);
-      enclosed = enclosedCount(move.polyline, before);
-    }
-    return `${index + 1}. ${who}, ${shapeText(loop, enclosed)}`;
+    return `${index + 1}. ${who}, ${shapeText(loop, move.cutOff ?? 0)}`;
   }
 
   // The node ids of a move, for the row's title.
@@ -245,6 +242,7 @@ function cloneMove(move: RecordedMove): RecordedMove {
   const clone: RecordedMove = toMove(move);
   if (move.segments) clone.segments = move.segments;
   if (move.topology) clone.topology = move.topology;
+  if (move.cutOff !== undefined) clone.cutOff = move.cutOff;
   return clone;
 }
 
@@ -272,6 +270,7 @@ function toRecordMove(move: RecordedMove): FixtureMove {
     to: move.toNode,
     polyline: move.polyline.map((p): [number, number] => [p.x, p.y]),
     newNode: [move.newNodePos.x, move.newNodePos.y],
+    ...(move.cutOff !== undefined ? { cutOff: move.cutOff } : {}),
   };
 }
 
@@ -282,6 +281,7 @@ function fromRecordMove(move: RecordMove): RecordedMove {
       toNode: move.to,
       polyline: move.polyline.map(([x, y]) => ({ x, y })),
       newNodePos: { x: move.newNode[0], y: move.newNode[1] },
+      ...(move.cutOff !== undefined ? { cutOff: move.cutOff } : {}),
     };
   }
   return {
@@ -373,6 +373,7 @@ function isRecordMove(value: unknown, nodes: number, halfEdges: number): value i
   const m = value as Record<string, unknown>;
   if (!isCount(m.from) || !isCount(m.to) || m.from >= nodes || m.to >= nodes) return false;
   if ("face" in m) return isPair(m.node) && isFace(m.face, m.from, m.to, nodes, halfEdges);
+  if (m.cutOff !== undefined && !isCount(m.cutOff)) return false;
   return (
     Array.isArray(m.polyline) &&
     m.polyline.length >= 2 &&

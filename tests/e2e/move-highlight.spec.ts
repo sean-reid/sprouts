@@ -2,6 +2,7 @@ import { readFile } from "node:fs/promises";
 import { expect, test, type Page } from "@playwright/test";
 import { HIGHLIGHT_COLOR, PLAYER_COLORS } from "../../web/render";
 import {
+  awaitReply,
   awayFrom,
   colourPixelsNear,
   frameOf,
@@ -136,4 +137,40 @@ test("rows describe the shape of each move, name the nodes in the title and wear
   await expect(swatch(0)).toHaveCSS("background-color", "rgb(96, 165, 250)");
   await expect(swatch(1)).toHaveCSS("background-color", "rgb(239, 68, 68)");
   await expect(swatch(8)).toHaveCSS("background-color", "rgb(96, 165, 250)");
+});
+
+test("rows count the nodes a chord cuts off or a loop encloses", async ({ page }) => {
+  test.skip(
+    !["mobile", "desktop"].includes(test.info().project.name),
+    "the text does not depend on the viewport",
+  );
+  // The bench fixture as a saved game: it never changes, and its chords
+  // 5 to 4, 0 to 6 and 9 to 7 each wall off one node, 11 to 2 two.
+  const fixture = JSON.parse(await readFile("fixtures/games/false-game-over-4n-1000.json", "utf8"));
+  const record = JSON.stringify({ ...fixture, firstPlayer: "human", cursor: fixture.moves.length });
+  await page.addInitScript((saved) => localStorage.setItem("sprouts.game", saved), record);
+  await page.goto("/");
+  await awaitReply(page);
+  await expect(rows(page).nth(0)).toHaveText("1. You, joins two nodes");
+  await expect(rows(page).nth(2)).toHaveText("3. You, joins two nodes, cuts off 1");
+  await expect(rows(page).nth(4)).toHaveText("5. You, loop on one node");
+  await expect(rows(page).nth(5)).toHaveText("6. AI, joins two nodes, cuts off 1");
+  await expect(rows(page).nth(6)).toHaveText("7. You, joins two nodes, cuts off 1");
+  await expect(rows(page).nth(8)).toHaveText("9. You, joins two nodes, cuts off 2");
+  await rows(page).nth(8).scrollIntoViewIfNeeded();
+  await shot(page, "cut-off-rows");
+  // However a row wraps, "cuts off" and its count stay on one line.
+  for (const row of [2, 5, 6, 8]) {
+    const lines = await rows(page)
+      .nth(row)
+      .evaluate((button) => {
+        const text = Array.from(button.childNodes).find((n) => n.nodeType === Node.TEXT_NODE);
+        if (!text?.textContent) return -1;
+        const range = document.createRange();
+        range.setStart(text, text.textContent.indexOf("cuts"));
+        range.setEnd(text, text.textContent.length);
+        return new Set(Array.from(range.getClientRects()).map((r) => Math.round(r.top))).size;
+      });
+    expect(lines, `row ${row + 1}`).toBe(1);
+  }
 });
