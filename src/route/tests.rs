@@ -622,13 +622,13 @@ fn record_shared_games() {
     record_shared_game(
         4,
         8,
-        pick("SPROUTS_PICK_4", 11),
+        pick("SPROUTS_PICK_4", 5),
         &dir.join("eight-moves-4n-1000.json"),
     );
     record_shared_game(
         9,
         10,
-        pick("SPROUTS_PICK_9", 11),
+        pick("SPROUTS_PICK_9", 13),
         &dir.join("ten-moves-9n-1000.json"),
     );
 }
