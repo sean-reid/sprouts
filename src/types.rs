@@ -139,6 +139,15 @@ pub struct Move {
     pub player: Player,
 }
 
+/// The node's spot on the curve, on the grid: a point already within a
+/// grid step of the curve is kept, so a node that has been placed once
+/// comes back from a record or a link as the same point; any other is the
+/// nearest point of the curve.
+fn on_curve(segments: &[Cubic], at: Point) -> Point {
+    let hit = curve::nearest(segments, &at).filter(|hit| hit.distance > crate::exact::GRID);
+    crate::exact::snap_to_grid(hit.map_or(at, |hit| hit.point))
+}
+
 impl Move {
     /// Fits the spline to the drawn polyline and puts the new node on it.
     pub fn new(
@@ -150,9 +159,7 @@ impl Move {
         board_size: usize,
     ) -> Self {
         let segments = curve::fit(&polyline, curve::tolerance(board_size));
-        let new_node_pos = crate::exact::snap_to_grid(
-            curve::nearest(&segments, &new_node_pos).map_or(new_node_pos, |hit| hit.point),
-        );
+        let new_node_pos = on_curve(&segments, new_node_pos);
         Self {
             from_node,
             to_node,
@@ -172,9 +179,7 @@ impl Move {
         new_node_pos: Point,
         player: Player,
     ) -> Self {
-        let new_node_pos = crate::exact::snap_to_grid(
-            curve::nearest(&segments, &new_node_pos).map_or(new_node_pos, |hit| hit.point),
-        );
+        let new_node_pos = on_curve(&segments, new_node_pos);
         Self {
             from_node,
             to_node,
