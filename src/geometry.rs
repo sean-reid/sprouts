@@ -197,6 +197,21 @@ pub fn resample_polyline(points: &[Point], target_spacing: f64) -> Vec<Point> {
     result
 }
 
+/// The cross product of two vectors.
+pub fn cross(a: Point, b: Point) -> f64 {
+    a.x * b.y - a.y * b.x
+}
+
+/// The dot product of two vectors.
+pub fn dot(a: Point, b: Point) -> f64 {
+    a.x * b.x + a.y * b.y
+}
+
+/// `p` rounded to a grid of `grid` units.
+pub fn on_grid(p: Point, grid: f64) -> Point {
+    Point::new((p.x / grid).round() * grid, (p.y / grid).round() * grid)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1,3 +1,6 @@
+use super::golden::{
+    bits, hash, play_random, seeded_hashes, seeded_picks, VERSION_1_GOLDEN, VERSION_1_SEEDED_GAME,
+};
 use super::*;
 use crate::protocol::{self, SETTLE_VERSION};
 use crate::replay;
@@ -36,26 +39,6 @@ fn fixtures_under(dir: &str) -> Vec<replay::Fixture> {
         .collect();
     paths.sort();
     paths.iter().map(|p| replay::load(p).unwrap()).collect()
-}
-
-/// Every coordinate on the board, bit for bit.
-pub(crate) fn bits(state: &GameState) -> Vec<u64> {
-    let mut out = Vec::new();
-    for node in &state.nodes {
-        out.extend([node.position.x.to_bits(), node.position.y.to_bits()]);
-    }
-    for line in &state.lines {
-        for c in &line.segments {
-            for p in [c.p0, c.p1, c.p2, c.p3] {
-                out.extend([p.x.to_bits(), p.y.to_bits()]);
-            }
-        }
-        out.extend([line.new_node_pos.x.to_bits(), line.new_node_pos.y.to_bits()]);
-        for p in &line.polyline {
-            out.extend([p.x.to_bits(), p.y.to_bits()]);
-        }
-    }
-    out
 }
 
 /// The farthest any node or control point sits from where it was.
@@ -143,7 +126,7 @@ fn every_fixture_position_settles_without_changing_the_model_or_losing_clearance
 #[test]
 fn settling_again_never_lowers_the_least_clearance() {
     let mut drift: f64 = 0.0;
-    for fixture in fixtures() {
+    for fixture in all_fixtures() {
         let mut drawn = fixture.start();
         for recorded in &fixture.moves {
             let mov = fixture_move(&drawn, recorded);
@@ -199,89 +182,6 @@ fn a_version_0_record_replays_as_drawn() {
             .iter()
             .all(|s| s.nodes.is_empty() && s.lines.is_empty()));
     }
-}
-
-/// A chord bent through a control point, or a loop round a node, from
-/// the indices a random game picks, as the page would send it.
-fn random_move(state: &GameState, pick: (usize, usize, f64, f64)) -> Option<protocol::Move> {
-    let n = state.nodes.len();
-    let (a, b, bend, side) = (pick.0 % n, pick.1 % n, pick.2, pick.3);
-    let from = state.nodes[a].position;
-    let to = state.nodes[b].position;
-    let polyline: Vec<Point> = if a == b {
-        let radius = 30.0 + 40.0 * bend;
-        (0..=40)
-            .map(|i| {
-                let angle = side * std::f64::consts::TAU + std::f64::consts::TAU * i as f64 / 40.0;
-                Point::new(
-                    from.x + radius + radius * (angle + std::f64::consts::PI).cos(),
-                    from.y + radius * (angle + std::f64::consts::PI).sin(),
-                )
-            })
-            .collect()
-    } else {
-        let d = Point::new(to.x - from.x, to.y - from.y);
-        let len = d.x.hypot(d.y);
-        let normal = Point::new(-d.y / len, d.x / len);
-        let bulge = (side - 0.5) * 2.0 * bend * len * 0.6;
-        let ctrl = Point::new(
-            (from.x + to.x) / 2.0 + normal.x * bulge,
-            (from.y + to.y) / 2.0 + normal.y * bulge,
-        );
-        (0..=40)
-            .map(|i| {
-                let t = i as f64 / 40.0;
-                let u = 1.0 - t;
-                Point::new(
-                    u * u * from.x + 2.0 * u * t * ctrl.x + t * t * to.x,
-                    u * u * from.y + 2.0 * u * t * ctrl.y + t * t * to.y,
-                )
-            })
-            .collect()
-    };
-    let new_node = polyline[20];
-    let wire = protocol::Move {
-        from_node: a,
-        to_node: b,
-        polyline,
-        new_node_pos: new_node,
-        segments: None,
-    };
-    let mov = crate::types::Move::new(
-        a,
-        b,
-        wire.polyline.clone(),
-        new_node,
-        state.current_player,
-        state.board_size,
-    );
-    protocol::check(state, &mov).ok()?;
-    Some(wire)
-}
-
-/// A random game played through the protocol, settling after each move,
-/// with the moves as the engine applied them, which is what a record and
-/// a link carry.
-fn play_random(
-    nodes: usize,
-    picks: &[(usize, usize, f64, f64)],
-) -> (GameState, Vec<protocol::Move>) {
-    let mut state = GameState::with_board_size(nodes, 1000);
-    state.current_player = Player::Human;
-    let mut played = Vec::new();
-    for pick in picks {
-        if state.face.is_game_over() {
-            break;
-        }
-        // The check ran on the stroke as drawn; the engine rounds it to the
-        // grid first, which can refuse a marginal one.
-        if let Some(mov) = random_move(&state, *pick) {
-            if let protocol::Outcome::Applied { mov, .. } = protocol::apply(&mut state, mov) {
-                played.push(mov);
-            }
-        }
-    }
-    (state, played)
 }
 
 proptest! {
@@ -380,18 +280,7 @@ fn a_line_hugging_a_node_is_pushed_off_it() {
 }
 
 fn fixture_move(state: &GameState, recorded: &replay::FixtureMove) -> crate::types::Move {
-    crate::types::Move::new(
-        recorded.from,
-        recorded.to,
-        recorded
-            .polyline
-            .iter()
-            .map(|p| Point::new(p[0], p[1]))
-            .collect(),
-        Point::new(recorded.new_node[0], recorded.new_node[1]),
-        state.current_player,
-        state.board_size,
-    )
+    recorded.enter(state).unwrap()
 }
 
 /// No node or control point moves farther in one settle than the rounds
@@ -465,27 +354,6 @@ fn nothing_moves_more_than_the_rounds_allow_or_leaves_the_board() {
     }
 }
 
-/// Picks for a random game from a small multiplicative generator, so the
-/// games are fixed across runs.
-fn seeded_picks(seed: u64, count: usize) -> Vec<(usize, usize, f64, f64)> {
-    let mut x = seed
-        .wrapping_mul(6364136223846793005)
-        .wrapping_add(1442695040888963407);
-    let mut next = || {
-        x = x
-            .wrapping_mul(6364136223846793005)
-            .wrapping_add(1442695040888963407);
-        (x >> 11) as f64 / (1u64 << 53) as f64
-    };
-    (0..count)
-        .map(|_| {
-            let a = (next() * 64.0) as usize;
-            let b = (next() * 64.0) as usize;
-            (a, b, next(), next())
-        })
-        .collect()
-}
-
 /// Games played with the settle, as the page plays them, at 3 to 9 nodes,
 /// with the moves as sent.
 fn settled_games() -> Vec<(GameState, Vec<protocol::Move>)> {
@@ -537,18 +405,6 @@ fn undo_restores_the_board_the_next_move_was_drawn_on() {
     }
 }
 
-/// A 64-bit fold of every coordinate on the board.
-fn hash(state: &GameState) -> u64 {
-    bits(state).iter().fold(0xcbf29ce484222325u64, |h, b| {
-        (h ^ b).wrapping_mul(0x100000001b3)
-    })
-}
-
-/// The settled board of the seeded 7-node random game, bit for bit. A
-/// change here means version 1 settles differently: bump SETTLE_VERSION
-/// in src/protocol.rs and record the new value.
-const VERSION_1_GOLDEN: u64 = 0xa032cb53618d8318;
-
 #[test]
 fn version_1_settles_the_seeded_game_to_the_golden_board() {
     let (state, moves) = play_random(7, &seeded_picks(7, 40));
@@ -597,39 +453,9 @@ fn moves_rounded_to_the_link_quantum_replay_a_settled_game() {
     }
 }
 
-/// The settled board after each move of the seeded 9-node random game at
-/// version 1, as recorded on macOS. A mismatch on another platform names
-/// the first move that settles differently there; a mismatch after a
-/// change to the settle means version 1 output changed, so bump
-/// SETTLE_VERSION and record the new values.
-const VERSION_1_SEEDED_GAME: &[u64] = &[
-    0x7bb01be736536569,
-    0x7a06061ba002b013,
-    0xa9fe3221b9b96035,
-    0x475be4ad2b1b4a3e,
-    0xa19c5ada51285ec,
-    0x98127e76221c6345,
-    0x3d62a2f5e2c6e0bc,
-    0x56516138c9de2925,
-    0x759c44b36b8bcc5a,
-];
-
 #[test]
 fn version_1_settles_the_seeded_game_the_same_on_every_platform() {
-    let picks = seeded_picks(9, 40);
-    let mut state = GameState::with_board_size(9, 1000);
-    state.current_player = Player::Human;
-    let mut hashes = Vec::new();
-    for pick in &picks {
-        if state.face.is_game_over() {
-            break;
-        }
-        if let Some(mov) = random_move(&state, *pick) {
-            if let protocol::Outcome::Applied { .. } = protocol::apply(&mut state, mov) {
-                hashes.push(hash(&state));
-            }
-        }
-    }
+    let hashes = seeded_hashes(9);
     let printed: Vec<String> = hashes.iter().map(|h| format!("{h:#x}")).collect();
     let first = hashes
         .iter()

@@ -13,6 +13,7 @@ pub use abstract_graph::search_rate;
 pub mod replay;
 mod route;
 mod settle;
+pub use settle::golden::seeded_hashes;
 mod types;
 mod validation;
 
@@ -30,6 +31,17 @@ use wasm_bindgen::prelude::*;
 #[wasm_bindgen]
 pub struct SproutsGame {
     state: GameState,
+}
+
+/// The settled board after each move of the seeded random game of `nodes`
+/// nodes, as hex, for checking a build against the values recorded in
+/// src/settle/golden.rs.
+#[wasm_bindgen(js_name = goldenHashes)]
+pub fn golden_hashes(nodes: usize) -> Vec<String> {
+    seeded_hashes(nodes)
+        .iter()
+        .map(|h| format!("{h:#x}"))
+        .collect()
 }
 
 #[wasm_bindgen]

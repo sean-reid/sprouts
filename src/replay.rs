@@ -69,34 +69,35 @@ pub struct FixtureMove {
 }
 
 impl FixtureMove {
-    pub(crate) fn from_move(mov: &Move) -> Self {
+    /// The move as the engine applied it, which is what a record keeps.
+    pub(crate) fn from_applied(mov: &protocol::Move) -> Self {
         Self {
             from: mov.from_node,
             to: mov.to_node,
             polyline: mov.polyline.iter().map(|p| [p.x, p.y]).collect(),
             new_node: [mov.new_node_pos.x, mov.new_node_pos.y],
-            segments: Some(mov.segments.clone()),
+            segments: mov.segments.clone(),
         }
     }
 
-    fn to_move(&self, player: Player, board_size: usize) -> Move {
-        let polyline = self
-            .polyline
-            .iter()
-            .map(|p| Point::new(p[0], p[1]))
-            .collect();
-        let new_node = Point::new(self.new_node[0], self.new_node[1]);
-        match &self.segments {
-            Some(segments) => Move::from_segments(
-                self.from,
-                self.to,
-                polyline,
-                segments.clone(),
-                new_node,
-                player,
-            ),
-            None => Move::new(self.from, self.to, polyline, new_node, player, board_size),
+    /// The move as the page would send it.
+    pub(crate) fn wire(&self) -> protocol::Move {
+        protocol::Move {
+            from_node: self.from,
+            to_node: self.to,
+            polyline: self
+                .polyline
+                .iter()
+                .map(|p| Point::new(p[0], p[1]))
+                .collect(),
+            new_node_pos: Point::new(self.new_node[0], self.new_node[1]),
+            segments: self.segments.clone(),
         }
+    }
+
+    /// The move as it enters `state`, through the one path every move takes.
+    pub(crate) fn enter(&self, state: &GameState) -> Result<Move, Rejection> {
+        protocol::enter(self.wire(), state)
     }
 }
 
@@ -306,15 +307,18 @@ pub fn replay(fixture: &Fixture) -> Replay {
         let recorded = fixture.moves.get(index);
         let verdict = recorded.map(|recorded| {
             let t = Instant::now();
-            let mov = recorded.to_move(state.current_player, state.board_size);
-            let verdict = validate_for(&state, &mov);
+            let entered = recorded.enter(&state);
+            let verdict = entered
+                .as_ref()
+                .map_err(Clone::clone)
+                .and_then(|mov| validate_for(&state, mov));
             phases.validation = t.elapsed();
-            (mov, verdict)
+            (entered, verdict)
         });
 
         let mut clearance = None;
         let applied = match verdict {
-            Some((mov, Ok(()))) => {
+            Some((Ok(mov), Ok(()))) => {
                 let t = Instant::now();
                 let applied = state.apply_move(mov);
                 phases.face_update = t.elapsed();
@@ -332,7 +336,9 @@ pub fn replay(fixture: &Fixture) -> Replay {
                 }
                 applied.map_err(|e| format!("move {index} rejected: {}", e.message))
             }
-            Some((_, Err(e))) => Err(format!("move {index} rejected: {}", e.message)),
+            Some((_, Err(e))) | Some((Err(e), _)) => {
+                Err(format!("move {index} rejected: {}", e.message))
+            }
             None => Ok(()),
         };
 
@@ -377,7 +383,9 @@ pub fn nodes_per_depth(fixture: &Fixture, max_depth: usize) -> Vec<usize> {
                 *slot += ai::nodes_to_depth(&state, &candidates, depth);
             }
         }
-        let mov = recorded.to_move(state.current_player, state.board_size);
+        let Ok(mov) = recorded.enter(&state) else {
+            break;
+        };
         if state.apply_move(mov).is_err() {
             break;
         }
@@ -392,7 +400,9 @@ pub fn settle_times(fixture: &Fixture) -> Vec<f64> {
     let mut state = fixture.start();
     let mut times = Vec::with_capacity(fixture.moves.len());
     for recorded in &fixture.moves {
-        let mov = recorded.to_move(state.current_player, state.board_size);
+        let Ok(mov) = recorded.enter(&state) else {
+            break;
+        };
         if state.apply_move(mov).is_err() {
             break;
         }
@@ -450,46 +460,33 @@ pub fn self_play(
     }
     let mut moves = Vec::new();
     loop {
-        let mov = match next_accepted_move(&mut state) {
-            Ok(mov) => mov,
-            Err(stop) => return (moves, stop),
-        };
-        moves.push(FixtureMove::from_move(&mov));
-        state.apply_move(mov).expect("an accepted move applies");
-        settle::settle(&mut state);
-    }
-}
-
-/// The AI's move for the position, or why there is none: the game is
-/// over, the AI could not draw a move, or its move fails the validation
-/// the page would apply. The last two are reported on stderr since they
-/// end a recording early. A draw that stops at its time limit is an error,
-/// not a position to record.
-fn next_accepted_move(state: &mut GameState) -> Result<Move, Stop> {
-    let mov = match ai::choose(state) {
-        ai::Reply::Move(mov) => mov,
-        ai::Reply::GameOver => return Err(Stop::GameOver),
-        ai::Reply::Undrawn(ai::Undrawn::Exhausted) => {
-            eprintln!(
-                "recording stopped after {} moves: every listed move was refused",
+        let mov = match ai::choose(&state) {
+            ai::Reply::Move(mov) => mov,
+            ai::Reply::GameOver => return (moves, Stop::GameOver),
+            ai::Reply::Undrawn(ai::Undrawn::Exhausted) => {
+                eprintln!(
+                    "recording stopped after {} moves: no listed move could be drawn",
+                    state.move_history.len()
+                );
+                return (moves, Stop::Undrawn);
+            }
+            ai::Reply::Undrawn(ai::Undrawn::OutOfTime) => panic!(
+                "the draw ran out of time after {} moves; the recording would differ between runs",
                 state.move_history.len()
-            );
-            return Err(Stop::Undrawn);
-        }
-        ai::Reply::Undrawn(ai::Undrawn::OutOfTime) => panic!(
-            "the draw ran out of time after {} moves; the recording would differ between runs",
-            state.move_history.len()
-        ),
-    };
-    match validate_for(state, &mov) {
-        Ok(()) => Ok(mov),
-        Err(e) => {
-            eprintln!(
-                "recording stopped after {} moves: the AI's move was rejected: {}",
-                state.move_history.len(),
-                e.message
-            );
-            Err(Stop::Rejected)
+            ),
+        };
+        // The move goes in the way the page sends it, so the record holds
+        // what the engine applied.
+        match protocol::apply(&mut state, protocol::Move::from(mov)) {
+            protocol::Outcome::Applied { mov, .. } => moves.push(FixtureMove::from_applied(&mov)),
+            protocol::Outcome::Rejected { rejection } => {
+                eprintln!(
+                    "recording stopped after {} moves: the AI's move was rejected: {}",
+                    state.move_history.len(),
+                    rejection.message
+                );
+                return (moves, Stop::Rejected);
+            }
         }
     }
 }
@@ -536,7 +533,9 @@ mod tests {
     fn play(fixture: &Fixture) -> GameState {
         let mut state = fixture.start();
         for (index, recorded) in fixture.moves.iter().enumerate() {
-            let mov = recorded.to_move(state.current_player, state.board_size);
+            let mov = recorded
+                .enter(&state)
+                .unwrap_or_else(|e| panic!("move {index} rejected: {}", e.message));
             if let Err(e) = validate_for(&state, &mov) {
                 panic!("move {index} rejected: {}", e.message);
             }
@@ -586,7 +585,10 @@ mod tests {
             (mov.from_node, mov.to_node),
             (8, 12),
             "{}",
-            serde_json::to_string(&FixtureMove::from_move(&mov)).unwrap()
+            serde_json::to_string(&FixtureMove::from_applied(&protocol::Move::from(
+                mov.clone()
+            )))
+            .unwrap()
         );
         assert_eq!(validate_for(&state, &mov), Ok(()));
         state.apply_move(mov).unwrap();

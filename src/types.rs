@@ -11,15 +11,12 @@ pub const BOARD_SIZE: usize = 1000;
 
 // All spatial constants are tuned for a 1000px board.
 // Use scale(board_size) to adapt them to smaller boards (e.g. 500px mobile).
+pub use crate::geometry::on_grid;
+
 /// The grid every coordinate a settled game stores sits on: one unit of
 /// the 1000 board, the link quantum, so a link carries it exactly.
 pub fn grid(board_size: usize) -> f64 {
     scale(board_size)
-}
-
-/// `p` rounded to the grid.
-pub fn on_grid(p: Point, grid: f64) -> Point {
-    Point::new((p.x / grid).round() * grid, (p.y / grid).round() * grid)
 }
 
 pub fn scale(board_size: usize) -> f64 {
@@ -312,6 +309,16 @@ impl GameState {
             board_size,
             settles: Vec::new(),
             settle_version,
+        }
+    }
+
+    /// The move as it enters this board: on the grid when the game settles,
+    /// as drawn otherwise.
+    pub fn entering(&self, mov: Move) -> Move {
+        if self.settle_version == 0 {
+            mov
+        } else {
+            mov.on_grid(grid(self.board_size))
         }
     }
 

@@ -14,7 +14,7 @@
 use crate::curve::{self, Cubic};
 use crate::embedding;
 use crate::face::Move as FaceMove;
-use crate::geometry::{closest_point_on_segment, segment_intersection, segments_intersect};
+use crate::geometry::{self, closest_point_on_segment, segment_intersection, segments_intersect};
 use crate::types::{
     ai_node_clearance, grid, node_disc, on_grid, scale, GameState, Line, Move, Point,
     MIN_NODE_SPACING, MIN_PATH_CLEARANCE,
@@ -164,7 +164,7 @@ fn mul(a: Point, k: f64) -> Point {
 }
 
 fn norm(a: Point) -> f64 {
-    a.x.hypot(a.y)
+    geometry::distance(&a, &Point::new(0.0, 0.0))
 }
 
 fn bernstein(t: f64) -> [f64; 4] {
@@ -948,6 +948,8 @@ fn relax(state: &mut GameState) -> Undo {
     }
     undo
 }
+
+pub mod golden;
 
 #[cfg(test)]
 pub(crate) mod tests;

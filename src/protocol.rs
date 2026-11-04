@@ -8,7 +8,9 @@ use crate::face::{self, IllegalMove, Move as ModelMove};
 use crate::geometry;
 use crate::route::{self, Unroutable};
 use crate::settle;
-use crate::types::{self, grid, scale, GameState, Line, Node, Player, Point, MIN_NODE_SPACING};
+use crate::types::{
+    self, grid, on_grid, scale, GameState, Line, Node, Player, Point, MIN_NODE_SPACING,
+};
 use crate::validation::{self, Rejection};
 
 /// A move as proposed to the engine. The mover is whoever is to play, so a
@@ -27,41 +29,38 @@ pub struct Move {
     pub segments: Option<Vec<Cubic>>,
 }
 
-impl Move {
-    /// The move as the engine applies it for `state`: a settling game takes
-    /// the spline as given and puts the move on the grid; an unsettled one
-    /// fits the stroke, as every game did before splines travelled.
-    fn by(self, state: &GameState) -> types::Move {
-        let player = state.current_player;
-        let mov = match self.segments {
-            Some(segments) if state.settle_version > 0 => types::Move::as_given(
-                self.from_node,
-                self.to_node,
-                self.polyline,
-                segments,
-                self.new_node_pos,
-                player,
-            ),
-            _ => types::Move::new(
-                self.from_node,
-                self.to_node,
-                self.polyline,
-                self.new_node_pos,
-                player,
-                state.board_size,
-            ),
-        };
-        gridded(mov, state)
-    }
-}
-
-/// The move on the grid when the game settles, as drawn otherwise.
-fn gridded(mov: types::Move, state: &GameState) -> types::Move {
-    if state.settle_version == 0 {
-        mov
-    } else {
-        mov.on_grid(grid(state.board_size))
-    }
+/// The move as the engine applies it to `state`: a settling game takes
+/// the spline as given and puts the move on the grid; an unsettled one
+/// fits the stroke, as every game did before splines travelled. A move
+/// that arrives with an empty spline is refused.
+pub(crate) fn enter(mov: Move, state: &GameState) -> Result<types::Move, Rejection> {
+    let player = state.current_player;
+    let entered = match mov.segments {
+        Some(segments) if segments.is_empty() => {
+            return Err(Rejection {
+                kind: validation::RejectionKind::PathTooShort,
+                message: "The move carries no curve".to_string(),
+                at: validation::BoardLocation::Node { id: mov.from_node },
+            })
+        }
+        Some(segments) if state.settle_version > 0 => types::Move::as_given(
+            mov.from_node,
+            mov.to_node,
+            mov.polyline,
+            segments,
+            mov.new_node_pos,
+            player,
+        ),
+        _ => types::Move::new(
+            mov.from_node,
+            mov.to_node,
+            mov.polyline,
+            mov.new_node_pos,
+            player,
+            state.board_size,
+        ),
+    };
+    Ok(state.entering(entered))
 }
 
 impl From<types::Move> for Move {
@@ -308,8 +307,7 @@ pub fn snapshot(state: &GameState) -> Snapshot {
     }
 }
 
-#[cfg(any(test, feature = "bench"))]
-pub fn check(state: &GameState, mov: &types::Move) -> Result<(), Rejection> {
+pub(crate) fn check(state: &GameState, mov: &types::Move) -> Result<(), Rejection> {
     topology(state, mov).map(drop)
 }
 
@@ -325,9 +323,8 @@ fn topology(state: &GameState, mov: &types::Move) -> Result<face::Move, Rejectio
 /// The move goes in and the board settles around it, so the snapshot
 /// carries the relaxed geometry.
 pub fn apply(state: &mut GameState, mov: Move) -> Outcome {
-    let mov = mov.by(state);
-    match topology(state, &mov) {
-        Ok(_) => commit(state, mov),
+    match enter(mov, state).and_then(|mov| topology(state, &mov).map(|_| mov)) {
+        Ok(mov) => commit(state, mov),
         Err(rejection) => Outcome::Rejected { rejection },
     }
 }
@@ -457,7 +454,7 @@ pub fn classify(plan: Classification) -> Result<Classified, String> {
     )?;
     let mut out = Vec::with_capacity(plan.moves.len());
     for (index, (mov, known)) in plan.moves.into_iter().zip(plan.known).enumerate() {
-        let mov = mov.by(&state);
+        let mov = enter(mov, &state).map_err(|e| format!("move {index}: {}", e.message))?;
         let face = topology(&state, &mov).map_err(|e| format!("move {index}: {}", e.message))?;
         out.push(known.or_else(|| redraws(&state, &face, &mov).then(|| face.into())));
         state
@@ -599,17 +596,14 @@ pub fn apply_face_move(state: &mut GameState, mov: FaceMove, at: Point) -> Outco
         .map_err(|why| illegal(state, &listed, why))
         .and_then(|()| route::route(state, &listed).map_err(|why| unroutable(&listed, why)))
         .and_then(|routed| {
-            let line = gridded(
-                types::Move::from_segments(
-                    routed.from_node,
-                    routed.to_node,
-                    routed.polyline,
-                    routed.segments,
-                    at,
-                    routed.player,
-                ),
-                state,
-            );
+            let line = state.entering(types::Move::from_segments(
+                routed.from_node,
+                routed.to_node,
+                routed.polyline,
+                routed.segments,
+                at,
+                routed.player,
+            ));
             topology(state, &line).map(|_| line)
         });
     match drawn {
@@ -739,7 +733,8 @@ pub fn fit(state: &GameState, query: FitQuery) -> Curve {
 }
 
 pub fn placement(state: &GameState, query: PlacementQuery) -> Placement {
-    let Some(hit) = curve::nearest(&query.segments, &query.at).map(|hit| curve::Nearest {
+    let segments = as_stored(state, &query.segments);
+    let Some(hit) = curve::nearest(&segments, &query.at).map(|hit| curve::Nearest {
         point: crate::exact::snap_to_grid(hit.point),
         ..hit
     }) else {
@@ -748,13 +743,37 @@ pub fn placement(state: &GameState, query: PlacementQuery) -> Placement {
             valid: false,
         };
     };
-    let path = curve::flatten(&query.segments, curve::tolerance(state.board_size));
+    let position = node_as_stored(state, hit.point);
+    let path = curve::flatten(&segments, curve::tolerance(state.board_size));
     let valid =
-        validation::validate_new_node_placement(&path, &hit.point, &state.nodes, state.board_size)
+        validation::validate_new_node_placement(&path, &position, &state.nodes, state.board_size)
             .is_ok();
-    Placement {
-        position: hit.point,
-        valid,
+    Placement { position, valid }
+}
+
+/// The spline as a settling game stores it, so what the page checks is
+/// what apply will see.
+fn as_stored(state: &GameState, segments: &[Cubic]) -> Vec<Cubic> {
+    if state.settle_version == 0 {
+        return segments.to_vec();
+    }
+    let g = grid(state.board_size);
+    segments
+        .iter()
+        .map(|c| Cubic {
+            p0: on_grid(c.p0, g),
+            p1: on_grid(c.p1, g),
+            p2: on_grid(c.p2, g),
+            p3: on_grid(c.p3, g),
+        })
+        .collect()
+}
+
+fn node_as_stored(state: &GameState, at: Point) -> Point {
+    if state.settle_version == 0 {
+        at
+    } else {
+        on_grid(at, grid(state.board_size))
     }
 }
 
@@ -763,7 +782,8 @@ pub fn placement(state: &GameState, query: PlacementQuery) -> Placement {
 /// the first that validates wins.
 pub fn auto_placement(state: &GameState, query: AutoPlacementQuery) -> AutoPlacement {
     let tolerance = curve::tolerance(state.board_size);
-    let flat = curve::flatten(&query.segments, tolerance);
+    let segments = as_stored(state, &query.segments);
+    let flat = curve::flatten(&segments, tolerance);
     let path = geometry::resample_polyline(&flat, tolerance * 2.0);
     let inset = MIN_NODE_SPACING * scale(state.board_size);
     let far = state.board_size as f64 - inset;
@@ -773,8 +793,8 @@ pub fn auto_placement(state: &GameState, query: AutoPlacementQuery) -> AutoPlace
     };
     let chosen = ai::rank_node_placements(&path, state)
         .into_iter()
-        .filter_map(|at| curve::nearest(&query.segments, &at))
-        .map(|hit| crate::exact::snap_to_grid(hit.point))
+        .filter_map(|at| curve::nearest(&segments, &at))
+        .map(|hit| node_as_stored(state, crate::exact::snap_to_grid(hit.point)))
         .filter(inside)
         .find(valid);
     match chosen {
@@ -1796,7 +1816,7 @@ mod tests {
             let RouteReply::Routed { mov, segments } = reply else {
                 panic!("{listed:?} did not route: {reply:?}");
             };
-            let read = embedding::embed(&state, &mov.clone().by(&state)).unwrap();
+            let read = embedding::embed(&state, &enter(mov.clone(), &state).unwrap()).unwrap();
             assert_eq!(
                 (read.a, read.at_a, read.b, read.at_b),
                 (listed.a, None, listed.b, None)
@@ -1817,6 +1837,51 @@ mod tests {
         let wire = serde_json::to_value(route_move(&state, face_move(0, 1, vec![]))).unwrap();
         assert_eq!(wire["kind"], json!("routed"));
         assert!(!wire["segments"].as_array().unwrap().is_empty());
+    }
+
+    /// A dot the page offers as valid commits: placement checks the curve
+    /// and node as the board will store them, so a stroke at a threshold
+    /// cannot pass the dot and fail the commit.
+    #[test]
+    fn a_valid_dot_always_commits_along_a_chord_past_a_node() {
+        let mut state = start(4, 1000, Player::Human, None, SETTLE_VERSION).unwrap();
+        state.nodes[0].position = Point::new(300.0, 500.0);
+        state.nodes[1].position = Point::new(700.0, 500.0);
+        state.nodes[2].position = Point::new(500.0, 400.0);
+        state.nodes[3].position = Point::new(500.0, 900.0);
+        let path = straight(state.nodes[0].position, state.nodes[1].position, 40);
+        let segments = curve::fit(&path, curve::tolerance(1000));
+        let mut valid = 0;
+        for tenths in 0..=400 {
+            let at = Point::new(300.0 + tenths as f64, 500.0);
+            let offered = placement(
+                &state,
+                PlacementQuery {
+                    segments: segments.clone(),
+                    at,
+                },
+            );
+            let mut played = state.clone();
+            let outcome = apply(
+                &mut played,
+                Move {
+                    from_node: 0,
+                    to_node: 1,
+                    polyline: path.clone(),
+                    new_node_pos: offered.position,
+                    segments: None,
+                },
+            );
+            let applied = matches!(outcome, Outcome::Applied { .. });
+            if offered.valid {
+                assert!(
+                    applied,
+                    "the dot at {at:?} was valid yet refused: {outcome:?}"
+                );
+                valid += 1;
+            }
+        }
+        assert!(valid > 100 && valid < 400, "{valid} of 401 spots valid");
     }
 
     /// The routed line settles the same way whether it arrives drawn or as
@@ -1840,8 +1905,8 @@ mod tests {
                 Outcome::Applied { .. }
             ));
             assert_eq!(
-                settle::tests::bits(&drawn),
-                settle::tests::bits(&routed),
+                settle::golden::bits(&drawn),
+                settle::golden::bits(&routed),
                 "{listed:?}"
             );
             assert_eq!(drawn.settles.len(), 1);
@@ -1855,7 +1920,7 @@ mod tests {
     fn undo_drops_a_duplicate_settle_record_and_restores_the_drawn_board() {
         let mut state = GameState::new(4);
         state.current_player = Player::Human;
-        let before = settle::tests::bits(&state);
+        let before = settle::golden::bits(&state);
         let RouteReply::Routed { mov, .. } = route_move(&state, face_move(0, 1, vec![])) else {
             panic!("the chord did not route");
         };
@@ -1864,7 +1929,7 @@ mod tests {
         assert_eq!(state.settles.len(), 2);
         assert!(undo(&mut state));
         assert!(state.settles.is_empty());
-        assert_eq!(settle::tests::bits(&state), before);
+        assert_eq!(settle::golden::bits(&state), before);
     }
 
     #[test]
