@@ -44,6 +44,8 @@ pub(super) enum Want {
 struct Key {
     tri: usize,
     mask: u64,
+    /// Whether the path has been outside the exit's guard.
+    out: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -73,6 +75,22 @@ impl Ord for Item {
     }
 }
 
+/// Whether a corridor may step from triangle `from` into `to`, and
+/// whether it has then been outside the exit's guard: the middle of the
+/// path keeps out of each end's guard, so no guard is entered except the
+/// exit's, to finish, and the exit's is left only by a path that has
+/// never been outside it, which is a loop setting out.
+fn step_out(arena: &Arena, from: usize, to: usize, exit: &Entry, out: bool) -> Option<bool> {
+    let (was, now) = (arena.guard(from), arena.guard(to));
+    let exit_bit = 1u8 << exit.end;
+    let entering = now & !was;
+    let leaving = was & !now;
+    if entering & !exit_bit != 0 || (leaving & exit_bit != 0 && out) {
+        return None;
+    }
+    Some(out || leaving & exit_bit != 0)
+}
+
 fn accepts(want: Want, parity: u64, all: u64) -> bool {
     match want {
         Want::Any => true,
@@ -96,7 +114,11 @@ pub(super) fn search(
     let mut best: HashMap<Key, f64> = HashMap::new();
     let mut parent: HashMap<Key, (Key, (Point, Point))> = HashMap::new();
     for &t in &entry.tris {
-        let key = Key { tri: t, mask: 0 };
+        let key = Key {
+            tri: t,
+            mask: 0,
+            out: !is_loop,
+        };
         best.insert(key, 0.0);
         heap.push(Item {
             cost: 0.0,
@@ -137,11 +159,15 @@ pub(super) fn search(
             let Some((next_tri, edge)) = arena.across(key.tri, p, q) else {
                 continue;
             };
+            let Some(out) = step_out(arena, key.tri, next_tri, exit, key.out) else {
+                continue;
+            };
             let (pp, qq) = (arena.vertex_point(p), arena.vertex_point(q));
             let mid = Point::new((pp.x + qq.x) / 2.0, (pp.y + qq.y) / 2.0);
             let next = Key {
                 tri: next_tri,
                 mask: key.mask ^ cuts.bits[edge],
+                out,
             };
             let cost = item.cost + item.pos.distance_to(&mid);
             if best.get(&next).is_none_or(|&c| cost < c) {
@@ -162,24 +188,28 @@ pub(super) fn search(
 }
 
 /// Whether an exit triangle can be reached from an entry triangle through
-/// the free triangles, parity aside, crossing at least one edge: a loop's
-/// exit is its entry, and a path has to go somewhere first.
-pub(super) fn reachable(arena: &Arena, entry: &Entry, exit: &Entry) -> bool {
+/// the free triangles under the guard rule, parity aside, crossing at
+/// least one edge: a loop's exit is its entry, and a path has to go
+/// somewhere first.
+pub(super) fn reachable(arena: &Arena, entry: &Entry, exit: &Entry, is_loop: bool) -> bool {
     let goal: HashSet<usize> = exit.tris.iter().copied().collect();
-    let mut seen: HashSet<usize> = HashSet::new();
-    let mut stack: Vec<usize> = entry.tris.clone();
-    while let Some(t) = stack.pop() {
-        if !seen.insert(t) {
+    let mut seen: HashSet<(usize, bool)> = HashSet::new();
+    let mut stack: Vec<(usize, bool)> = entry.tris.iter().map(|&t| (t, !is_loop)).collect();
+    while let Some((t, out)) = stack.pop() {
+        if !seen.insert((t, out)) {
             continue;
         }
         let verts = arena.ccw_vertices(t);
         for k in 0..3 {
             if let Some((next, _)) = arena.across(t, verts[k], verts[(k + 1) % 3]) {
+                let Some(out) = step_out(arena, t, next, exit, out) else {
+                    continue;
+                };
                 if goal.contains(&next) {
                     return true;
                 }
-                if !seen.contains(&next) {
-                    stack.push(next);
+                if !seen.contains(&(next, out)) {
+                    stack.push((next, out));
                 }
             }
         }

@@ -42,6 +42,8 @@ const ENTRY_RING: f64 = 20.0;
 pub(super) struct Entry {
     pub at: Point,
     pub tris: Vec<usize>,
+    /// Which end of the move this is, as an index into the arena's ends.
+    pub end: usize,
 }
 
 /// An end node of the move and the radii within which its own spokes
@@ -53,6 +55,9 @@ struct End {
     inner: f64,
     /// Out to this radius the spokes carry only the fit margin.
     outer: f64,
+    /// Radius the middle of the path keeps from the node: the line
+    /// clearance, or the inner radius where that is larger.
+    guard: f64,
 }
 
 /// A spoke of one or both end nodes, with the ends that own it: a line
@@ -80,6 +85,9 @@ pub(super) struct Arena {
     cdt: Cdt,
     /// Whether each triangle, by face index, keeps every clearance.
     free: Vec<bool>,
+    /// Bit per end, by face index: the triangle lies within that end's
+    /// guard radius, where only a path starting or finishing there may go.
+    guard: Vec<u8>,
     /// Handle of each triangle, by face index.
     handles: Vec<Option<FixedFaceHandle<InnerTag>>>,
     /// Whether each undirected edge, by index, lies on a wall or the rim.
@@ -616,6 +624,7 @@ impl Arena {
                 at: state.nodes[v].position,
                 inner: forgiven,
                 outer: ENTRY_RING * c,
+                guard: c.max(forgiven),
             })
             .collect();
         let mut spokes: Vec<OwnSpoke> = Vec::new();
@@ -643,6 +652,9 @@ impl Arena {
         }
         for end in &ends {
             arrangement.add_closed(&ring(end.at, end.inner), false);
+            if end.guard > end.inner {
+                arrangement.add_closed(&ring(end.at, end.guard), false);
+            }
             arrangement.add_closed(&ring(end.at, end.outer), false);
         }
         let rim_pts = subdivide_closed(&corners, RIM_STEP * c);
@@ -667,6 +679,7 @@ impl Arena {
         let mut arena = Self {
             cdt,
             free: Vec::new(),
+            guard: Vec::new(),
             handles: Vec::new(),
             wall_edge,
             walls,
@@ -729,17 +742,25 @@ impl Arena {
     fn classify(&mut self) {
         let n = self.cdt.num_all_faces();
         let mut free = vec![false; n];
+        let mut guard = vec![0u8; n];
         let mut handles = vec![None; n];
         for t in self.cdt.inner_faces() {
             let fixed = t.fix();
             handles[fixed.index()] = Some(fixed);
-            let clear = self.clear_at(self.centroid(fixed), 1e-7)
+            let centroid = self.centroid(fixed);
+            let clear = self.clear_at(centroid, 1e-7)
                 && t.positions()
                     .into_iter()
                     .all(|p| self.clear_at(point(p), 2.0 * JITTER));
             free[fixed.index()] = clear;
+            for (k, end) in self.ends.iter().enumerate() {
+                if end.at.distance_to(&centroid) < end.guard {
+                    guard[fixed.index()] |= 1 << k;
+                }
+            }
         }
         self.free = free;
+        self.guard = guard;
         self.handles = handles;
     }
 
@@ -777,6 +798,11 @@ impl Arena {
             PositionInTriangulation::OutsideOfConvexHull(_)
                 | PositionInTriangulation::NoTriangulation
         )
+    }
+
+    /// Bit per end: whether triangle `t` lies within that end's guard.
+    pub(super) fn guard(&self, t: usize) -> u8 {
+        self.guard[t]
     }
 
     pub(super) fn walls(&self) -> &[(Point, Point)] {
@@ -871,7 +897,12 @@ impl Arena {
         if tris.is_empty() {
             return Err(Unroutable::Room);
         }
-        Ok(Entry { at: a, tris })
+        let end = self
+            .ends
+            .iter()
+            .position(|e| e.at == a)
+            .ok_or(Unroutable::Bug("end"))?;
+        Ok(Entry { at: a, tris, end })
     }
 
     /// The cut parity of the straight segment from `p` to `q` when it runs
@@ -881,7 +912,8 @@ impl Arena {
     /// segments between wrap vertices do. When `from` or `to` is an end,
     /// the first triangle the segment enters, or the last it leaves, has
     /// to be one of that end's corner triangles, or the segment would
-    /// reach the node from the wrong side of one of its own lines.
+    /// reach the node from the wrong side of one of its own lines. The
+    /// segment stays out of each end's guard except at that end.
     pub(super) fn segment_parity(
         &self,
         cuts: &Cuts,
@@ -893,6 +925,11 @@ impl Arena {
         let mut parity = 0;
         let mut first: Option<[usize; 2]> = None;
         let mut last: Option<[usize; 2]> = None;
+        // A shortcut may run inside an end's guard only at that end.
+        let allowed: u8 = [from, to]
+            .into_iter()
+            .flatten()
+            .fold(0, |bits, e| bits | 1 << e.end);
         for hit in spade::LineIntersectionIterator::new(&self.cdt, point2(p), point2(q)) {
             let (edge, crossing) = match hit {
                 spade::Intersection::EdgeIntersection(e) => (e, true),
@@ -915,6 +952,9 @@ impl Arena {
                 return None;
             };
             if !self.free[a] || !self.free[b] {
+                return None;
+            }
+            if self.guard[a] & !allowed != 0 || self.guard[b] & !allowed != 0 {
                 return None;
             }
             first.get_or_insert([a, b]);
@@ -953,19 +993,19 @@ impl Arena {
         let mut i = 0;
         while i + 1 < path.len() {
             let mut next = i + 1;
-            let mut along = self.segment_parity(cuts, path[i], path[i + 1], None, None);
+            let from = (i == 0).then_some(entry);
+            let last = |j: usize| (j + 1 == path.len()).then_some(exit);
+            let mut along = self.segment_parity(cuts, path[i], path[i + 1], from, last(i + 1));
             for j in i + 2..path.len() {
                 along = match (
                     along,
-                    self.segment_parity(cuts, path[j - 1], path[j], None, None),
+                    self.segment_parity(cuts, path[j - 1], path[j], None, last(j)),
                 ) {
                     (Some(a), Some(b)) => Some(a ^ b),
                     _ => None,
                 };
                 let Some(along) = along else { break };
-                let from = (i == 0).then_some(entry);
-                let to = (j + 1 == path.len()).then_some(exit);
-                if self.segment_parity(cuts, path[i], path[j], from, to) == Some(along) {
+                if self.segment_parity(cuts, path[i], path[j], from, last(j)) == Some(along) {
                     next = j;
                 }
             }
@@ -1026,9 +1066,21 @@ impl Arena {
             return Ok(cuts);
         }
         let adjacency = self.adjacency();
+        // No cut runs through an end's guard, so no parity flips inside
+        // the fan or band a path starts or finishes in.
         let mut blocked_flags = vec![false; self.cdt.num_vertices()];
         for v in blocked {
             blocked_flags[v.index()] = true;
+        }
+        for v in self.cdt.vertices() {
+            let p = point(v.position());
+            if self
+                .ends
+                .iter()
+                .any(|e| e.at.distance_to(&p) <= e.guard + SAME_POINT)
+            {
+                blocked_flags[v.fix().index()] = true;
+            }
         }
         let mut on_rim = vec![false; self.cdt.num_vertices()];
         for v in &self.rim {

@@ -996,12 +996,8 @@ fn a_shortcut_into_an_end_has_to_arrive_through_its_corner() {
             .segment_parity(&cuts, from, mid, None, Some(corner))
             .is_some()
     };
-    assert!(arena
-        .segment_parity(&cuts, above, mid, None, None)
-        .is_some());
-    assert!(arena
-        .segment_parity(&cuts, below, mid, None, None)
-        .is_some());
+    assert!(arrives(&corners[0], above) || arrives(&corners[1], above));
+    assert!(arrives(&corners[0], below) || arrives(&corners[1], below));
     assert_ne!(arrives(&corners[0], above), arrives(&corners[1], above));
     assert_ne!(arrives(&corners[0], below), arrives(&corners[1], below));
     assert_ne!(arrives(&corners[0], above), arrives(&corners[0], below));

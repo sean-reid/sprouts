@@ -176,7 +176,7 @@ fn plan(
     // from the node crosses a cut, which only the parity search decides.
     if !is_loop
         && matches!(first, Err(Unroutable::Room))
-        && corridor::reachable(&arena, &entry, &exit)
+        && corridor::reachable(&arena, &entry, &exit, is_loop)
     {
         return Err(Unroutable::Bug("room with a path"));
     }
@@ -197,8 +197,37 @@ fn plan(
             );
         }
     }
+    let path = split_pinches(path, c / 4.0);
     let path = uncross(untwist_legs(path)).ok_or(Unroutable::Shape("tangled"))?;
     Ok((arena, path))
+}
+
+/// Two legs of a path the funnel pulled through the same vertex are set a
+/// little apart there, each to its own left, so they leave the vertex on
+/// opposite sides and the relaxation can open them further instead of
+/// crossing them.
+fn split_pinches(mut path: Vec<Point>, by: f64) -> Vec<Point> {
+    let n = path.len();
+    let left = |path: &[Point], k: usize| {
+        let (p, q) = (path[k - 1], path[k + 1]);
+        let (dx, dy) = (q.x - p.x, q.y - p.y);
+        let len = (dx * dx + dy * dy).sqrt();
+        if len < 1e-9 {
+            (0.0, 0.0)
+        } else {
+            (dy / len * by, -dx / len * by)
+        }
+    };
+    for i in 1..n.saturating_sub(1) {
+        for j in i + 1..n - 1 {
+            if path[i].distance_to(&path[j]) < 1e-9 {
+                let (a, b) = (left(&path, i), left(&path, j));
+                path[i] = Point::new(path[i].x + a.0, path[i].y + a.1);
+                path[j] = Point::new(path[j].x + b.0, path[j].y + b.1);
+            }
+        }
+    }
+    path
 }
 
 /// The path moved off the walls and nodes as far as the room allows.
