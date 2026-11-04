@@ -199,8 +199,9 @@ fn the_draw_limit_stops_a_class_walk_between_members() {
     assert!(attempts <= 2, "{attempts} attempts for one member");
 }
 
-/// Between the route budget and the draw limit every candidate gets its
-/// one cheap attempt, and the opening still draws.
+/// Between the route budget and the draw limit the opening still draws
+/// under the cheap pass, with one attempt per refused candidate on the
+/// first sweep and at most a second on the deferred ones.
 #[test]
 fn past_the_route_budget_each_candidate_gets_one_cheap_attempt() {
     let state = GameState::with_board_size(4, 1000);
@@ -209,8 +210,9 @@ fn past_the_route_budget_each_candidate_gets_one_cheap_attempt() {
     stats::take();
     let (drawn, passed) = draw_within(&state, &candidates, &order, Stopped(ROUTE_BUDGET_MS + 1.0));
     assert!(drawn.is_ok());
-    let attempts = stats::take().attempts;
-    assert_eq!(attempts, passed + 1);
+    let s = stats::take();
+    assert!(s.attempts > passed);
+    assert!(s.attempts <= 2 * (passed + 1) + s.refused.sides);
 }
 
 /// Every listed move refused, with time to spare, is Exhausted. The sealed
@@ -360,6 +362,208 @@ fn a_router_builds_the_arena_once_per_end_pair() {
         let _ = route::Router::new().route_cheap(&state, mv);
     }
     assert_eq!(stats::take().arenas, 3);
+}
+
+/// The position of a saved page record with the AI to move: the record's
+/// stroke moves are applied as recorded and its topology moves are drawn
+/// by the router, as the page does on load.
+fn position_of_record(name: &str) -> GameState {
+    use crate::types::Point;
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("fixtures/undrawn")
+        .join(name);
+    let raw: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    let point = |p: &serde_json::Value| Point::new(p[0].as_f64().unwrap(), p[1].as_f64().unwrap());
+    let nodes: Vec<Point> = raw["nodes"].as_array().unwrap().iter().map(point).collect();
+    let first = match raw["firstPlayer"].as_str().unwrap() {
+        "ai" => Player::AI,
+        _ => Player::Human,
+    };
+    let board = raw["boardSize"].as_u64().unwrap() as usize;
+    let settle = raw["settleVersion"].as_u64().unwrap_or(0) as u8;
+    let mut state = crate::protocol::start(nodes.len(), board, first, Some(nodes), settle).unwrap();
+    for m in raw["moves"].as_array().unwrap() {
+        let (from, to) = (
+            m["from"].as_u64().unwrap() as usize,
+            m["to"].as_u64().unwrap() as usize,
+        );
+        let mov = if let Some(polyline) = m["polyline"].as_array() {
+            Move::new(
+                from,
+                to,
+                polyline.iter().map(point).collect(),
+                point(&m["newNode"]),
+                state.current_player,
+                board,
+            )
+        } else {
+            let face = &m["face"];
+            let listed = FaceMove {
+                a: face["a"].as_u64().unwrap() as usize,
+                at_a: face["atA"].as_u64().map(|h| h as usize),
+                b: face["b"].as_u64().unwrap() as usize,
+                at_b: face["atB"].as_u64().map(|h| h as usize),
+                enclosed: face["enclosed"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|v| v.as_u64().unwrap() as usize)
+                    .collect(),
+            };
+            let routed = route::route(&state, &listed).expect("the recorded topology draws");
+            Move::from_segments(
+                from,
+                to,
+                routed.polyline,
+                routed.segments,
+                point(&m["node"]),
+                state.current_player,
+            )
+        };
+        crate::protocol::check(&state, &mov).unwrap();
+        state.apply_move(mov).unwrap();
+    }
+    state
+}
+
+/// Work the cheap pass does on the live position under a stopped clock:
+/// 41 attempts and 1 arena build in listed order, 40 and 1 reversed; the
+/// bounds are twice that. The ranked walk on the same position took 1_300
+/// attempts and 19 builds.
+const LIVE_ROOM_ATTEMPTS: usize = 82;
+const LIVE_ROOM_ARENAS: usize = 2;
+
+/// The live position where the page answered Undrawn with room to spare
+/// draws under the cheap pass within its measured work, in listed order
+/// and reversed.
+#[test]
+fn the_live_room_position_draws_under_the_cheap_pass() {
+    let state = position_of_record("room-24n-1000.json");
+    assert_eq!(state.current_player, Player::AI);
+    let candidates = state.face.search_moves();
+    let forward: Vec<usize> = (0..candidates.len()).collect();
+    let backward: Vec<usize> = forward.iter().rev().copied().collect();
+    for order in [&forward, &backward] {
+        stats::take();
+        let (drawn, passed) =
+            draw_within(&state, &candidates, order, Stopped(ROUTE_BUDGET_MS + 1.0));
+        let s = stats::take();
+        eprintln!(
+            "{} listed, {passed} passed, {} attempts, {} arenas, {} memo hits",
+            candidates.len(),
+            s.attempts,
+            s.arenas,
+            s.memo_hits
+        );
+        assert!(drawn.is_ok(), "{passed} passed and nothing drew: {drawn:?}");
+        assert!(s.attempts <= LIVE_ROOM_ATTEMPTS, "{} attempts", s.attempts);
+        assert!(s.arenas <= LIVE_ROOM_ARENAS, "{} arenas", s.arenas);
+    }
+}
+
+/// Replies on the live position where the page answered Undrawn with room
+/// to spare: `cargo test --release probe_live_room_position -- --ignored
+/// --nocapture`.
+#[test]
+#[ignore = "prints replies, run in release"]
+fn probe_live_room_position() {
+    let state = position_of_record("room-24n-1000.json");
+    assert_eq!(state.current_player, Player::AI);
+    let candidates = state.face.search_moves();
+    eprintln!("{} candidates", candidates.len());
+    for run in 0..5 {
+        stats::take();
+        let t = Instant::now();
+        let order = rank(&state, &candidates);
+        let search_ms = t.elapsed().as_secs_f64() * 1000.0;
+        let t = Instant::now();
+        let (drawn, passed) = draw(&state, &candidates, &order);
+        let draw_ms = t.elapsed().as_secs_f64() * 1000.0;
+        let s = stats::take();
+        eprintln!(
+            "run {run}: {} after {passed} passed, search {search_ms:.0} ms, draw {draw_ms:.0} ms, {} attempts, {} arenas, {} memo hits, room {}, bugs {:?}, first ranked {:?}",
+            match &drawn {
+                Ok(m) => format!("drew {}-{}", m.from_node, m.to_node),
+                Err(why) => format!("{why:?}"),
+            },
+            s.attempts,
+            s.arenas,
+            s.memo_hits,
+            s.refused.room,
+            s.refused.bugs,
+            candidates[order[0]]
+        );
+    }
+}
+
+/// Every candidate of the live position routed once at the cheap clearance
+/// through a fresh Router and once through one shared Router: what each
+/// came to, whether a parity search ran, and what it cost. `cargo test
+/// --release probe_live_room_candidates -- --ignored --nocapture`.
+#[test]
+#[ignore = "routes every candidate, run in release"]
+fn probe_live_room_candidates() {
+    let state = position_of_record("room-24n-1000.json");
+    let candidates = state.face.search_moves();
+    let mut shared = route::Router::new();
+    let mut tally: std::collections::BTreeMap<String, (usize, f64)> =
+        std::collections::BTreeMap::new();
+    let mut drawable = Vec::new();
+    let mut disagreements = 0;
+    for (i, mv) in candidates.iter().enumerate() {
+        stats::take();
+        let t = Instant::now();
+        let fresh = route::Router::new().route_cheap(&state, mv);
+        let ms = t.elapsed().as_secs_f64() * 1000.0;
+        let s = stats::take();
+        let parity = if s.parity.is_empty() {
+            "no parity"
+        } else {
+            "parity"
+        };
+        let kind = match &fresh {
+            Ok(_) => format!("ok, {parity}"),
+            Err(route::Unroutable::Bug(what)) => format!("bug {what}"),
+            Err(route::Unroutable::Shape(what)) => format!("shape {what}, {parity}"),
+            Err(why) => format!("{why:?}, {parity}"),
+        };
+        let slot = tally.entry(kind).or_insert((0, 0.0));
+        slot.0 += 1;
+        slot.1 += ms;
+        if fresh.is_ok() {
+            drawable.push(i);
+        }
+        let together = shared.route_cheap(&state, mv);
+        let same = match (&fresh, &together) {
+            (Ok(a), Ok(b)) => a.segments == b.segments,
+            (Err(a), Err(b)) => a == b,
+            _ => false,
+        };
+        if !same {
+            disagreements += 1;
+            eprintln!("candidate {i} {mv:?}: fresh {fresh:?} shared {together:?}");
+        }
+    }
+    eprintln!(
+        "{} candidates, {disagreements} shared/fresh disagreements",
+        candidates.len()
+    );
+    for (kind, (n, ms)) in &tally {
+        eprintln!(
+            "  {kind}: {n}, {:.0} ms total, {:.1} ms each",
+            ms,
+            ms / *n as f64
+        );
+    }
+    eprintln!(
+        "drawable at the cheap clearance: {} of {}",
+        drawable.len(),
+        candidates.len()
+    );
+    for i in drawable.iter().take(12) {
+        eprintln!("  {i}: {:?}", candidates[*i]);
+    }
 }
 
 /// Prints the reply timings of a 24-node self-play on the 1000 board:

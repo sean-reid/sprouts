@@ -129,7 +129,21 @@ pub enum AiReply {
         topology: FaceMove,
     },
     GameOver,
-    Undrawn,
+    Undrawn {
+        reason: UndrawnReason,
+    },
+}
+
+/// Why the AI drew nothing in a position with listed moves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Tsify)]
+#[serde(rename_all = "camelCase")]
+pub enum UndrawnReason {
+    /// Every listed move was tried and refused.
+    Exhausted,
+    /// The draw hit its time limit with moves still untried.
+    OutOfTime,
+    /// The curve drawn would not read back as a move.
+    Unreadable,
 }
 
 #[derive(Debug, Clone, Deserialize, Tsify)]
@@ -233,7 +247,7 @@ impl From<&Unroutable> for UnroutableKind {
         match why {
             Unroutable::Room | Unroutable::NoSpot => Self::Room,
             Unroutable::Shape(_) => Self::Shape,
-            Unroutable::Topology => Self::Topology,
+            Unroutable::Topology | Unroutable::Sides => Self::Topology,
             Unroutable::Bug(_) => Self::Bug,
         }
     }
@@ -662,7 +676,9 @@ fn unroutable(mv: &face::Move, why: Unroutable) -> Rejection {
         Unroutable::Room => Rejection::unroutable(mv.a, "no room"),
         Unroutable::NoSpot => Rejection::unroutable(mv.a, "no room for the new node"),
         Unroutable::Shape(what) => Rejection::unroutable(mv.a, what),
-        Unroutable::Topology => Rejection::unroutable(mv.a, "the curve reads as another move"),
+        Unroutable::Topology | Unroutable::Sides => {
+            Rejection::unroutable(mv.a, "the curve reads as another move")
+        }
         Unroutable::Bug(what) => Rejection::unroutable(mv.a, what),
     }
 }
@@ -695,10 +711,17 @@ pub fn ai_move(state: &mut GameState) -> AiReply {
                 segments: mov.segments.clone(),
                 mov: Move::from(mov),
             },
-            Err(_) => AiReply::Undrawn,
+            Err(_) => AiReply::Undrawn {
+                reason: UndrawnReason::Unreadable,
+            },
         },
         ai::Reply::GameOver => AiReply::GameOver,
-        ai::Reply::Undrawn(_) => AiReply::Undrawn,
+        ai::Reply::Undrawn(ai::Undrawn::Exhausted) => AiReply::Undrawn {
+            reason: UndrawnReason::Exhausted,
+        },
+        ai::Reply::Undrawn(ai::Undrawn::OutOfTime) => AiReply::Undrawn {
+            reason: UndrawnReason::OutOfTime,
+        },
     }
 }
 
@@ -1752,7 +1775,12 @@ mod tests {
         }
         assert_eq!(state.current_player, Player::AI);
         assert!(!state.face.search_moves().is_empty());
-        assert!(matches!(ai_move(&mut state), AiReply::Undrawn));
+        assert!(matches!(
+            ai_move(&mut state),
+            AiReply::Undrawn {
+                reason: UndrawnReason::Exhausted
+            }
+        ));
         assert!(!snapshot(&state).game_over);
     }
 

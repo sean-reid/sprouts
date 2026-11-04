@@ -50,6 +50,8 @@ pub(crate) mod stats {
         /// Each parity search: bits to flip, bits in play, and whether it
         /// found its corridor.
         pub parity: Vec<(u32, u32, bool)>,
+        /// Chords refused from the no room memo without a search.
+        pub memo_hits: usize,
         pub refused: super::sweep::Tally,
     }
 
@@ -79,9 +81,21 @@ pub enum Unroutable {
     Shape(&'static str),
     /// The drawn curve reads back as a different move.
     Topology,
+    /// The first path puts pieces on the wrong side and the route was
+    /// asked to stop short of the parity search.
+    Sides,
     /// A failure the router should never produce in a face it found a path
     /// through; the sweep counts these and holds them at zero.
     Bug(&'static str),
+}
+
+/// Whether a route may run the parity search when its first path puts
+/// pieces on the wrong side. The search is exponential in the pieces of
+/// the face and is most of a refused route's cost.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Parity {
+    Search,
+    Skip,
 }
 
 /// Room wanted around every node, in node spacings, where the face allows
@@ -185,7 +199,7 @@ impl Router {
     /// validated as that player and read back as `mv`.
     pub fn route(&mut self, state: &GameState, mv: &FaceMove) -> Result<Move, Unroutable> {
         let want = rules(state);
-        let drawn = self.route_at(state, mv, &want);
+        let drawn = self.route_at(state, mv, &want, Parity::Search);
         // The disc clearance is what the AI aims for; a line that cannot
         // have it is still legal at the clearance a human line gets.
         let worth_retrying = matches!(
@@ -200,6 +214,17 @@ impl Router {
 
     /// `route` at the clearance a human line gets, one attempt.
     pub fn route_cheap(&mut self, state: &GameState, mv: &FaceMove) -> Result<Move, Unroutable> {
+        self.route_cheap_with(state, mv, Parity::Search)
+    }
+
+    /// `route_cheap`, refusing with `Sides` instead of running the parity
+    /// search when the first path puts pieces on the wrong side.
+    pub fn route_cheap_with(
+        &mut self,
+        state: &GameState,
+        mv: &FaceMove,
+        parity: Parity,
+    ) -> Result<Move, Unroutable> {
         let want = rules(state);
         self.route_at(
             state,
@@ -208,6 +233,7 @@ impl Router {
                 node_clearance: want.fallback,
                 ..want
             },
+            parity,
         )
     }
 
@@ -216,8 +242,9 @@ impl Router {
         state: &GameState,
         mv: &FaceMove,
         want: &Rules,
+        parity: Parity,
     ) -> Result<Move, Unroutable> {
-        let drawn = self.route_at_once(state, mv, want);
+        let drawn = self.route_at_once(state, mv, want, parity);
         #[cfg(test)]
         stats::with(|s| {
             s.attempts += 1;
@@ -233,11 +260,12 @@ impl Router {
         state: &GameState,
         mv: &FaceMove,
         want: &Rules,
+        parity: Parity,
     ) -> Result<Move, Unroutable> {
         if mv.a == mv.b && mv.enclosed.is_empty() {
             return small_loop::route(state, mv, want.clearance, want.node_clearance);
         }
-        let (arena, path) = plan(self, state, mv, want)?;
+        let (arena, path) = plan(self, state, mv, want, parity)?;
         // The relaxed path is the one wanted; the taut path already keeps
         // every clearance when the relaxation ends up somewhere it cannot
         // be used.
@@ -295,8 +323,9 @@ fn plan(
     state: &GameState,
     mv: &FaceMove,
     want: &Rules,
+    parity: Parity,
 ) -> Result<(Rc<erode::Arena>, Vec<Point>), Unroutable> {
-    let (arena, path) = taut_path(router, state, mv, want)?;
+    let (arena, path) = taut_path(router, state, mv, want, parity)?;
     let path = split_pinches(path, eroded_by(state, want) / 4.0, |q| arena.free_at(q));
     let path = settle(path)?;
     Ok((arena, path))
@@ -314,6 +343,7 @@ fn taut_path(
     state: &GameState,
     mv: &FaceMove,
     want: &Rules,
+    parity: Parity,
 ) -> Result<(Rc<erode::Arena>, Vec<Point>), Unroutable> {
     let face = state
         .face
@@ -321,6 +351,8 @@ fn taut_path(
         .map_err(|_| Unroutable::Bug("corner"))?;
     let corners = (face, mv.a, mv.at_a, mv.b, mv.at_b, clearances(state, want));
     if router.no_room.contains(&corners) {
+        #[cfg(test)]
+        stats::with(|s| s.memo_hits += 1);
         return Err(Unroutable::Room);
     }
     let arena = router.arena(state, face, mv, want)?;
@@ -363,6 +395,9 @@ fn taut_path(
     if cuts.all != 0 {
         let wrong = wrong_sides(state, mv, own, &cuts, &path);
         if wrong != 0 {
+            if parity == Parity::Skip {
+                return Err(Unroutable::Sides);
+            }
             // Flipping every bit at once is the same move drawn round the
             // other side of its own piece, and a bare node has no sides.
             let want = corridor::Want::Parity(first.parity ^ wrong);
@@ -484,6 +519,7 @@ pub fn hash_routes(fnv: &mut Fnv, state: &GameState) {
                 Unroutable::Shape(_) => 3.0,
                 Unroutable::Topology => 4.0,
                 Unroutable::Bug(_) => 5.0,
+                Unroutable::Sides => 6.0,
             }),
         }
     }

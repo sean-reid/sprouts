@@ -69,6 +69,8 @@ pub struct Tally {
     pub no_spot: usize,
     pub shape: BTreeMap<String, usize>,
     pub topology: usize,
+    /// Routes stopped short of the parity search.
+    pub sides: usize,
     pub bug: usize,
     pub bugs: BTreeMap<String, usize>,
 }
@@ -82,6 +84,7 @@ impl Tally {
             *self.shape.entry(kind.clone()).or_default() += n;
         }
         self.topology += other.topology;
+        self.sides += other.sides;
         self.bug += other.bug;
         for (kind, n) in &other.bugs {
             *self.bugs.entry(kind.clone()).or_default() += n;
@@ -94,6 +97,7 @@ impl Tally {
             Unroutable::NoSpot => self.no_spot += 1,
             Unroutable::Shape(_) => *self.shape.entry(kind_name(why)).or_default() += 1,
             Unroutable::Topology => self.topology += 1,
+            Unroutable::Sides => self.sides += 1,
             Unroutable::Bug(_) => {
                 self.bug += 1;
                 *self.bugs.entry(kind_name(why)).or_default() += 1;
@@ -106,8 +110,15 @@ impl std::fmt::Display for Tally {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "{} routes: {} no room, {} no node spot, shape {:?}, {} topology, {} bugs {:?}",
-            self.tried, self.room, self.no_spot, self.shape, self.topology, self.bug, self.bugs
+            "{} routes: {} no room, {} no node spot, shape {:?}, {} topology, {} sides, {} bugs {:?}",
+            self.tried,
+            self.room,
+            self.no_spot,
+            self.shape,
+            self.topology,
+            self.sides,
+            self.bug,
+            self.bugs
         )
     }
 }

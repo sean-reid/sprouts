@@ -1,4 +1,4 @@
-import { readFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { expect, test } from "@playwright/test";
 import {
   clickAway,
@@ -27,6 +27,30 @@ test("a reply the worker never sends in time is undrawn, and the human can undo"
   await expect(page.locator("#undoBtn")).toBeEnabled();
   await page.locator("#undoBtn").click();
   await expect(status).toHaveText(/Move undone: your turn/, { timeout: 20_000 });
+});
+
+// A saved game from the live site where the AI answered Undrawn on a board
+// with room to spare, with the AI to move. Loading it has the AI draw, and
+// the console carries one line per reply with the engine's answer.
+test("a 24-node position with room draws, and the console says so", async ({ page }) => {
+  const record = await readFile("fixtures/undrawn/room-24n-1000.json", "utf8");
+  await page.addInitScript((saved) => localStorage.setItem("sprouts.game", saved), record);
+  const lines: string[] = [];
+  page.on("console", (message) => {
+    if (message.text().startsWith("aiMove:")) lines.push(message.text());
+  });
+  const started = Date.now();
+  await page.goto("/");
+  await expect(page.locator("#status")).toHaveText("Your turn!", { timeout: 60_000 });
+  const took = Date.now() - started;
+  await mkdir("test-results/fixtures", { recursive: true });
+  await writeFile(
+    `test-results/fixtures/${test.info().project.name}-reply-room-24-nodes.txt`,
+    `${took} ms\n`,
+  );
+  expect(lines).toHaveLength(1);
+  expect(lines[0]).toMatch(/^aiMove: move in \d+ ms$/);
+  await expect(page.locator("#moveList li")).toHaveCount(4);
 });
 
 // A saved game where the only live node is sealed inside a loop too small
