@@ -29,25 +29,23 @@ const fixtures = [
   "fixtures/games/selfplay-4n-500.json",
 ];
 
-// Games recorded against the current AI by the record_shared_games test
-// in src/route/tests.rs, the human strokes bulged so the router does not
-// redraw them. Per game: the payload budget in characters, how the link
-// carries the moves, and for a shapes link how many of the AI's moves go
-// as topology. A link carries indices when the engine can regenerate the
-// whole game by routing each listed move on a fresh board, and shapes
-// (cubics for the human strokes, face moves for the AI's) when the
-// regenerated board refuses a move, which the nine-node and thirty-move
-// games do. The budget belongs to the recording: it is the payload
-// measured when the game was recorded (MEASURED_4, MEASURED_9 and
-// MEASURED_12) with about 10 percent headroom, and a new recording brings
-// its own. A settled record sends each human stroke as its exact cubics,
-// 13 to 19 per stroke at twice the human clearance, so a shapes payload
-// sits well above the thinned strokes of an unsettled game.
+// Games recorded by the record_shared_games test in src/route/tests.rs,
+// the human strokes bulged so the router does not redraw them. Per game:
+// the payload budget in characters, the form the link takes, and for a
+// shapes link how many AI moves go as topology. The link carries indices
+// when the engine regenerates the whole game on a fresh board, and shapes
+// when the regenerated board refuses a move, as the nine-node and
+// thirty-move games do. The budget belongs to the recording: the payload
+// measured when the game was recorded with about 10 percent headroom.
 const routed: [string, number, "indices" | "shapes", number][] = [
   ["fixtures/saved/eight-moves-4n-1000.json", 40, "indices", 4],
   ["fixtures/saved/ten-moves-9n-1000.json", 900, "shapes", 5],
   ["fixtures/saved/thirty-moves-12n-1000.json", 3000, "shapes", 14],
 ];
+
+// A share replays the game up to three times in the engine, routing
+// every move; the thirty-move game takes about a minute on the runner.
+const SHARE_WAIT = 180_000;
 
 const entries = (page: Page) => page.locator("#moveList li");
 
@@ -129,7 +127,7 @@ for (const [file, budget, form, topologyMoves] of routed) {
     const total = await openSaved(page, file);
     await expect(page.locator("#status")).toHaveText("Your turn!");
     const before = await strokeCells(page);
-    const { url, payload } = await share(page, `${name}-payload-chars`);
+    const { url, payload } = await share(page, `${name}-payload-chars`, SHARE_WAIT);
     expect(payload).toBeLessThan(budget);
     await expect(page.locator("#status")).not.toHaveText(/replay may stop|may differ/);
     await shot(page, `${name}-source`);
@@ -162,7 +160,7 @@ for (const [file, budget, form, topologyMoves] of routed) {
     if (form === "shapes") expectSameStrokes(before, await strokeCells(other));
 
     // Sharing again from the visitor's board gives a link to the same game.
-    const again = await share(other, `${name}-visitor-payload-chars`);
+    const again = await share(other, `${name}-visitor-payload-chars`, SHARE_WAIT);
     const relinked = decodeRecord(
       again.url.slice(again.url.indexOf(HASH_PREFIX) + HASH_PREFIX.length),
     );

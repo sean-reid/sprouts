@@ -28,8 +28,7 @@ export interface TopologyMove {
 }
 
 // A move a link carried as its index in the engine's move list for the
-// position, with its node's place along the routed curve; the engine
-// lists and draws it on load, so its ends are unknown until then.
+// position; its ends are unknown until the engine has drawn it.
 export interface IndexedRecordMove {
   index: number;
   along: number;
@@ -60,10 +59,9 @@ export function isIndexed(move: RecordMove): move is IndexedRecordMove {
 // A move with what the engine reported about it: the spline it fitted, the
 // face move the router draws this very line from, when it does, the
 // nodes it cut off, unknown until the engine has applied it, and its
-// index in the move list when a link is to carry it that way. The saved
+// index in the move list when a link carries it that way. The saved
 // record keeps the stroke and the count. A move that arrived as topology
-// or by index has an empty polyline until the engine has drawn it, and
-// one that arrived by index has UNKNOWN_NODE for its ends until then.
+// or by index has an empty polyline until the engine has drawn it.
 export interface RecordedMove extends Move {
   segments?: Cubic[];
   topology?: FaceMove;
@@ -877,13 +875,12 @@ export interface LinkEngine {
   rehearse(plan: Rehearsal): Promise<Rehearsed>;
 }
 
-// The game as the link will carry it, worked out on a copy. First
-// every move is named by its index in the engine's move list and
-// the link is replayed on a fresh board, which routes and settles
-// each move itself; when every move applies the link goes out that
-// way, and the visitor's board is that regenerated board rather than
-// this one. When a move is refused, or the engine cannot index the
-// game, the link carries shapes instead: the
+// The game as the link will carry it, worked out on a copy. An index
+// link is tried first: the engine names every move by index and the
+// link is replayed on a fresh board, which routes and settles each
+// move itself, so the visitor's board is that board rather than this
+// one; a refused move or a game the engine cannot index falls back
+// to shapes. For shapes the
 // engine says which drawn moves the router redraws, then the link
 // is replayed as decoded and any topology move the replay refuses,
 // or lands its node more than DRIFT_TOLERANCE from the recorded
