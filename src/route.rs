@@ -319,15 +319,6 @@ pub(crate) fn finish(
     if self_crossing(&flat) || self_touching(&flat, ends, clearance) {
         return Err(Unroutable::Shape("touching"));
     }
-    let segments: Vec<curve::Cubic> = segments
-        .iter()
-        .map(|c| curve::Cubic {
-            p0: curve::snap_to_grid(c.p0),
-            p1: curve::snap_to_grid(c.p1),
-            p2: curve::snap_to_grid(c.p2),
-            p3: curve::snap_to_grid(c.p3),
-        })
-        .collect();
     let mov = Move::from_segments(mv.a, mv.b, path, segments, node, state.current_player);
     match state.current_player {
         Player::AI => validate_ai_move(state, &mov),

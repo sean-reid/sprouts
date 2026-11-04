@@ -91,6 +91,14 @@ pub fn fit(points: &[Point], accuracy: f64) -> Vec<Cubic> {
             fit_run(&pts[start..], accuracy, &mut out);
         }
     }
+    // Control points live on the grid, so a stored curve refits to itself
+    // on every platform.
+    for c in &mut out {
+        c.p0 = snap_to_grid(c.p0);
+        c.p1 = snap_to_grid(c.p1);
+        c.p2 = snap_to_grid(c.p2);
+        c.p3 = snap_to_grid(c.p3);
+    }
     out
 }
 
@@ -764,7 +772,8 @@ mod tests {
             let incoming = Vec2::new(pair[0].p3.x - pair[0].p2.x, pair[0].p3.y - pair[0].p2.y);
             let outgoing = Vec2::new(pair[1].p1.x - pair[1].p0.x, pair[1].p1.y - pair[1].p0.y);
             let cross = incoming.normalize().cross(outgoing.normalize());
-            assert!(cross.abs() < 1e-9, "tangent break of {cross} at a join");
+            // The handles sit on the grid, a hair off the shared tangent.
+            assert!(cross.abs() < 1e-5, "tangent break of {cross} at a join");
         }
     }
 
@@ -850,15 +859,19 @@ mod tests {
         fn the_fit_never_strays_past_its_bound(points in strokes(), accuracy in prop_oneof![Just(0.75), Just(1.5), Just(3.0)]) {
             let segments = fit(&points, accuracy);
             prop_assert!(!segments.is_empty());
-            prop_assert_eq!(segments[0].p0, points[0]);
-            prop_assert_eq!(segments[segments.len() - 1].p3, points[points.len() - 1]);
+            prop_assert_eq!(segments[0].p0, snap_to_grid(points[0]));
+            prop_assert_eq!(
+                segments[segments.len() - 1].p3,
+                snap_to_grid(points[points.len() - 1])
+            );
             for pair in segments.windows(2) {
                 prop_assert_eq!(pair[0].p3, pair[1].p0);
             }
             let vertex = max_vertex_deviation(&points, &segments);
-            prop_assert!(vertex <= accuracy + 1e-9, "vertex deviation {} > {}", vertex, accuracy);
+            // Control points on the grid move the curve by under a grid step.
+            prop_assert!(vertex <= accuracy + GRID, "vertex deviation {} > {}", vertex, accuracy);
             let curve = max_curve_deviation(&points, &segments);
-            prop_assert!(curve <= accuracy + 1e-9, "curve deviation {} > {}", curve, accuracy);
+            prop_assert!(curve <= accuracy + GRID, "curve deviation {} > {}", curve, accuracy);
         }
     }
 }

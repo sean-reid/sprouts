@@ -507,7 +507,7 @@ fn routing_gives_the_same_curves_in_another_process() {
 /// record shape, the human moving first: human lines are routed at twice
 /// the human clearances, so the rounded strokes of a link still pass, and
 /// then kinked by more than the redraw tolerance, so they travel as
-/// geometry; AI lines are what the AI draws.
+/// geometry; AI lines are the first search move the router draws.
 fn record_shared_game(nodes: usize, moves: usize, pick: usize, path: &std::path::Path) {
     let mut state = GameState::with_board_size(nodes, 1000);
     state.current_player = Player::Human;
@@ -569,9 +569,13 @@ fn record_shared_game(nodes: usize, moves: usize, pick: usize, path: &std::path:
                 })
                 .unwrap_or_else(|| panic!("no human move at move {index}"))
         } else {
-            match crate::ai::choose(&state) {
-                crate::ai::Reply::Move(mov) => mov,
-                other => panic!("the AI gave {other:?} at move {index}"),
+            // The first search move that draws, so the record is the same
+            // on every run; the ranked choice depends on the wall clock.
+            let moves = state.face.search_moves();
+            let order: Vec<usize> = (0..moves.len()).collect();
+            match crate::ai::draw(&state, &moves, &order) {
+                (Some(mov), _) => mov,
+                (None, _) => panic!("no AI move draws at move {index}"),
             }
         };
         record.push(serde_json::json!({
@@ -604,7 +608,7 @@ fn record_shared_game(nodes: usize, moves: usize, pick: usize, path: &std::path:
 /// from SPROUTS_PICK_4 and SPROUTS_PICK_9 when set, is which chord the
 /// human opens with; the spec needs games whose AI moves the visitor's
 /// rounded board reroutes within a unit, which most picks do not give, so
-/// a new router may need another pick.
+/// a new router may need another pick. The record is deterministic.
 #[test]
 #[ignore]
 fn record_shared_games() {
@@ -618,13 +622,13 @@ fn record_shared_games() {
     record_shared_game(
         4,
         8,
-        pick("SPROUTS_PICK_4", 4),
+        pick("SPROUTS_PICK_4", 11),
         &dir.join("eight-moves-4n-1000.json"),
     );
     record_shared_game(
         9,
         10,
-        pick("SPROUTS_PICK_9", 17),
+        pick("SPROUTS_PICK_9", 11),
         &dir.join("ten-moves-9n-1000.json"),
     );
 }
@@ -745,7 +749,7 @@ const ROUTING_HASH_FIXTURES: usize = 5;
 /// The final routing hash a Mac records; the Linux runner and the wasm
 /// build (tests/unit/route-hash.test.ts) have to produce the same one,
 /// since a share link is redrawn on the visitor's device.
-const ROUTING_HASH: u64 = 0x349e_1729_e980_5649;
+const ROUTING_HASH: u64 = 0x1ddc_ba1e_f5d3_5c8c;
 
 #[test]
 fn routing_hashes_the_same_on_every_platform() {

@@ -621,7 +621,10 @@ pub fn fit(state: &GameState, query: FitQuery) -> Curve {
 }
 
 pub fn placement(state: &GameState, query: PlacementQuery) -> Placement {
-    let Some(hit) = curve::nearest(&query.segments, &query.at) else {
+    let Some(hit) = curve::nearest(&query.segments, &query.at).map(|hit| curve::Nearest {
+        point: curve::snap_to_grid(hit.point),
+        ..hit
+    }) else {
         return Placement {
             position: query.at,
             valid: false,
@@ -653,7 +656,7 @@ pub fn auto_placement(state: &GameState, query: AutoPlacementQuery) -> AutoPlace
     let chosen = ai::rank_node_placements(&path, state)
         .into_iter()
         .filter_map(|at| curve::nearest(&query.segments, &at))
-        .map(|hit| hit.point)
+        .map(|hit| curve::snap_to_grid(hit.point))
         .filter(inside)
         .find(valid);
     match chosen {

@@ -56,7 +56,10 @@ pub fn opening_layout(count: usize, board_size: usize) -> Vec<Point> {
         .map(|i| {
             let radius = unit * (i as f64 + 0.5).sqrt();
             let angle = i as f64 * golden_angle;
-            Point::new(centre + radius * angle.cos(), centre + radius * angle.sin())
+            curve::snap_to_grid(Point::new(
+                centre + radius * angle.cos(),
+                centre + radius * angle.sin(),
+            ))
         })
         .collect()
 }
