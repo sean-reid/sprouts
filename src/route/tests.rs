@@ -706,40 +706,75 @@ fn recorded_topology_positions_stay_bounded() {
     assert!(tally.topology <= RECORDED_TOPOLOGY, "{tally}");
 }
 
-/// FNV-1a over the bits of the flattening and the node of every routed
-/// search move of every routing fixture, in path order.
-fn routing_hash() -> u64 {
-    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    let mut feed = |x: f64| {
+/// FNV-1a over f64 bits.
+struct Fnv(u64);
+
+impl Fnv {
+    fn new() -> Self {
+        Self(0xcbf2_9ce4_8422_2325)
+    }
+
+    fn feed(&mut self, x: f64) {
         for byte in x.to_bits().to_le_bytes() {
-            hash ^= byte as u64;
-            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+            self.0 ^= byte as u64;
+            self.0 = self.0.wrapping_mul(0x0000_0100_0000_01b3);
         }
-    };
-    for path in fixture_paths("fixtures/routing") {
+    }
+
+    fn points(&mut self, pts: &[Point]) {
+        for p in pts {
+            self.feed(p.x);
+            self.feed(p.y);
+        }
+    }
+}
+
+/// Hashes of each routing stage over every search move of the first
+/// `ROUTING_HASH_FIXTURES` routing fixtures, in path order: arena
+/// vertices, taut path, relaxed path, fitted cubics, and the flattening
+/// with the node. A platform that disagrees shows where it diverged.
+fn routing_hashes() -> [u64; 5] {
+    let mut stages = [Fnv::new(), Fnv::new(), Fnv::new(), Fnv::new(), Fnv::new()];
+    for path in fixture_paths("fixtures/routing")
+        .into_iter()
+        .take(ROUTING_HASH_FIXTURES)
+    {
         let state = position(&path);
+        let want = rules(&state);
         for mv in state.face.search_moves() {
-            if let Ok(drawn) = route(&state, &mv) {
-                for p in drawn
-                    .flatten(curve::tolerance(state.board_size))
-                    .iter()
-                    .chain(std::iter::once(&drawn.new_node_pos))
-                {
-                    feed(p.x);
-                    feed(p.y);
+            if mv.a != mv.b || !mv.enclosed.is_empty() {
+                if let Ok((arena, taut)) = plan(&state, &mv, &want) {
+                    stages[0].points(&arena.vertex_points());
+                    stages[1].points(&taut);
+                    if let Some(relaxed) = relax(&state, &mv, &want, &arena, &taut) {
+                        stages[2].points(&relaxed);
+                    }
                 }
+            }
+            if let Ok(drawn) = route(&state, &mv) {
+                for c in &drawn.segments {
+                    stages[3].points(&[c.p0, c.p1, c.p2, c.p3]);
+                }
+                stages[4].points(&drawn.flatten(curve::tolerance(state.board_size)));
+                stages[4].points(&[drawn.new_node_pos]);
             }
         }
     }
-    hash
+    stages.map(|f| f.0)
 }
 
-/// The routing hash a Mac records; the Linux runner has to produce the
-/// same one, since a share link is redrawn on the visitor's device.
-const ROUTING_HASH: u64 = 0xc4cb_8e68_94a2_1296;
+/// Routing fixtures the hash covers; five keep the debug run short.
+const ROUTING_HASH_FIXTURES: usize = 5;
+
+/// The final routing hash a Mac records; the Linux runner has to produce
+/// the same one, since a share link is redrawn on the visitor's device.
+const ROUTING_HASH: u64 = 0xab0b_8b95_c9b9_01f1;
 
 #[test]
 fn routing_hashes_the_same_on_every_platform() {
-    let hash = routing_hash();
-    assert_eq!(hash, ROUTING_HASH, "routing hash {hash:#018x}");
+    let [arena, taut, relaxed, cubics, flat] = routing_hashes();
+    assert_eq!(
+        flat, ROUTING_HASH,
+        "routing hashes: arena {arena:#018x} taut {taut:#018x} relaxed {relaxed:#018x} cubics {cubics:#018x} flat {flat:#018x}"
+    );
 }
