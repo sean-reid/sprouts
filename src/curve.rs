@@ -1,4 +1,5 @@
-use kurbo::{BezPath, CubicBez, ParamCurve, ParamCurveDeriv, PathEl, Vec2};
+use crate::exact::snap_to_grid;
+use kurbo::{CubicBez, ParamCurve, ParamCurveDeriv, Vec2};
 use serde::{Deserialize, Serialize};
 use tsify::Tsify;
 
@@ -91,6 +92,14 @@ pub fn fit(points: &[Point], accuracy: f64) -> Vec<Cubic> {
             fit_run(&pts[start..], accuracy, &mut out);
         }
     }
+    // Control points live on the grid, so a stored curve refits to itself
+    // on every platform.
+    for c in &mut out {
+        c.p0 = snap_to_grid(c.p0);
+        c.p1 = snap_to_grid(c.p1);
+        c.p2 = snap_to_grid(c.p2);
+        c.p3 = snap_to_grid(c.p3);
+    }
     out
 }
 
@@ -120,10 +129,10 @@ fn turn_cos(pts: &[kurbo::Point], i: usize, span: f64) -> f64 {
     };
     let u = pts[i] - reach(-1);
     let v = reach(1) - pts[i];
-    if u.hypot() < span / 2.0 || v.hypot() < span / 2.0 {
+    if crate::exact::length(u.x, u.y) < span / 2.0 || crate::exact::length(v.x, v.y) < span / 2.0 {
         return 1.0;
     }
-    u.dot(v) / (u.hypot() * v.hypot())
+    u.dot(v) / (crate::exact::length(u.x, u.y) * crate::exact::length(v.x, v.y))
 }
 
 fn fit_run(pts: &[kurbo::Point], accuracy: f64, out: &mut Vec<Cubic>) {
@@ -156,8 +165,20 @@ fn tangent_from(pts: &[kurbo::Point], at: usize, step: isize, span: f64) -> Vec2
         sxy += d.x * d.y;
         syy += d.y * d.y;
     }
-    let theta = 0.5 * (2.0 * sxy).atan2(sxx - syy);
-    let direction = Vec2::new(theta.cos(), theta.sin());
+    // The major eigenvector of the covariance, without trigonometry.
+    let half = (sxx - syy) * 0.5;
+    let root = (half * half + sxy * sxy).sqrt();
+    let raw = if half >= 0.0 {
+        Vec2::new(half + root, sxy)
+    } else {
+        Vec2::new(sxy, root - half)
+    };
+    let len = crate::exact::length(raw.x, raw.y);
+    let direction = if len > 0.0 {
+        raw / len
+    } else {
+        Vec2::new(1.0, 0.0)
+    };
     let toward = window[window.len() - 1] - window[0];
     if direction.dot(toward) < 0.0 {
         -direction
@@ -169,10 +190,11 @@ fn tangent_from(pts: &[kurbo::Point], at: usize, step: isize, span: f64) -> Vec2
 fn shared_tangent(pts: &[kurbo::Point], split: usize, span: f64) -> Vec2 {
     let back = tangent_from(pts, split, -1, span);
     let center = back - tangent_from(pts, split, 1, span);
-    if center.hypot2() < 1e-12 {
+    let len = crate::exact::length(center.x, center.y);
+    if len * len < 1e-12 {
         back
     } else {
-        center.normalize()
+        center / len
     }
 }
 
@@ -413,14 +435,63 @@ fn segment_distance(a: kurbo::Point, b: kurbo::Point, p: kurbo::Point) -> f64 {
 /// Polyline within `tolerance` of the spline, starting at its first point.
 pub fn flatten(segments: &[Cubic], tolerance: f64) -> Vec<Point> {
     let mut out = Vec::new();
-    if segments.is_empty() {
+    let Some(first) = segments.first() else {
         return out;
+    };
+    out.push(snap_to_grid(first.p0));
+    for c in segments {
+        flatten_cubic([c.p0, c.p1, c.p2, c.p3], tolerance * tolerance, 0, &mut out);
     }
-    kurbo::flatten(bezpath(segments), tolerance, |el| match el {
-        PathEl::MoveTo(p) | PathEl::LineTo(p) => out.push(from_kurbo(p)),
-        PathEl::QuadTo(..) | PathEl::CurveTo(..) | PathEl::ClosePath => {}
-    });
     out
+}
+
+/// Deepest halving of one cubic while flattening.
+const FLATTEN_DEPTH: u32 = 16;
+
+fn flatten_cubic(c: [Point; 4], tolerance2: f64, depth: u32, out: &mut Vec<Point>) {
+    let [p0, p1, p2, p3] = c;
+    let off = |p: Point| {
+        let (dx, dy) = (p3.x - p0.x, p3.y - p0.y);
+        let len2 = dx * dx + dy * dy;
+        let (ex, ey) = (p.x - p0.x, p.y - p0.y);
+        if len2 == 0.0 {
+            return ex * ex + ey * ey;
+        }
+        let cross = dx * ey - dy * ex;
+        cross * cross / len2
+    };
+    let ends_close = (p3.x - p0.x) * (p3.x - p0.x) + (p3.y - p0.y) * (p3.y - p0.y) <= tolerance2;
+    let flat = if ends_close {
+        [p1, p2]
+            .iter()
+            .all(|p| (p.x - p0.x) * (p.x - p0.x) + (p.y - p0.y) * (p.y - p0.y) <= tolerance2)
+    } else {
+        off(p1) <= tolerance2
+            && off(p2) <= tolerance2
+            && within_chord(p0, p3, p1)
+            && within_chord(p0, p3, p2)
+    };
+    if flat || depth == FLATTEN_DEPTH {
+        out.push(snap_to_grid(p3));
+        return;
+    }
+    let mid = |a: Point, b: Point| Point::new((a.x + b.x) * 0.5, (a.y + b.y) * 0.5);
+    let q0 = mid(p0, p1);
+    let q1 = mid(p1, p2);
+    let q2 = mid(p2, p3);
+    let r0 = mid(q0, q1);
+    let r1 = mid(q1, q2);
+    let s = mid(r0, r1);
+    flatten_cubic([p0, q0, r0, s], tolerance2, depth + 1, out);
+    flatten_cubic([s, r1, q2, p3], tolerance2, depth + 1, out);
+}
+
+/// Whether `p` projects onto the chord from `a` to `b` rather than past
+/// an end, so the chord distance is the curve's deviation.
+fn within_chord(a: Point, b: Point, p: Point) -> bool {
+    let (dx, dy) = (b.x - a.x, b.y - a.y);
+    let t = (p.x - a.x) * dx + (p.y - a.y) * dy;
+    t >= 0.0 && t <= dx * dx + dy * dy
 }
 
 pub struct Nearest {
@@ -445,15 +516,6 @@ pub fn nearest(segments: &[Cubic], target: &Point) -> Option<Nearest> {
     })
 }
 
-fn bezpath(segments: &[Cubic]) -> BezPath {
-    let mut path = BezPath::new();
-    path.move_to(to_kurbo(segments[0].p0));
-    for c in segments {
-        path.curve_to(to_kurbo(c.p1), to_kurbo(c.p2), to_kurbo(c.p3));
-    }
-    path
-}
-
 fn to_kurbo(p: Point) -> kurbo::Point {
     kurbo::Point::new(p.x, p.y)
 }
@@ -465,6 +527,7 @@ fn from_kurbo(p: kurbo::Point) -> Point {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::exact::GRID;
     use crate::geometry::{closest_point_on_polyline, polyline_length};
     use proptest::prelude::*;
 
@@ -691,7 +754,8 @@ mod tests {
             let incoming = Vec2::new(pair[0].p3.x - pair[0].p2.x, pair[0].p3.y - pair[0].p2.y);
             let outgoing = Vec2::new(pair[1].p1.x - pair[1].p0.x, pair[1].p1.y - pair[1].p0.y);
             let cross = incoming.normalize().cross(outgoing.normalize());
-            assert!(cross.abs() < 1e-9, "tangent break of {cross} at a join");
+            // The handles sit on the grid, a hair off the shared tangent.
+            assert!(cross.abs() < 1e-5, "tangent break of {cross} at a join");
         }
     }
 
@@ -777,15 +841,19 @@ mod tests {
         fn the_fit_never_strays_past_its_bound(points in strokes(), accuracy in prop_oneof![Just(0.75), Just(1.5), Just(3.0)]) {
             let segments = fit(&points, accuracy);
             prop_assert!(!segments.is_empty());
-            prop_assert_eq!(segments[0].p0, points[0]);
-            prop_assert_eq!(segments[segments.len() - 1].p3, points[points.len() - 1]);
+            prop_assert_eq!(segments[0].p0, snap_to_grid(points[0]));
+            prop_assert_eq!(
+                segments[segments.len() - 1].p3,
+                snap_to_grid(points[points.len() - 1])
+            );
             for pair in segments.windows(2) {
                 prop_assert_eq!(pair[0].p3, pair[1].p0);
             }
             let vertex = max_vertex_deviation(&points, &segments);
-            prop_assert!(vertex <= accuracy + 1e-9, "vertex deviation {} > {}", vertex, accuracy);
+            // Control points on the grid move the curve by under a grid step.
+            prop_assert!(vertex <= accuracy + GRID, "vertex deviation {} > {}", vertex, accuracy);
             let curve = max_curve_deviation(&points, &segments);
-            prop_assert!(curve <= accuracy + 1e-9, "curve deviation {} > {}", curve, accuracy);
+            prop_assert!(curve <= accuracy + GRID, "curve deviation {} > {}", curve, accuracy);
         }
     }
 }

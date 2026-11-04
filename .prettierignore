@@ -10,3 +10,5 @@ CHANGELOG.md
 fixtures/games/
 fixtures/routing/
 fixtures/undrawn/
+fixtures/saved/
+fixtures/topology/

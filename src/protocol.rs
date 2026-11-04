@@ -174,23 +174,23 @@ pub struct MovesFrom {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Tsify)]
 #[serde(rename_all = "camelCase")]
 pub enum UnroutableKind {
-    Corner,
-    Corridor,
+    /// The model does not list the move.
+    Illegal,
+    /// No path or no node spot at these clearances.
     Room,
-    Crossing,
+    /// A path was found but could not be drawn as one curve.
+    Shape,
     Topology,
-    Rejected,
+    Bug,
 }
 
 impl From<&Unroutable> for UnroutableKind {
     fn from(why: &Unroutable) -> Self {
         match why {
-            Unroutable::Corner => Self::Corner,
-            Unroutable::Corridor => Self::Corridor,
-            Unroutable::Room => Self::Room,
-            Unroutable::Crossing => Self::Crossing,
+            Unroutable::Room | Unroutable::NoSpot => Self::Room,
+            Unroutable::Shape(_) => Self::Shape,
             Unroutable::Topology => Self::Topology,
-            Unroutable::Rejected(_) => Self::Rejected,
+            Unroutable::Bug(_) => Self::Bug,
         }
     }
 }
@@ -204,9 +204,8 @@ pub enum RouteReply {
     Unroutable { reason: UnroutableKind },
 }
 
-/// A fresh board on the recorded positions, or on the default layout when
-/// none are given. Positions that do not match the count are an error.
 /// FNV-1a over the node positions and the line flattenings, as hex.
+#[cfg(any(test, feature = "hash"))]
 pub fn hash_board(state: &GameState) -> String {
     let mut fnv = crate::exact::Fnv::default();
     fnv.points(&state.nodes.iter().map(|n| n.position).collect::<Vec<_>>());
@@ -216,6 +215,8 @@ pub fn hash_board(state: &GameState) -> String {
     fnv.hex()
 }
 
+/// A fresh board on the recorded positions, or on the default layout when
+/// none are given. Positions that do not match the count are an error.
 pub fn start(
     initial_nodes: usize,
     board_size: usize,
@@ -353,7 +354,7 @@ fn cut_off(model: &face::FaceModel) -> usize {
 /// Changes whenever the router draws a different curve for the same face
 /// move. A share link carries it, so a page with another router refuses
 /// the link instead of drawing a game the sharer never saw.
-pub const ROUTER_VERSION: u8 = 1;
+pub const ROUTER_VERSION: u8 = 2;
 
 /// A game with its real geometry, for working out which moves the router
 /// redraws. `known` holds the face move of a line already known to be
@@ -397,6 +398,34 @@ pub fn classify(plan: Classification) -> Result<Classified, String> {
     Ok(Classified { topology: out })
 }
 
+/// Positions whose routes are hashed together.
+#[cfg(feature = "hash")]
+#[derive(Debug, Clone, Deserialize, Tsify)]
+pub struct RouteHashPlan {
+    pub plans: Vec<Classification>,
+}
+
+/// The routing hash of the given positions, as hex: each plan replayed
+/// with the AI to move, then every search move routed and its flattening
+/// and node fed to one FNV-1a. The native test records the value a
+/// platform must match.
+#[cfg(feature = "hash")]
+pub fn route_hash(plan: RouteHashPlan) -> Result<String, String> {
+    let mut fnv = crate::exact::Fnv::default();
+    for plan in plan.plans {
+        let mut state = start(plan.initial_nodes, plan.board_size, Player::AI, plan.nodes)?;
+        for (index, mov) in plan.moves.into_iter().enumerate() {
+            state.current_player = Player::AI;
+            state
+                .apply_move(mov.by(Player::AI, state.board_size))
+                .map_err(|e| format!("move {index}: {}", e.message))?;
+        }
+        state.current_player = Player::AI;
+        route::hash_routes(&mut fnv, &state);
+    }
+    Ok(fnv.hex())
+}
+
 /// A move as a share link carries it: drawn, or routed from its face move
 /// with its node.
 #[derive(Debug, Clone, Deserialize, Tsify)]
@@ -418,12 +447,20 @@ pub struct Rehearsal {
     pub moves: Vec<LinkMove>,
 }
 
+/// What a rehearsal found: the first move refused, if any, and for every
+/// routed move before it the node the replay placed.
+#[derive(Debug, Clone, PartialEq, Serialize, Tsify)]
+pub struct Rehearsed {
+    pub refused: Option<usize>,
+    pub nodes: Vec<Option<Point>>,
+}
+
 /// Replays a link on a fresh board the way a visitor's engine will, and
-/// names the first move that is refused, if any. Drawn moves arrive with
-/// the link's rounded geometry, so a routed move after them meets a board
-/// that differs a little from the one it was drawn on. A link made for
-/// another router is an error.
-pub fn rehearse(plan: Rehearsal) -> Result<Option<usize>, String> {
+/// names the first move that is refused, if any, with the node each routed
+/// move landed on. Drawn moves arrive with the link's rounded geometry, so
+/// a routed move after them meets a board that differs a little from the
+/// one it was drawn on. A link made for another router is an error.
+pub fn rehearse(plan: Rehearsal) -> Result<Rehearsed, String> {
     if plan.router_version != ROUTER_VERSION {
         return Err(format!(
             "the link is for router version {}, this engine is {ROUTER_VERSION}",
@@ -436,23 +473,34 @@ pub fn rehearse(plan: Rehearsal) -> Result<Option<usize>, String> {
         plan.first_player,
         plan.nodes,
     )?;
+    let mut nodes = vec![None; plan.moves.len()];
     for (index, mov) in plan.moves.into_iter().enumerate() {
+        let routed = matches!(mov, LinkMove::Routed { .. });
         let outcome = match mov {
             LinkMove::Drawn { mov } => apply(&mut state, mov),
             LinkMove::Routed { face, at } => apply_face_move(&mut state, face, at),
         };
         if matches!(outcome, Outcome::Rejected { .. }) {
-            return Ok(Some(index));
+            return Ok(Rehearsed {
+                refused: Some(index),
+                nodes,
+            });
+        }
+        if routed {
+            nodes[index] = state.lines.last().map(|line| line.new_node_pos);
         }
     }
-    Ok(None)
+    Ok(Rehearsed {
+        refused: None,
+        nodes,
+    })
 }
 
 /// Whether the router, given the face move, draws the curve of `mov`: the
 /// flattenings stay within the fit tolerance of each other. The node is
 /// carried with the move, since the best spot on a curve can jump far for
 /// a small change in it.
-fn redraws(state: &GameState, face: &face::Move, mov: &types::Move) -> bool {
+pub(crate) fn redraws(state: &GameState, face: &face::Move, mov: &types::Move) -> bool {
     let tolerance = curve::tolerance(state.board_size);
     let Ok(drawn) = route::route(state, face) else {
         return false;
@@ -510,12 +558,11 @@ fn illegal(state: &GameState, mv: &face::Move, why: IllegalMove) -> Rejection {
 
 fn unroutable(mv: &face::Move, why: Unroutable) -> Rejection {
     match why {
-        Unroutable::Rejected(rejection) => rejection,
-        Unroutable::Corner => Rejection::unroutable(mv.a, "no matching corner"),
-        Unroutable::Corridor => Rejection::unroutable(mv.a, "no corridor through the face"),
         Unroutable::Room => Rejection::unroutable(mv.a, "no room"),
-        Unroutable::Crossing => Rejection::unroutable(mv.a, "the curve crosses a line"),
+        Unroutable::NoSpot => Rejection::unroutable(mv.a, "no room for the new node"),
+        Unroutable::Shape(what) => Rejection::unroutable(mv.a, what),
         Unroutable::Topology => Rejection::unroutable(mv.a, "the curve reads as another move"),
+        Unroutable::Bug(what) => Rejection::unroutable(mv.a, what),
     }
 }
 
@@ -570,7 +617,13 @@ pub fn moves_from(state: &GameState, node: usize) -> MovesFrom {
 
 /// Draws `mv` for the player to move without applying it.
 pub fn route_move(state: &GameState, mv: FaceMove) -> RouteReply {
-    match route::route(state, &ModelMove::from(mv)) {
+    let listed = ModelMove::from(mv);
+    if state.face.check(&listed).is_err() {
+        return RouteReply::Unroutable {
+            reason: UnroutableKind::Illegal,
+        };
+    }
+    match route::route(state, &listed) {
         Ok(mov) => RouteReply::Routed {
             segments: mov.segments.clone(),
             mov: Move::from(mov),
@@ -589,7 +642,10 @@ pub fn fit(state: &GameState, query: FitQuery) -> Curve {
 }
 
 pub fn placement(state: &GameState, query: PlacementQuery) -> Placement {
-    let Some(hit) = curve::nearest(&query.segments, &query.at) else {
+    let Some(hit) = curve::nearest(&query.segments, &query.at).map(|hit| curve::Nearest {
+        point: crate::exact::snap_to_grid(hit.point),
+        ..hit
+    }) else {
         return Placement {
             position: query.at,
             valid: false,
@@ -621,7 +677,7 @@ pub fn auto_placement(state: &GameState, query: AutoPlacementQuery) -> AutoPlace
     let chosen = ai::rank_node_placements(&path, state)
         .into_iter()
         .filter_map(|at| curve::nearest(&query.segments, &at))
-        .map(|hit| hit.point)
+        .map(|hit| crate::exact::snap_to_grid(hit.point))
         .filter(inside)
         .find(valid);
     match chosen {
@@ -648,7 +704,7 @@ pub fn auto_placement(state: &GameState, query: AutoPlacementQuery) -> AutoPlace
 mod tests {
     /// The hash of a fresh four-node board on fixed positions, recorded on
     /// a Mac; tests/unit/board-hash.test.ts asks the wasm build for it.
-    const BOARD_HASH: &str = "0x88c8d6882977d382";
+    const BOARD_HASH: &str = "0x8d980b253c42108e";
 
     #[test]
     fn a_fixed_board_hashes_to_the_recorded_value() {
@@ -977,12 +1033,27 @@ mod tests {
                 },
             ],
         };
-        assert_eq!(rehearse(plan(face.clone())), Ok(None));
+        let rehearsed = rehearse(plan(face.clone())).unwrap();
+        assert_eq!(rehearsed.refused, None);
+        // The node reported is the one the same replay places on its board.
+        let mut replayed = GameState::new(4);
+        assert!(matches!(
+            apply(&mut replayed, chord.clone()),
+            Outcome::Applied { .. }
+        ));
+        assert!(matches!(
+            apply_face_move(&mut replayed, face.clone(), reply.new_node_pos),
+            Outcome::Applied { .. }
+        ));
+        let placed = replayed.lines.last().unwrap().new_node_pos;
+        assert_eq!(rehearsed.nodes, vec![None, Some(placed)]);
         let wrong = FaceMove {
             at_a: Some(1),
             ..face.clone()
         };
-        assert_eq!(rehearse(plan(wrong)), Ok(Some(1)));
+        let refused = rehearse(plan(wrong)).unwrap();
+        assert_eq!(refused.refused, Some(1));
+        assert_eq!(refused.nodes, vec![None, None]);
         let other_router = Rehearsal {
             router_version: ROUTER_VERSION + 1,
             ..plan(face.clone())
@@ -996,7 +1067,7 @@ mod tests {
             "moves": [{ "kind": "drawn", "mov": chord }],
         });
         let parsed: Rehearsal = serde_json::from_value(wire).unwrap();
-        assert_eq!(rehearse(parsed), Ok(None));
+        assert_eq!(rehearse(parsed).unwrap().refused, None);
         // A drawn move the visitor's engine refuses is named the same way.
         let short = Move {
             polyline: vec![a, a],
@@ -1009,8 +1080,10 @@ mod tests {
                     LinkMove::Drawn { mov: short }
                 ],
                 ..plan(face.clone())
-            }),
-            Ok(Some(1))
+            })
+            .unwrap()
+            .refused,
+            Some(1)
         );
         assert!(rehearse(Rehearsal {
             nodes: Some(vec![a]),
@@ -1452,14 +1525,15 @@ mod tests {
         ));
     }
 
-    /// A pocket where the three listed moves are all too cramped to draw:
-    /// the AI reports that it cannot draw, and the game stays open. The
-    /// pocket serves only while the router cannot draw it; if routing
-    /// improves, record a tighter one.
+    /// A bare node sealed inside a loop of radius 18 with every other node
+    /// dead: its only moves are loops, and the cell is smaller than the
+    /// smallest loop the router draws, so the AI reports that it cannot
+    /// draw and the game stays open. Each recorded move passes the check
+    /// its player gets.
     #[test]
     fn an_undrawn_position_does_not_end_the_game() {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("fixtures/undrawn/pocket-6n-1000.json");
+            .join("fixtures/undrawn/sealed-2n-1000.json");
         let raw: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
         let nodes: Vec<Point> = raw["nodes"]
@@ -1468,7 +1542,8 @@ mod tests {
             .iter()
             .map(|p| Point::new(p[0].as_f64().unwrap(), p[1].as_f64().unwrap()))
             .collect();
-        let mut state = start(6, 1000, Player::AI, Some(nodes)).unwrap();
+        assert_eq!(raw["firstPlayer"], "ai");
+        let mut state = start(2, 1000, Player::AI, Some(nodes)).unwrap();
         for m in raw["moves"].as_array().unwrap() {
             let polyline: Vec<Point> = m["polyline"]
                 .as_array()
@@ -1485,12 +1560,13 @@ mod tests {
                 m["to"].as_u64().unwrap() as usize,
                 polyline,
                 new_node,
-                Player::AI,
+                state.current_player,
                 1000,
             );
+            assert_eq!(check(&state, &mov), Ok(()));
             state.apply_move(mov).unwrap();
-            state.current_player = Player::AI;
         }
+        assert_eq!(state.current_player, Player::AI);
         assert!(!state.face.search_moves().is_empty());
         assert!(matches!(ai_move(&mut state), AiReply::Undrawn));
         assert!(!snapshot(&state).game_over);
@@ -1615,7 +1691,7 @@ mod tests {
         };
         let wire = serde_json::to_value(route_move(&state, off_corner)).unwrap();
         assert_eq!(wire["kind"], json!("unroutable"));
-        assert_eq!(wire["reason"], json!("corner"));
+        assert_eq!(wire["reason"], json!("illegal"));
     }
 
     fn listed(state: &GameState, want: impl Fn(&FaceMove) -> bool) -> FaceMove {

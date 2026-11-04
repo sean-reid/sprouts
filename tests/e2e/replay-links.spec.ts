@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { basename } from "node:path";
 import { expect, test, type BrowserContextOptions, type Page } from "@playwright/test";
-import { decodeRecord, hasStroke, sameGame } from "../../web/history";
+import { decodeRecord, DRIFT_TOLERANCE, hasStroke, sameGame } from "../../web/history";
 import type { Fixture } from "../../web/record";
 import { HIGHLIGHT_COLOR } from "../../web/render";
 import {
@@ -28,15 +28,16 @@ const fixtures = [
   "fixtures/games/selfplay-4n-500.json",
 ];
 
-// Games played on the page against the current AI, the human strokes
-// wobbly, so AI moves travel as face moves and human moves as geometry.
-// Per game: the payload budget in characters (231 and 440 measured, with
-// headroom) and how many of the AI's moves go as topology; the nine-node
-// game has one the visitor's engine cannot route, which the share's
-// rehearsal sends as geometry instead.
+// Games recorded against the current AI by the record_shared_games test
+// in src/route/tests.rs, the human strokes kinked, so AI moves travel as
+// face moves and human moves as geometry. Per game: the payload budget in
+// characters and how many of the AI's moves go as topology. The budget
+// belongs to the recording: it is the payload measured when the game was
+// recorded (298 and 322) with about 10 percent headroom, and a new
+// recording brings its own.
 const routed: [string, number, number][] = [
-  ["fixtures/saved/eight-moves-4n-1000.json", 250, 4],
-  ["fixtures/saved/ten-moves-9n-1000.json", 480, 4],
+  ["fixtures/saved/eight-moves-4n-1000.json", 330, 4],
+  ["fixtures/saved/ten-moves-9n-1000.json", 355, 4],
 ];
 
 const entries = (page: Page) => page.locator("#moveList li");
@@ -152,13 +153,25 @@ for (const [file, budget, topologyMoves] of routed) {
     if (!relinked) throw new Error("the visitor's link does not decode");
     expect(sameGame(linked, relinked)).toBe(true);
     expect(relinked.moves.map(hasStroke)).toEqual(linked.moves.map(hasStroke));
+    // The visitor's router placed every topology move's node within the
+    // drift the share allowed of the sharer's.
+    const drift = linked.moves.map((move, i) => {
+      const other = relinked.moves[i];
+      if (!other || hasStroke(move) || hasStroke(other)) return 0;
+      return Math.hypot(move.node[0] - other.node[0], move.node[1] - other.node[1]);
+    });
+    const largest = Math.max(...drift);
+    test
+      .info()
+      .annotations.push({ type: `${name}-largest-drift`, description: largest.toFixed(3) });
+    expect(largest).toBeLessThanOrEqual((DRIFT_TOLERANCE * linked.boardSize) / 1000);
     await visitor.close();
   });
 }
 
 // A version 4 link of two moves, the second a face move, with its router
 // byte set to a version this page does not have.
-const OTHER_ROUTER_LINK = "#game=BAIABADoAwIAAgAAAQAC2AToB6AGAI8DAAICAgQEAgAE2AnoBw";
+const OTHER_ROUTER_LINK = "#game=BAMABADoAwIAAgAAAQAC2AToB6AGAI8DAAICAgQEAgAE2AnoBw";
 
 test("a link from another router opens a fresh game and says so", async ({ page }) => {
   await page.goto("/" + OTHER_ROUTER_LINK);

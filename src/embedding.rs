@@ -108,6 +108,22 @@ fn crossing(state: &GameState, flat: &[Point], mov: &Move) -> Rejection {
     }
 }
 
+/// The pieces a line drawn along `path` from `a` to `b` would enclose,
+/// read the way `embed` reads it: a loop runs in the direction the model
+/// holds it.
+pub(crate) fn sides(
+    state: &GameState,
+    a: NodeId,
+    at_a: Option<HalfEdgeId>,
+    b: NodeId,
+    at_b: Option<HalfEdgeId>,
+    own: Component,
+    path: &[Point],
+) -> Vec<NodeId> {
+    let forward = a != b || new_loop_runs_forward(state, a, path);
+    enclosed_by(state, a, at_a, b, at_b, &run(path, forward), own)
+}
+
 /// Pieces of the split face on the left of the new line: those inside the
 /// closed walk it completes when that walk runs counterclockwise, those
 /// outside it when it runs clockwise.
@@ -194,17 +210,28 @@ pub(crate) fn turn(from: f64, to: f64) -> f64 {
     (to - from).rem_euclid(TAU)
 }
 
-/// Direction `path` leaves `center` in, read where it first clears `radius`.
+/// The direction from `center` in which `path` leaves the circle of
+/// `radius`: where its first segment to cross the circle meets it, so a
+/// bend just past the circle does not swing the reading. A path that never
+/// reaches the radius reads at its farthest point.
 pub(crate) fn leaving_angle(center: Point, path: &[Point], radius: f64) -> f64 {
     let farther = |p: &&Point, q: &&Point| {
         p.distance_to(&center)
             .partial_cmp(&q.distance_to(&center))
             .unwrap_or(Ordering::Equal)
     };
-    let far = path
-        .iter()
-        .find(|p| p.distance_to(&center) > radius)
-        .or_else(|| path.iter().max_by(farther));
+    let exit = path.windows(2).find_map(|w| {
+        let (p, q) = (w[0], w[1]);
+        let (dp, dq) = (p.distance_to(&center), q.distance_to(&center));
+        if dp > radius || dq <= radius {
+            return None;
+        }
+        // Linear interpolation along the segment to the radius, which is
+        // exact enough for a direction and the same on every platform.
+        let t = (radius - dp) / (dq - dp);
+        Some(Point::new(p.x + (q.x - p.x) * t, p.y + (q.y - p.y) * t))
+    });
+    let far = exit.or_else(|| path.iter().max_by(farther).copied());
     far.map_or(0.0, |p| (center.y - p.y).atan2(p.x - center.x))
 }
 

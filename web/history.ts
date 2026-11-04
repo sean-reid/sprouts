@@ -9,8 +9,10 @@ import type {
   Player,
   Point,
   Rehearsal,
+  Rehearsed,
 } from "../pkg/sprouts";
 import { circleLayout, openingLayout, sameLayout, type Position } from "./layout";
+import { distance } from "./path";
 import type { Fixture, FixtureMove } from "./record";
 import { shapeText } from "./shape";
 
@@ -67,7 +69,7 @@ const LINK_VERSION = 4;
 // Matches ROUTER_VERSION in src/protocol.rs; a version 4 link carries it
 // right after the version byte, and the engine refuses a rehearsal for
 // any other.
-export const ROUTER_VERSION = 1;
+export const ROUTER_VERSION = 2;
 const LAYOUT_LINK_VERSION = 3;
 const CUBIC_LINK_VERSION = 2;
 const STROKE_LINK_VERSION = 1;
@@ -91,6 +93,9 @@ const SHAPE_FACE = 2;
 const HALF_EDGES_PER_MOVE = 4;
 // Points travel in whole units, which moves one by at most 0.71.
 export const LINK_QUANTUM = 1;
+// A routed move whose rehearsed node lands farther than this from the
+// recorded one, in units at board size 1000, goes as geometry instead.
+export const DRIFT_TOLERANCE = 4;
 // A link can claim any control point; the subdivision is capped so a
 // hostile one costs at most this many points per cubic.
 const MAX_SUBDIVISIONS = 256;
@@ -718,17 +723,18 @@ export function demote(history: History, index: number): boolean {
 // The engine requests a share needs.
 export interface LinkEngine {
   classify(plan: Classification): Promise<Classified>;
-  rehearse(plan: Rehearsal): Promise<number | undefined>;
+  rehearse(plan: Rehearsal): Promise<Rehearsed>;
 }
 
 // The game as the link will carry it, worked out on a copy: the engine
 // says which drawn moves the router redraws, then the link is replayed as
-// decoded and any topology move the replay refuses goes as geometry until
-// the whole link applies. A refused drawn move is blamed on the latest
-// topology move before it, whose redraw shifted the board under it; when
-// none precedes it the index comes back so the sharer can be told. A
-// history the engine refuses to classify, as one left with moves past a
-// stopped restore, keeps the face moves the AI reported.
+// decoded and any topology move the replay refuses, or lands its node more
+// than DRIFT_TOLERANCE from the recorded one, goes as geometry until the
+// whole link applies and every routed node holds. A refused drawn move is
+// blamed on the latest topology move before it, whose redraw shifted the
+// board under it; when none precedes it the index comes back so the sharer
+// can be told. A history the engine refuses to classify, as one left with
+// moves past a stopped restore, keeps the face moves the AI reported.
 export async function prepareLink(
   source: History,
   engine: LinkEngine,
@@ -746,11 +752,22 @@ export async function prepareLink(
       // The AI's own face moves stand; the rehearsal checks them anyway.
     }
   }
+  const tolerance = DRIFT_TOLERANCE * scaleOf(history.boardSize);
   for (;;) {
     const link = rehearsal(history);
     if (!link) return { history };
-    const refused = await engine.rehearse(link);
-    if (refused === undefined) return { history };
+    const { refused, nodes } = await engine.rehearse(link);
+    if (refused === undefined) {
+      let drifted = false;
+      nodes.forEach((node, i) => {
+        const move = history.moves[i];
+        if (node && move && distance(node, move.newNodePos) > tolerance) {
+          drifted = demote(history, i) || drifted;
+        }
+      });
+      if (!drifted) return { history };
+      continue;
+    }
     if (demote(history, refused)) continue;
     let blamed = refused - 1;
     while (blamed >= 0 && !demote(history, blamed)) blamed--;
@@ -807,26 +824,33 @@ function distanceToSegment(p: Point, a: Point, b: Point): number {
 
 // True when one game is the other played further, so a link to my own game
 // reopens the live game rather than a review of it. Endpoints and the new
-// node identify a move; a link of either version rounds the node by less
-// than one quantum.
+// node identify a move; a link of either version rounds a stroke's node by
+// less than one quantum, and a routed move's node is wherever the visitor's
+// router put it, within the drift the share allowed.
 export function sameGame(a: GameRecord, b: GameRecord): boolean {
   if (a.initialNodes !== b.initialNodes || a.boardSize !== b.boardSize) return false;
   if (a.firstPlayer !== b.firstPlayer) return false;
-  const quantum = LINK_QUANTUM * scaleOf(a.boardSize);
+  const scale = scaleOf(a.boardSize);
+  const quantum = LINK_QUANTUM * scale;
   if (!sameLayout(a.nodes, b.nodes, a.initialNodes, a.boardSize, quantum)) return false;
   const shared = Math.min(a.moves.length, b.moves.length);
   for (let i = 0; i < shared; i++) {
-    if (!sameMove(a.moves[i], b.moves[i], quantum)) return false;
+    if (!sameMove(a.moves[i], b.moves[i], quantum, DRIFT_TOLERANCE * scale)) return false;
   }
   return true;
 }
 
-function sameMove(a: RecordMove | undefined, b: RecordMove | undefined, quantum: number): boolean {
+function sameMove(
+  a: RecordMove | undefined,
+  b: RecordMove | undefined,
+  quantum: number,
+  drift: number,
+): boolean {
   if (!a || !b) return false;
   if (a.from !== b.from || a.to !== b.to) return false;
   const [ax, ay] = nodeOf(a);
   const [bx, by] = nodeOf(b);
-  return Math.hypot(ax - bx, ay - by) <= quantum;
+  return Math.hypot(ax - bx, ay - by) <= (hasStroke(a) && hasStroke(b) ? quantum : drift);
 }
 
 function nodeOf(move: RecordMove): [number, number] {

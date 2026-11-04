@@ -9,7 +9,7 @@ Sprouts is a pen-and-paper game where players draw lines between nodes. Each lin
 **Features:**
 
 - HTML5 Canvas with touch/mouse support
-- AI routing by constrained Delaunay triangulation of the target face, funnel path, and clearance push
+- AI routing by constrained Delaunay triangulation of the target face eroded by its clearances, funnel path, and relaxation
 - Exact play from solved regions of the board, and a time-boxed alpha-beta search over an exact planar model where the position is too big to solve
 - Legality and game over come from the face model
 - Rust/WASM core, Web Worker for async AI
