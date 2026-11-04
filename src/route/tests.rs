@@ -294,6 +294,9 @@ const CASES: u32 = 4;
 #[cfg(not(debug_assertions))]
 const CASES: u32 = 24;
 const SEED: u64 = 7;
+/// Most read-back mismatches the seeded sweep and the recorded topology
+/// positions may show; the release sweep reads 3.
+const TOPOLOGY_CEILING: usize = 8;
 
 proptest! {
     #![proptest_config(Config {
@@ -317,6 +320,7 @@ proptest! {
         total.add(&tally.unwrap());
         eprintln!("{total}");
         prop_assert_eq!(total.bug, 0);
+        prop_assert!(total.topology <= TOPOLOGY_CEILING, "{}", total);
     }
 
     /// The same games drawn at the human clearances, which routeMove and
@@ -623,4 +627,81 @@ fn record_shared_games() {
         pick("SPROUTS_PICK_9", 17),
         &dir.join("ten-moves-9n-1000.json"),
     );
+}
+
+/// Records every position of the bench's seeded AI games where a route
+/// reads back as another move, under fixtures/topology, and prints the
+/// moves: `cargo test --release record_topology_positions -- --ignored
+/// --nocapture`.
+#[test]
+#[ignore]
+fn record_topology_positions() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/topology");
+    std::fs::create_dir_all(&dir).unwrap();
+    for entry in std::fs::read_dir(&dir).unwrap().filter_map(Result::ok) {
+        std::fs::remove_file(entry.path()).unwrap();
+    }
+    let mut written = 0;
+    for (game, (nodes, picks)) in sweep::games(7, 24).into_iter().enumerate() {
+        let mut state = GameState::with_board_size(nodes, 1000);
+        state.current_player = Player::AI;
+        for &pick in &picks {
+            let moves = state.face.search_moves();
+            if moves.is_empty() {
+                break;
+            }
+            let first = pick as usize % moves.len();
+            let mut drawn = None;
+            let mut saved = false;
+            for k in (0..moves.len()).map(|k| (first + k) % moves.len()) {
+                match draws(&state, &moves[k]) {
+                    Ok(mov) => {
+                        drawn = Some(mov);
+                        break;
+                    }
+                    Err(Unroutable::Topology) if !saved => {
+                        let name = format!("game{game}-{nodes}n-{}m.json", state.lines.len());
+                        std::fs::write(dir.join(&name), sweep::fixture_json(&state)).unwrap();
+                        eprintln!("{name}: {:?}", moves[k]);
+                        written += 1;
+                        saved = true;
+                    }
+                    Err(_) => {}
+                }
+            }
+            let Some(mov) = drawn else { break };
+            state.apply_move(mov).unwrap();
+            state.current_player = Player::AI;
+        }
+    }
+    eprintln!("{written} positions written");
+}
+
+/// Read-back mismatches the four recorded positions showed when recorded,
+/// every one a chord from a node to the node on its own spoke through the
+/// corner beside that spoke.
+const RECORDED_TOPOLOGY: usize = 9;
+
+/// Positions where a route read back as another move when recorded. No
+/// route fails as a bug, and the mismatches do not grow.
+#[test]
+fn recorded_topology_positions_stay_bounded() {
+    let paths = fixture_paths("fixtures/topology");
+    assert!(!paths.is_empty());
+    let mut tally = sweep::Tally::default();
+    for path in &paths {
+        let state = position(path);
+        for mv in state.face.search_moves() {
+            tally.tried += 1;
+            match draws(&state, &mv) {
+                Ok(_) => {}
+                Err(Unroutable::Bug(what)) => {
+                    panic!("{}: {mv:?} failed as a bug: {what}", path.display())
+                }
+                Err(why) => tally.count(&why),
+            }
+        }
+    }
+    eprintln!("{tally}");
+    assert!(tally.topology <= RECORDED_TOPOLOGY, "{tally}");
 }
