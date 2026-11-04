@@ -5,9 +5,12 @@ use crate::geometry::{closest_point_on_segment, segments_intersect};
 use crate::types::Point;
 
 const ROUNDS: usize = 40;
-/// How near a wall vertex or node a moved segment may pass, in board
-/// units, before it counts as crossing there.
-const GRAZE: f64 = 1e-6;
+/// A moved segment that comes within one grid step of a wall vertex or a
+/// node touches it and counts as crossing there. Distance from the walls
+/// themselves is the hard step's job, and finish refuses a fitted curve
+/// nearer any line than the player's clearance, which every drawn move
+/// of the seeded sweeps goes through.
+const GRAZE: f64 = crate::exact::GRID;
 /// Share of the shortfall a point moves per round, so two walls closer than
 /// twice the clearance settle the point between them instead of bouncing.
 const STEP: f64 = 0.35;
@@ -291,7 +294,7 @@ impl<'a> Obstacles<'a> {
             .chain(self.nodes.iter());
         if corners
             .into_iter()
-            .any(|v| closest_point_on_segment(&a, &b, v).1 < GRAZE)
+            .any(|v| closest_point_on_segment(&a, &b, v).1 <= GRAZE)
         {
             return true;
         }
