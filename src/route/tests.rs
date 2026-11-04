@@ -298,7 +298,7 @@ const SEED: u64 = 7;
 /// Read-back mismatches the seeded sweep shows as the AI and as the
 /// human. The sweep is seeded and platform-exact, so these are the
 /// measured values, and a router change that moves them is recorded here.
-const TOPOLOGY_CEILING: usize = 4;
+const AI_TOPOLOGY_CEILING: usize = 4;
 const HUMAN_TOPOLOGY_CEILING: usize = 2;
 
 proptest! {
@@ -323,7 +323,7 @@ proptest! {
         total.add(&tally.unwrap());
         eprintln!("{total}");
         prop_assert_eq!(total.bug, 0);
-        prop_assert!(total.topology <= TOPOLOGY_CEILING, "{}", total);
+        prop_assert!(total.topology <= AI_TOPOLOGY_CEILING, "{}", total);
     }
 
     /// The same games drawn at the human clearances, which routeMove and
@@ -714,7 +714,6 @@ fn recorded_topology_positions_stay_bounded() {
         }
     }
     eprintln!("{tally}");
-    eprintln!("recorded {tally}");
     assert!(tally.topology <= RECORDED_TOPOLOGY, "{tally}");
 }
 
@@ -899,25 +898,111 @@ fn a_sharp_wedge_is_eroded_to_its_mitre_and_routes_across() {
             .iter()
             .all(|(u, v)| crate::geometry::closest_point_on_segment(u, v, &q).1 < clearance)
     };
-    let mut checked = 0;
+    let disc = want.node_clearance + 2.0 * curve::tolerance(state.board_size);
+    let wall_distance = |q: Point| {
+        walls
+            .iter()
+            .map(|(u, v)| crate::geometry::closest_point_on_segment(u, v, &q).1)
+            .fold(f64::INFINITY, f64::min)
+    };
+    let inside_wedge = |q: Point| {
+        cross(a, b, q) > 0.0 && cross(a, c, q) < 0.0 || cross(a, b, q) < 0.0 && cross(a, c, q) > 0.0
+    };
+    let off_nodes = |q: Point| {
+        state
+            .nodes
+            .iter()
+            .all(|n| n.position.distance_to(&q) > disc)
+    };
+    let (mut blocked, mut open) = (0, 0);
     for x in (200..800).step_by(2) {
         for y in (440..=560).step_by(2) {
             let q = p(x as f64, y as f64);
+            if !inside_wedge(q) {
+                continue;
+            }
+            assert!(arena.contains(q), "{q:?} is outside the triangulation");
             if within_both(q) {
                 assert!(
                     !arena.free_at(q),
                     "{q:?} is free within {clearance} of both walls"
                 );
-                checked += 1;
+                blocked += 1;
+            } else if wall_distance(q) > clearance + 1.0 && off_nodes(q) {
+                assert!(
+                    arena.free_at(q),
+                    "{q:?} is eroded {} from the nearest wall",
+                    wall_distance(q)
+                );
+                open += 1;
             }
         }
     }
-    assert!(checked > 100, "{checked} points checked");
     assert!(
-        arena.free_at(p(700.0, 500.0)),
-        "the mouth of the wedge is eroded away"
+        blocked > 50 && open > 100,
+        "{blocked} blocked and {open} open points checked"
     );
     for mv in &moves {
         route(&state, mv).unwrap_or_else(|e| panic!("{e:?}: {mv:?}"));
     }
+}
+
+/// A straight line from node 0 to node 1 with node 3 on it: a shortcut
+/// into node 3 from above is accepted through the corner that faces up
+/// and refused through the one that faces down, and the other way round
+/// from below.
+#[test]
+fn a_shortcut_into_an_end_has_to_arrive_through_its_corner() {
+    let mut state = row();
+    let (a, b) = (state.nodes[0].position, state.nodes[1].position);
+    let mid = p((a.x + b.x) / 2.0, 500.0);
+    state
+        .apply_move(Move::new(0, 1, straight(a, b), mid, Player::AI, 1000))
+        .unwrap();
+    state.current_player = Player::AI;
+    let want = rules(&state);
+    let c = want.clearance + curve::tolerance(state.board_size);
+    let mv = listed(&state, 0, 3)
+        .into_iter()
+        .next()
+        .expect("a chord from 0 to its new node");
+    let face = state.face.corner_face(mv.a, mv.at_a).unwrap();
+    let arena = erode::Arena::build(
+        &state,
+        face,
+        mv.a,
+        mv.b,
+        c,
+        want.node_clearance + curve::tolerance(state.board_size),
+        want.forgiven,
+    )
+    .unwrap();
+    let entry = arena.entries(&state, mv.a, mv.at_a).unwrap();
+    let exit = arena.entries(&state, mv.b, mv.at_b).unwrap();
+    let cuts = arena
+        .cuts(&state, &mv, face, &corridor::blocked(&arena, &entry, &exit))
+        .unwrap();
+    let corners: Vec<erode::Entry> = state
+        .face
+        .rotation(3)
+        .iter()
+        .map(|&h| arena.entries(&state, 3, Some(h)).unwrap())
+        .collect();
+    assert_eq!(corners.len(), 2);
+    let above = p(mid.x - 23.7, mid.y - 48.1);
+    let below = p(mid.x - 23.7, mid.y + 48.1);
+    let arrives = |corner: &erode::Entry, from: Point| {
+        arena
+            .segment_parity(&cuts, from, mid, None, Some(corner))
+            .is_some()
+    };
+    assert!(arena
+        .segment_parity(&cuts, above, mid, None, None)
+        .is_some());
+    assert!(arena
+        .segment_parity(&cuts, below, mid, None, None)
+        .is_some());
+    assert_ne!(arrives(&corners[0], above), arrives(&corners[1], above));
+    assert_ne!(arrives(&corners[0], below), arrives(&corners[1], below));
+    assert_ne!(arrives(&corners[0], above), arrives(&corners[0], below));
 }
