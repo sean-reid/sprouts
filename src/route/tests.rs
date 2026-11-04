@@ -858,6 +858,53 @@ fn the_sweep_fixture_replays_to_its_position() {
     }
 }
 
+/// Two ends closer than two guard radii, the entry already inside the
+/// exit's guard: node 3 sits 7 units from node 0 on the outside of a wedge
+/// of 0's own lines, and the chord from 0's corner inside the wedge has to
+/// leave the exit's guard, go round the wedge and come back. Both chords
+/// route.
+#[test]
+fn a_chord_between_ends_inside_each_others_guard_routes_round_a_detour() {
+    let mut state = GameState::new(4);
+    let (a, c1, c2) = (p(500.0, 500.0), p(300.0, 300.0), p(300.0, 700.0));
+    for (node, at) in state.nodes.iter_mut().zip([a, c1, c2, p(800.0, 500.0)]) {
+        node.position = at;
+    }
+    state.current_player = Player::Human;
+    for (to, end) in [(1, c1), (2, c2)] {
+        let mid = p((a.x + end.x) / 2.0, (a.y + end.y) / 2.0);
+        state
+            .apply_move(Move::new(0, to, straight(a, end), mid, Player::Human, 1000))
+            .unwrap();
+        state.current_player = Player::Human;
+    }
+    state.nodes[3].position = p(507.0, 500.0);
+    let want = rules(&state);
+    let guard = want.clearance + curve::tolerance(state.board_size);
+    assert!(a.distance_to(&state.nodes[3].position) < 2.0 * guard);
+    let moves = listed(&state, 0, 3);
+    assert_eq!(moves.len(), 2);
+    let routed: Vec<Result<f64, Unroutable>> = moves
+        .iter()
+        .map(|mv| {
+            route(&state, mv).map(|drawn| {
+                let path = drawn.polyline;
+                path.windows(2).map(|w| w[0].distance_to(&w[1])).sum()
+            })
+        })
+        .collect();
+    // The corner facing node 3 has a 7-unit chord with no room for a node;
+    // the corner inside the wedge goes round it.
+    assert!(
+        routed.contains(&Err(Unroutable::Shape("short"))),
+        "{routed:?}"
+    );
+    assert!(
+        routed.iter().any(|r| r.as_ref().is_ok_and(|&l| l > 400.0)),
+        "{routed:?}"
+    );
+}
+
 /// Two lines leaving one node 11 degrees apart make a wedge whose offset
 /// curves meet at an exact mitre ten clearances out. Every point within
 /// the clearance of both walls is outside the eroded region, the mouth
