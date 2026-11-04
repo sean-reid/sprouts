@@ -505,7 +505,8 @@ describe("a move that arrives as topology", () => {
         expect(plan.moves).toHaveLength(faces.length);
         return Promise.resolve({ topology: faces });
       },
-      rehearse: () => Promise.resolve({ refused: refusals[seen.rehearsed++], nodes: [] }),
+      rehearse: () =>
+        Promise.resolve({ refused: refusals[seen.rehearsed++], nodes: [], settled: [] }),
     };
     return { engine, seen };
   }
@@ -523,6 +524,7 @@ describe("a move that arrives as topology", () => {
         return Promise.resolve({
           refused: undefined,
           nodes: [undefined, routed ? node : undefined],
+          settled: [],
         });
       },
     };
@@ -585,6 +587,48 @@ describe("a move that arrives as topology", () => {
     expect(history.moves.map((m) => m.topology)).toEqual([chord, undefined]);
   });
 
+  // An engine whose rehearsals apply with the recorded nodes and settle to
+  // the given boards in turn.
+  function settling(boards: Point[][]) {
+    const seen = { rehearsed: 0 };
+    const engine: LinkEngine = {
+      classify: () => Promise.resolve({ topology: [chord, second] }),
+      rehearse: (plan) =>
+        Promise.resolve({
+          refused: undefined,
+          nodes: plan.moves.map((m) => (m.kind === "routed" ? m.at : undefined)),
+          settled: boards[seen.rehearsed++] ?? [],
+        }),
+    };
+    return { engine, seen };
+  }
+
+  const board = [
+    at(100, 100),
+    at(900, 100),
+    at(900, 900),
+    at(100, 900),
+    at(500, 500),
+    at(500, 650),
+  ];
+
+  it("demotes the latest topology move when the rehearsed board settles apart", async () => {
+    const apart = board.map((p, i) => (i === 4 ? at(p.x, p.y + DRIFT_TOLERANCE + 0.5) : p));
+    const { engine, seen } = settling([apart, board]);
+    const { history, refusedAt } = await prepareLink(twoDrawnMoves(), engine, board);
+    expect(refusedAt).toBeUndefined();
+    expect(seen.rehearsed).toBe(2);
+    expect(history.moves.map((m) => m.topology)).toEqual([chord, undefined]);
+  });
+
+  it("keeps the topology moves when the rehearsed board settles within the tolerance", async () => {
+    const near = board.map((p, i) => (i === 4 ? at(p.x, p.y + DRIFT_TOLERANCE) : p));
+    const { engine, seen } = settling([near]);
+    const { history } = await prepareLink(twoDrawnMoves(), engine, board);
+    expect(seen.rehearsed).toBe(1);
+    expect(history.moves.map((m) => m.topology)).toEqual([chord, second]);
+  });
+
   it("keeps a topology move whose rehearsed node drifts within the tolerance", async () => {
     const { engine, seen } = drifting(at(500, 650 + DRIFT_TOLERANCE));
     const { history } = await prepareLink(twoDrawnMoves(), engine);
@@ -609,7 +653,7 @@ describe("a move that arrives as topology", () => {
       classify: () => Promise.reject(new Error("move 1: Path crosses an existing line")),
       rehearse: (plan) => {
         rehearsed = plan;
-        return Promise.resolve({ refused: undefined, nodes: [] });
+        return Promise.resolve({ refused: undefined, nodes: [], settled: [] });
       },
     };
     const { history, refusedAt } = await prepareLink(source, engine);

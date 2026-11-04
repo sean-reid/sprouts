@@ -526,12 +526,14 @@ pub struct Rehearsal {
     pub moves: Vec<LinkMove>,
 }
 
-/// What a rehearsal found: the first move refused, if any, and for every
-/// routed move before it the node the replay placed.
+/// What a rehearsal found: the first move refused, if any, for every
+/// routed move before it the node the replay placed, and when every move
+/// applied, where the settled board left each node.
 #[derive(Debug, Clone, PartialEq, Serialize, Tsify)]
 pub struct Rehearsed {
     pub refused: Option<usize>,
     pub nodes: Vec<Option<Point>>,
+    pub settled: Vec<Point>,
 }
 
 /// Replays a link on a fresh board the way a visitor's engine will, and
@@ -569,6 +571,7 @@ pub fn rehearse(plan: Rehearsal) -> Result<Rehearsed, String> {
                 return Ok(Rehearsed {
                     refused: Some(index),
                     nodes,
+                    settled: Vec::new(),
                 })
             }
         }
@@ -576,6 +579,7 @@ pub fn rehearse(plan: Rehearsal) -> Result<Rehearsed, String> {
     Ok(Rehearsed {
         refused: None,
         nodes,
+        settled: state.nodes.iter().map(|node| node.position).collect(),
     })
 }
 
@@ -1950,19 +1954,27 @@ mod tests {
         assert_eq!(settle::golden::bits(&state), start_bits);
     }
 
-    /// Rehearsing a link replays on a fresh board; the game it came from
-    /// keeps its records.
+    /// Rehearsing a link replays on a fresh board, so undoing a settled
+    /// move afterwards still restores the board bit for bit, and the
+    /// rehearsal reports the settled nodes the visitor will see.
     #[test]
-    fn rehearse_leaves_the_records_of_the_game_alone() {
+    fn a_rehearsal_leaves_the_game_to_undo_to_its_settled_board() {
         let mut state = GameState::new(4);
         let RouteReply::Routed { mov, .. } = route_move(&state, face_move(0, 1, vec![])) else {
             panic!("the chord did not route");
         };
-        assert!(matches!(
-            apply(&mut state, mov.clone()),
-            Outcome::Applied { .. }
-        ));
-        let records = state.settles.clone();
+        let Outcome::Applied { mov: first, .. } = apply(&mut state, mov) else {
+            panic!("the chord was rejected");
+        };
+        let before = settle::golden::bits(&state);
+        state.current_player = Player::AI;
+        let reply = face_move(2, 3, vec![]);
+        let Outcome::Applied { mov: second, .. } =
+            apply_face_move(&mut state, reply.clone(), Point::new(500.0, 500.0))
+        else {
+            panic!("the reply was rejected");
+        };
+        assert_ne!(settle::golden::bits(&state), before);
         let plan = Rehearsal {
             router_version: ROUTER_VERSION,
             settle_version: SETTLE_VERSION,
@@ -1970,15 +1982,22 @@ mod tests {
             board_size: 1000,
             first_player: Player::Human,
             nodes: None,
-            moves: vec![LinkMove::Drawn { mov }],
+            moves: vec![
+                LinkMove::Drawn { mov: first },
+                LinkMove::Routed {
+                    face: reply,
+                    at: second.new_node_pos,
+                },
+            ],
         };
-        assert_eq!(rehearse(plan).map(|r| r.refused), Ok(None));
-        assert_eq!(state.settles.len(), records.len());
-        assert!(state
-            .settles
-            .iter()
-            .zip(&records)
-            .all(|(a, b)| a.board == b.board && a.is_empty() == b.is_empty()));
+        let rehearsed = rehearse(plan).unwrap();
+        assert_eq!(rehearsed.refused, None);
+        assert_eq!(
+            rehearsed.settled,
+            state.nodes.iter().map(|n| n.position).collect::<Vec<_>>()
+        );
+        assert!(undo(&mut state));
+        assert_eq!(settle::golden::bits(&state), before);
     }
 
     /// A settled game's rehearsal reports each routed node as the move

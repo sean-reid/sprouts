@@ -809,15 +809,20 @@ export interface LinkEngine {
 // is replayed as decoded and any topology move the replay refuses,
 // or lands its node more than DRIFT_TOLERANCE from the recorded
 // one, both nodes rounded as a link carries them, goes as geometry
-// until the whole link applies and every routed node holds. A
-// refused drawn move is blamed on the latest topology move before
-// it, whose redraw shifted the board under it; when none precedes
-// it the index comes back so the sharer can be told. A history the
-// engine refuses to classify, as one left with moves past a
-// stopped restore, keeps the face moves the AI reported.
+// until the whole link applies and every routed node holds. The
+// replay settles as the visitor's will, so when `settled`, the
+// board on screen, is given and a node of the rehearsed board sits
+// more than DRIFT_TOLERANCE from it, the latest topology move goes
+// as geometry too. A refused drawn move is blamed on the latest
+// topology move before it, whose redraw shifted the board under
+// it; when none precedes it the index comes back so the sharer can
+// be told. A history the engine refuses to classify, as one left
+// with moves past a stopped restore, keeps the face moves the AI
+// reported.
 export async function prepareLink(
   source: History,
   engine: LinkEngine,
+  settled?: Point[],
 ): Promise<{ history: History; refusedAt?: number }> {
   const history = source.clone();
   const plan = classification(history);
@@ -839,7 +844,8 @@ export async function prepareLink(
   for (;;) {
     const link = rehearsal(history);
     if (!link) return { history };
-    const { refused, nodes } = await engine.rehearse(link);
+    const rehearsed = await engine.rehearse(link);
+    const { refused, nodes } = rehearsed;
     if (refused === undefined) {
       let drifted = false;
       nodes.forEach((node, i) => {
@@ -848,7 +854,15 @@ export async function prepareLink(
           drifted = demote(history, i) || drifted;
         }
       });
-      if (!drifted) return { history };
+      if (drifted) continue;
+      const apart =
+        settled !== undefined &&
+        settled.length === rehearsed.settled.length &&
+        settled.some((node, i) => distance(node, rehearsed.settled[i]!) > tolerance);
+      if (!apart) return { history };
+      let latest = history.moves.length - 1;
+      while (latest >= 0 && !demote(history, latest)) latest--;
+      if (latest < 0) return { history };
       continue;
     }
     if (demote(history, refused)) continue;

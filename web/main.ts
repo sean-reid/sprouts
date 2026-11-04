@@ -978,10 +978,14 @@ async function share(): Promise<void> {
   shareBtn.disabled = true;
   setStatus("Checking the link");
   try {
-    const prepared = prepareLink(timeline, {
-      classify: (plan) => engine.call("classify", plan),
-      rehearse: (plan) => engine.call("rehearse", plan),
-    });
+    const prepared = prepareLink(
+      timeline,
+      {
+        classify: (plan) => engine.call("classify", plan),
+        rehearse: (plan) => engine.call("rehearse", plan),
+      },
+      timeline.atEnd ? state.nodes.map((node) => node.position) : undefined,
+    );
     const copied = copyLater(prepared.then(({ history }) => shareUrl(history)));
     const { history, refusedAt } = await prepared;
     const url = shareUrl(history);

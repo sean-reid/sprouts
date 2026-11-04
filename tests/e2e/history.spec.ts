@@ -142,9 +142,9 @@ test("jumping to a board where the AI is to move enters review and keeps the tai
 });
 
 // The exchange travels as topology, so the visitor's router redraws the
-// lines and the settle moves the nodes from there; the rehearsal admits a
-// routed node within DRIFT_TOLERANCE of the record and the board follows.
-const SETTLED_REPLAY_UNITS = DRIFT_TOLERANCE;
+// lines and settles from there; the share is rehearsed until that settled
+// board sits within DRIFT_TOLERANCE of the sharer's, node for node.
+const SHARED_BOARD_DRIFT_UNITS = DRIFT_TOLERANCE;
 
 test("a share link reopens the game in review and steps through it", async ({ page, browser }) => {
   await openBoard(page);
@@ -153,6 +153,9 @@ test("a share link reopens the game in review and steps through it", async ({ pa
   const source = await boardNodes(page);
   const { url, payload } = await share(page, "share-payload-chars");
   expect(payload).toBeLessThan(EXCHANGE_LINK_BUDGET);
+  const shared = decodeRecord(url.slice(url.indexOf(HASH_PREFIX) + HASH_PREFIX.length));
+  expect(shared?.settleVersion).toBeGreaterThan(0);
+  expect(shared?.moves.map(hasStroke)).toEqual([false, false]);
   await shot(page, "history-shared-source");
 
   const visitor = await browser.newContext(visitorOptions());
@@ -178,7 +181,7 @@ test("a share link reopens the game in review and steps through it", async ({ pa
   test
     .info()
     .annotations.push({ type: "shared-node-offset-units", description: offset.toFixed(1) });
-  expect(offset).toBeLessThanOrEqual(SETTLED_REPLAY_UNITS);
+  expect(offset).toBeLessThanOrEqual(SHARED_BOARD_DRIFT_UNITS);
 
   await other.locator("#backBtn").click();
   await expect(current(other)).toHaveText("1. You, joins two nodes");
