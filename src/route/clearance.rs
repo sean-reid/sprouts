@@ -41,7 +41,7 @@ pub(super) const SELF_GAP: usize = 12;
 /// has somewhere to go on a short line.
 const MIDDLE: f64 = 0.25;
 /// Path points about this fraction of the clearance apart.
-const SPACING: f64 = 0.5;
+pub(super) const SPACING: f64 = 0.5;
 
 /// The distances a relaxed path keeps.
 #[derive(Clone, Copy)]
@@ -285,7 +285,16 @@ impl<'a> Obstacles<'a> {
             return true;
         }
         // A segment through a wall vertex or a node crosses nothing
-        // properly; the hard step keeps the clearance from them.
+        // properly; the hard step keeps the clearance from them. The end
+        // node's own spokes start on the end, where the path starts too.
+        let leaving = (i == 1).then(|| path[0]);
+        let arriving = (i + 2 == path.len()).then(|| path[path.len() - 1]);
+        let own_end = |v: &Point| {
+            leaving
+                .into_iter()
+                .chain(arriving)
+                .any(|e| e.distance_to(v) <= GRAZE)
+        };
         let corners = self
             .segments
             .iter()
@@ -293,7 +302,7 @@ impl<'a> Obstacles<'a> {
             .chain(self.nodes.iter());
         if corners
             .into_iter()
-            .any(|v| closest_point_on_segment(&a, &b, v).1 <= GRAZE)
+            .any(|v| !own_end(v) && closest_point_on_segment(&a, &b, v).1 <= GRAZE)
         {
             return true;
         }
@@ -456,7 +465,7 @@ fn try_move(path: &mut [Point], i: usize, target: Point, obstacles: &Obstacles) 
 }
 
 /// Points about `spacing` apart along the path, the ends kept exactly.
-fn resample(path: &[Point], spacing: f64) -> Vec<Point> {
+pub(super) fn resample(path: &[Point], spacing: f64) -> Vec<Point> {
     let mut out = vec![path[0]];
     for pair in path.windows(2) {
         let (p, q) = (pair[0], pair[1]);

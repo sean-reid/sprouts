@@ -792,7 +792,7 @@ const SWEEP_FIXTURE: &str = "fixtures/routing/sweep-6n-6m.json";
 /// The final routing hash a Mac records; the Linux runner and the wasm
 /// build (tests/unit/route-hash.test.ts) have to produce the same one,
 /// since a share link is redrawn on the visitor's device.
-const ROUTING_HASH: u64 = 0x03b9_46a1_fbfe_d637;
+const ROUTING_HASH: u64 = 0x24dc_b9f1_0097_5635;
 
 #[test]
 fn routing_hashes_the_same_on_every_platform() {
