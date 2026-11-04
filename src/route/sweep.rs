@@ -67,7 +67,6 @@ pub struct Tally {
     pub tried: usize,
     pub room: usize,
     pub no_spot: usize,
-    pub no_leg: usize,
     pub shape: BTreeMap<String, usize>,
     pub topology: usize,
     pub bug: usize,
@@ -79,7 +78,6 @@ impl Tally {
         self.tried += other.tried;
         self.room += other.room;
         self.no_spot += other.no_spot;
-        self.no_leg += other.no_leg;
         for (kind, n) in &other.shape {
             *self.shape.entry(kind.clone()).or_default() += n;
         }
@@ -94,7 +92,6 @@ impl Tally {
         match why {
             Unroutable::Room => self.room += 1,
             Unroutable::NoSpot => self.no_spot += 1,
-            Unroutable::NoLeg => self.no_leg += 1,
             Unroutable::Shape(_) => *self.shape.entry(kind_name(why)).or_default() += 1,
             Unroutable::Topology => self.topology += 1,
             Unroutable::Bug(_) => {
@@ -109,8 +106,8 @@ impl std::fmt::Display for Tally {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "{} routes: {} no room, {} no node spot, {} no leg, shape {:?}, {} topology, {} bugs {:?}",
-            self.tried, self.room, self.no_spot, self.no_leg, self.shape, self.topology, self.bug, self.bugs
+            "{} routes: {} no room, {} no node spot, shape {:?}, {} topology, {} bugs {:?}",
+            self.tried, self.room, self.no_spot, self.shape, self.topology, self.bug, self.bugs
         )
     }
 }

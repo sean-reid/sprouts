@@ -16,8 +16,9 @@ use crate::exact::Fnv;
 use crate::face::{Component, Move as FaceMove, NodeId};
 use crate::geometry::resample_polyline;
 use crate::types::{
-    ai_node_clearance, node_disc, scale, GameState, Move, Player, Point, MIN_NODE_SPACING,
-    MIN_NODE_SPACING_AI, MIN_PATH_CLEARANCE, MIN_PATH_CLEARANCE_AI,
+    ai_node_clearance, node_disc, scale, GameState, Move, Player, Point, AI_INTERSECTION_TOLERANCE,
+    HUMAN_INTERSECTION_TOLERANCE, MIN_NODE_SPACING, MIN_NODE_SPACING_AI, MIN_PATH_CLEARANCE,
+    MIN_PATH_CLEARANCE_AI,
 };
 use crate::validation::{validate_ai_move, validate_move};
 
@@ -38,8 +39,6 @@ pub enum Unroutable {
     Room,
     /// No point on the path keeps the node spacing from every node.
     NoSpot,
-    /// No straight leg reaches the free region from an end node.
-    NoLeg,
     /// The path found could not be drawn as one curve: tangled, touching
     /// itself, or too short for its node.
     Shape(&'static str),
@@ -66,6 +65,10 @@ struct Rules {
     clearance: f64,
     /// Nearest the line comes to the centre of a node it does not touch.
     node_clearance: f64,
+    /// Within this distance of a node a crossing of that node's own spoke
+    /// changes nothing: the validator forgives it and the embedding reads
+    /// the corner from where the curve leaves the MIN_PATH_CLEARANCE circle.
+    forgiven: f64,
     /// Node clearance to fall back to when the wanted one cannot be drawn.
     fallback: f64,
     spacing: f64,
@@ -77,12 +80,14 @@ fn rules(state: &GameState) -> Rules {
         Player::AI => Rules {
             clearance: MIN_PATH_CLEARANCE_AI * s,
             node_clearance: ai_node_clearance(state.board_size),
+            forgiven: (AI_INTERSECTION_TOLERANCE / 2.0).min(MIN_PATH_CLEARANCE) * s,
             fallback: MIN_PATH_CLEARANCE * s,
             spacing: MIN_NODE_SPACING_AI * s,
         },
         Player::Human => Rules {
             clearance: MIN_PATH_CLEARANCE * s,
             node_clearance: MIN_PATH_CLEARANCE * s,
+            forgiven: (HUMAN_INTERSECTION_TOLERANCE / 2.0).min(MIN_PATH_CLEARANCE) * s,
             fallback: MIN_PATH_CLEARANCE * s,
             spacing: MIN_NODE_SPACING * s,
         },
@@ -98,7 +103,7 @@ pub fn route(state: &GameState, mv: &FaceMove) -> Result<Move, Unroutable> {
     // it is still legal at the clearance a human line gets.
     let worth_retrying = matches!(
         drawn,
-        Err(Unroutable::Room | Unroutable::NoSpot | Unroutable::NoLeg | Unroutable::Shape(_))
+        Err(Unroutable::Room | Unroutable::NoSpot | Unroutable::Shape(_))
     );
     if !worth_retrying || want.node_clearance <= want.fallback {
         return drawn;
@@ -154,13 +159,9 @@ fn plan(
         .map_err(|_| Unroutable::Bug("corner"))?;
     // The fit may move the curve a tolerance off the path at a disc too.
     let disc = want.node_clearance + curve::tolerance(state.board_size);
-    let arena = erode::Arena::build(state, face, mv.a, mv.b, c, disc)?;
-    let (pa, pb) = (state.nodes[mv.a].position, state.nodes[mv.b].position);
-    let entries = arena.entries(state, mv.a, mv.at_a, c, pb)?;
-    let exits = arena.entries(state, mv.b, mv.at_b, c, pa)?;
-    if entries.is_empty() || exits.is_empty() {
-        return Err(Unroutable::NoLeg);
-    }
+    let arena = erode::Arena::build(state, face, mv.a, mv.b, c, disc, want.forgiven)?;
+    let entries = vec![arena.entries(state, mv.a, mv.at_a)?];
+    let exits = vec![arena.entries(state, mv.b, mv.at_b)?];
     let ends = [state.nodes[mv.a].position, state.nodes[mv.b].position];
     let blocked = corridor::blocked(&arena, &entries, &exits, ends);
     let cuts = arena.cuts(state, mv, face, &blocked)?;
@@ -187,7 +188,7 @@ fn plan(
         return Err(Unroutable::Bug("room with a path"));
     }
     let first = first?;
-    let mut path = corridor::draw(&first, &entries, &exits);
+    let mut path = arena.tighten(&cuts, &corridor::draw(&first, &entries, &exits));
     if cuts.all != 0 {
         let wrong = wrong_sides(state, mv, own, &cuts, &path);
         if wrong != 0 {
@@ -195,7 +196,7 @@ fn plan(
             // other side of its own piece, and a bare node has no sides.
             let want = corridor::Want::Parity(first.parity ^ wrong);
             let second = corridor::search(&arena, &cuts, &entries, &exits, want, is_loop)?;
-            path = corridor::draw(&second, &entries, &exits);
+            path = arena.tighten(&cuts, &corridor::draw(&second, &entries, &exits));
         }
     }
     let path = uncross(untwist_legs(path)).ok_or(Unroutable::Shape("tangled"))?;

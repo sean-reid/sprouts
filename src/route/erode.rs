@@ -14,13 +14,13 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use spade::handles::{FixedFaceHandle, FixedVertexHandle, InnerTag};
 use spade::{ConstrainedDelaunayTriangulation, Point2, PositionInTriangulation, Triangulation};
 
-use super::clearance::proper_crossing;
+use super::cross;
 use super::Unroutable;
 use crate::curve;
-use crate::embedding::{half_edge_path, leaving_angle, turn};
+use crate::embedding::half_edge_path;
 use crate::face::{Component, FaceId, HalfEdgeId, Move as FaceMove, NodeId};
 use crate::geometry::{closest_point_on_polyline, closest_point_on_segment};
-use crate::types::{scale, GameState, Point, AI_INTERSECTION_TOLERANCE, MIN_PATH_CLEARANCE};
+use crate::types::{GameState, Point};
 
 type Cdt = ConstrainedDelaunayTriangulation<Point2<f64>>;
 
@@ -28,32 +28,38 @@ type Cdt = ConstrainedDelaunayTriangulation<Point2<f64>>;
 const ARC_STEP: f64 = 0.4;
 /// Sides of the polygon drawn round a node for its clearance disc.
 const DISC_SIDES: usize = 24;
-/// Longest mitre at a sharp inside corner, in clearances; the wedge past
-/// it is thinner than two clearances and holds no free triangle.
-const MITRE_LIMIT: f64 = 4.0;
+
 /// Rim subdivision, in clearances, so cuts reach the rim quickly.
 const RIM_STEP: f64 = 8.0;
-/// How far from an end node, in clearances, its leg may reach into the
-/// free region.
-const LEG_REACH: f64 = 20.0;
-/// Entries kept per end, nearest first.
-const LEGS: usize = 4;
-/// Least angle, in radians, between a leg and either spoke of its corner,
-/// so the embedding reads the leg into the same corner.
-const LEG_MARGIN: f64 = 0.2;
-/// How far past the radius the embedding reads a heading at a leg has to
-/// end, in board units, so the reading lands on the leg's own knot and
-/// not on some flattening vertex far along the curve.
-const LEG_PAST: f64 = 0.5;
+/// How far from an end node, in clearances, its own spokes carry only the
+/// flattening margin instead of the line clearance, so a path can run out
+/// of a corner narrower than two clearances.
+const ENTRY_RING: f64 = 20.0;
 
-/// Where a path enters the free region from an end node: the point, the
-/// free triangles around it, and the leg from the node when the point is
-/// not the node itself.
+/// Where a path leaves an end node: the node and the free triangles at
+/// its vertex inside the move's corner.
 #[derive(Clone, Debug)]
 pub(super) struct Entry {
     pub at: Point,
     pub tris: Vec<usize>,
-    pub leg: Option<(Point, Point)>,
+}
+
+/// An end node of the move and the radii within which its own spokes
+/// carry less than the line clearance.
+struct End {
+    at: Point,
+    /// Within this radius a crossing of the node's own spokes changes
+    /// nothing, so they carry no clearance.
+    inner: f64,
+    /// Out to this radius the spokes carry only the fit margin.
+    outer: f64,
+}
+
+/// A spoke of one or both end nodes, with the ends that own it: a line
+/// from a node to the new node on it is a spoke of both.
+struct OwnSpoke {
+    path: Vec<Point>,
+    owners: Vec<usize>,
 }
 
 /// One cut per boundary piece whose side the move names (and one for the
@@ -62,8 +68,6 @@ pub(super) struct Entry {
 pub(super) struct Cuts {
     /// Bit mask of every undirected edge, by edge index.
     pub bits: Vec<u64>,
-    /// The edges as segments, for counting the legs across them.
-    pub edges: Vec<(Point, Point, u64)>,
     /// Every bit in use.
     pub all: u64,
     /// Bit of the pieces whose side the move names, in component order.
@@ -81,12 +85,18 @@ pub(super) struct Arena {
     /// Whether each undirected edge, by index, lies on a wall or the rim.
     wall_edge: Vec<bool>,
     walls: Walls,
+    /// The walls that are no end node's spoke.
+    other_walls: Walls,
     /// Centres of every node the path keeps the node clearance from.
     nodes: Vec<Point>,
     node_clearance: f64,
-    /// The move's end nodes, which only the legs may come near.
-    ends: Vec<Point>,
-    end_clearance: f64,
+    ends: Vec<End>,
+    spokes: Vec<OwnSpoke>,
+    /// The line clearance plus the fit tolerance.
+    clearance: f64,
+    /// Two fit tolerances, the least an end node's own spoke may be from
+    /// the path beyond the forgiven radius.
+    margin: f64,
     rim: Vec<FixedVertexHandle>,
 }
 
@@ -150,6 +160,8 @@ const SAME_POINT: f64 = 1e-7;
 /// clearance curve unmarked.
 struct Arrangement {
     segments: Vec<(Point, Point, bool)>,
+    /// Points that must be vertices on their own: bare end nodes.
+    points: Vec<Point>,
     /// Endpoint bits of every segment, lower endpoint first, so a leaf
     /// spoke walked out and back goes in once.
     seen: BTreeSet<[u64; 4]>,
@@ -161,6 +173,7 @@ impl Arrangement {
     fn new(board: f64) -> Self {
         Self {
             segments: Vec::new(),
+            points: Vec::new(),
             seen: BTreeSet::new(),
             cells: vec![Vec::new(); GRID * GRID],
             cell: board / GRID as f64,
@@ -280,6 +293,9 @@ impl Arrangement {
                     pieces.push((w[0], w[1], wall));
                 }
             }
+        }
+        for p in &self.points {
+            cdt.insert(point2(snap.at(*p))).map_err(bug)?;
         }
         for &(u, v, _) in &pieces {
             if cdt.can_add_constraint(u, v) {
@@ -421,7 +437,9 @@ fn offset_closed(poly: &[Point], c: f64) -> Vec<Point> {
                 continue;
             }
             let (mx, my) = (mx / len, my / len);
-            let along = (c / (mx * n1.0 + my * n1.1)).min(MITRE_LIMIT * c);
+            // The mitre is exact however sharp the corner, so the two offset
+            // lines meet and the cell beyond them is wholly clear.
+            let along = c / (mx * n1.0 + my * n1.1);
             out.push(Point::new(v.x + mx * along, v.y + my * along));
         } else if turning > 1e-9 || doubles_back {
             let from = n1.1.atan2(n1.0);
@@ -443,12 +461,18 @@ fn offset_closed(poly: &[Point], c: f64) -> Vec<Point> {
 /// A polygon round `centre` that contains the disc of `radius`.
 fn disc(centre: Point, radius: f64) -> Vec<Point> {
     let step = std::f64::consts::TAU / DISC_SIDES as f64;
-    let r = radius / (step / 2.0).cos();
+    ring(centre, radius / (step / 2.0).cos())
+}
+
+/// A polygon round `centre` with its vertices on the circle of `radius`,
+/// so a test against the radius reads its vertices as on it.
+fn ring(centre: Point, radius: f64) -> Vec<Point> {
+    let step = std::f64::consts::TAU / DISC_SIDES as f64;
     (0..DISC_SIDES)
         .map(|k| {
             let t = step * k as f64;
             jitter(
-                Point::new(centre.x + r * t.cos(), centre.y + r * t.sin()),
+                Point::new(centre.x + radius * t.cos(), centre.y + radius * t.sin()),
                 k,
             )
         })
@@ -484,6 +508,22 @@ fn spoke_path(state: &GameState, h: HalfEdgeId) -> Vec<Point> {
     path
 }
 
+/// Whether the direction `d` lies inside the corner swept from spoke
+/// direction `from` to spoke direction `to` the way the model orders a
+/// node's spokes, by cross products alone. The model measures its turns
+/// with y up, so its sweep runs clockwise on screen, where y grows down.
+fn in_corner(from: Point, to: Point, d: Point) -> bool {
+    let o = Point::new(0.0, 0.0);
+    let turn = cross(o, to, from);
+    let after_from = cross(o, d, from) > 0.0;
+    let before_to = cross(o, to, d) > 0.0;
+    if turn > 0.0 {
+        after_from && before_to
+    } else {
+        after_from || before_to
+    }
+}
+
 /// The closed polyline of a cycle component, every half-edge from origin
 /// to head with the node positions at the joins.
 fn cycle_polygon(state: &GameState, start: HalfEdgeId) -> Vec<Point> {
@@ -498,7 +538,9 @@ fn cycle_polygon(state: &GameState, start: HalfEdgeId) -> Vec<Point> {
 
 impl Arena {
     /// Erodes `face` for a move between `a` and `b`: walls offset by `c`,
-    /// every other node cut out to `node_clearance`.
+    /// every other node cut out to `node_clearance`, and each end node's
+    /// own spokes carrying no clearance within `forgiven` of it and only
+    /// the fit margin out to the entry ring.
     pub(super) fn build(
         state: &GameState,
         face: FaceId,
@@ -506,6 +548,7 @@ impl Arena {
         b: NodeId,
         c: f64,
         node_clearance: f64,
+        forgiven: f64,
     ) -> Result<Self, Unroutable> {
         let edge = state.board_size as f64;
         let corners = [
@@ -517,6 +560,9 @@ impl Arena {
         let mut arrangement = Arrangement::new(edge);
         let model = &state.face;
         let components = model.components(face);
+        // The fit and the flattening each move the drawn line a tolerance
+        // off the path, and the validator reads line flattenings exactly.
+        let margin = 2.0 * curve::tolerance(state.board_size);
         let inset: Vec<Point> = [
             Point::new(c, c),
             Point::new(edge - c, c),
@@ -528,17 +574,29 @@ impl Arena {
         .map(|(k, p)| jitter(p, k))
         .collect();
         arrangement.add_closed(&inset, false);
+        let end_nodes: Vec<NodeId> = if a == b { vec![a] } else { vec![a, b] };
+        let touches_end = |start: HalfEdgeId| {
+            model
+                .cycle(start)
+                .into_iter()
+                .any(|h| end_nodes.contains(&model.origin(h)))
+        };
         let mut polygons = Vec::new();
         for comp in components {
             if let Component::Cycle(start) = *comp {
                 let poly = cycle_polygon(state, start);
                 if poly.len() >= 2 {
-                    let offset: Vec<Point> = offset_closed(&poly, c)
-                        .into_iter()
-                        .enumerate()
-                        .map(|(k, p)| jitter(p, k))
-                        .collect();
-                    arrangement.add_closed(&offset, false);
+                    for (k, offset) in [c, margin].into_iter().enumerate() {
+                        if k == 1 && !touches_end(start) {
+                            continue;
+                        }
+                        let curve: Vec<Point> = offset_closed(&poly, offset)
+                            .into_iter()
+                            .enumerate()
+                            .map(|(k, p)| jitter(p, k))
+                            .collect();
+                        arrangement.add_closed(&curve, false);
+                    }
                     polygons.push(poly);
                 }
             }
@@ -552,24 +610,57 @@ impl Arena {
         for n in &nodes {
             arrangement.add_closed(&disc(*n, node_clearance), false);
         }
-        // The validator forgives a crossing of an end node's spoke close to
-        // that node, so the path keeps the forgiven distance from its own
-        // ends except along its legs, or the fitted curve could cross
-        // there and the embedding read a different move.
-        let end_clearance = MIN_PATH_CLEARANCE * scale(state.board_size) + LEG_PAST;
-        let mut ends = vec![state.nodes[a].position];
-        if b != a {
-            ends.push(state.nodes[b].position);
+        let ends: Vec<End> = end_nodes
+            .iter()
+            .map(|&v| End {
+                at: state.nodes[v].position,
+                inner: forgiven,
+                outer: ENTRY_RING * c,
+            })
+            .collect();
+        let mut spokes: Vec<OwnSpoke> = Vec::new();
+        for (k, &v) in end_nodes.iter().enumerate() {
+            for &h in model.rotation(v) {
+                let path = spoke_path(state, h);
+                let back: Vec<Point> = path.iter().rev().copied().collect();
+                // A line from one end to the other is the same spoke seen
+                // from both, walked the other way.
+                match spokes.iter_mut().find(|s| s.path == path || s.path == back) {
+                    Some(shared) => {
+                        if !shared.owners.contains(&k) {
+                            shared.owners.push(k);
+                        }
+                    }
+                    None => spokes.push(OwnSpoke {
+                        path,
+                        owners: vec![k],
+                    }),
+                }
+            }
+            if model.rotation(v).is_empty() {
+                arrangement.points.push(state.nodes[v].position);
+            }
         }
-        for e in &ends {
-            arrangement.add_closed(&disc(*e, end_clearance), false);
+        for end in &ends {
+            arrangement.add_closed(&ring(end.at, end.inner), false);
+            arrangement.add_closed(&ring(end.at, end.outer), false);
         }
         let rim_pts = subdivide_closed(&corners, RIM_STEP * c);
         arrangement.add_closed(&rim_pts, true);
         for poly in &polygons {
             arrangement.add_closed(poly, true);
         }
-        let walls = Walls::new(arrangement.walls(), edge);
+        let all_walls = arrangement.walls();
+        let on_spoke = |(u, v): &(Point, Point)| {
+            let mid = Point::new((u.x + v.x) / 2.0, (u.y + v.y) / 2.0);
+            spokes
+                .iter()
+                .any(|spoke| closest_point_on_polyline(&spoke.path, &mid).1 < SAME_POINT * 1e3)
+        };
+        let other: Vec<(Point, Point)> =
+            all_walls.iter().copied().filter(|w| !on_spoke(w)).collect();
+        let walls = Walls::new(all_walls, edge);
+        let other_walls = Walls::new(other, edge);
         let (cdt, wall_edge) = arrangement.triangulate()?;
         let rim = cdt.convex_hull().map(|e| e.from().fix()).collect();
 
@@ -579,73 +670,74 @@ impl Arena {
             handles: Vec::new(),
             wall_edge,
             walls,
+            other_walls,
             nodes,
             node_clearance,
             ends,
-            end_clearance,
+            spokes,
+            clearance: c,
+            margin,
             rim,
         };
-        arena.classify(c);
+        arena.classify();
         Ok(arena)
     }
 
-    /// Marks the free triangles: every region bounded by constraints is
-    /// wholly clear or wholly not, so one centroid decides each.
-    fn classify(&mut self, c: f64) {
+    /// Whether `p` keeps every clearance: the line clearance from walls that
+    /// are no end node's spoke, the node clearance from every other node,
+    /// and from each end node's own spokes the least that any owning end
+    /// asks at `p`: nothing within its forgiven radius, the fit margin
+    /// within its entry ring, the clearance beyond.
+    fn clear_at(&self, p: Point, slack: f64) -> bool {
+        let c = self.clearance;
+        if self.other_walls.distance(p, c) < c - slack {
+            return false;
+        }
+        if self
+            .nodes
+            .iter()
+            .any(|n| n.distance_to(&p) < self.node_clearance - slack)
+        {
+            return false;
+        }
+        self.spokes.iter().all(|spoke| {
+            let need = spoke
+                .owners
+                .iter()
+                .map(|&k| {
+                    let end = &self.ends[k];
+                    // The entry disc cuts each spoke at the inner radius
+                    // exactly, and that crossing is a vertex of the fan.
+                    let r = end.at.distance_to(&p);
+                    if r < end.inner + slack {
+                        0.0
+                    } else if r < end.outer + slack {
+                        self.margin
+                    } else {
+                        c
+                    }
+                })
+                .fold(c, f64::min);
+            need <= slack || closest_point_on_polyline(&spoke.path, &p).1 >= need - slack
+        })
+    }
+
+    /// Marks the free triangles: one whose centroid and three vertices all
+    /// keep the clearances. The vertices sit on the clearance curves a
+    /// jitter off them, so they get that much slack; a triangle reaching
+    /// past a curve has a vertex well inside and fails.
+    fn classify(&mut self) {
         let n = self.cdt.num_all_faces();
         let mut free = vec![false; n];
-        let mut seen = vec![false; n];
         let mut handles = vec![None; n];
         for t in self.cdt.inner_faces() {
-            let t = t.fix();
-            handles[t.index()] = Some(t);
-            if seen[t.index()] {
-                continue;
-            }
-            let mut region = Vec::new();
-            let mut stack = vec![t];
-            seen[t.index()] = true;
-            while let Some(f) = stack.pop() {
-                region.push(f);
-                for e in self.cdt.face(f).adjacent_edges() {
-                    if e.is_constraint_edge() {
-                        continue;
-                    }
-                    if let Some(next) = e.rev().face().as_inner() {
-                        let next = next.fix();
-                        if !seen[next.index()] {
-                            seen[next.index()] = true;
-                            stack.push(next);
-                        }
-                    }
-                }
-            }
-            // A region's vertices sit on the clearance curves, a jitter off
-            // them; a vertex further inside marks a cell the curves missed.
-            let clear_at = |p: Point, slack: f64| {
-                self.walls.distance(p, c) >= c - slack
-                    && self
-                        .nodes
-                        .iter()
-                        .all(|n| n.distance_to(&p) >= self.node_clearance - slack)
-                    && self
-                        .ends
-                        .iter()
-                        .all(|e| e.distance_to(&p) >= self.end_clearance - slack)
-            };
-            let clear = clear_at(self.centroid(t), 1e-7)
-                && region.iter().all(|&f| {
-                    self.cdt
-                        .face(f)
-                        .positions()
-                        .into_iter()
-                        .all(|p| clear_at(point(p), 2.0 * JITTER))
-                });
-            if clear {
-                for f in region {
-                    free[f.index()] = true;
-                }
-            }
+            let fixed = t.fix();
+            handles[fixed.index()] = Some(fixed);
+            let clear = self.clear_at(self.centroid(fixed), 1e-7)
+                && t.positions()
+                    .into_iter()
+                    .all(|p| self.clear_at(point(p), 2.0 * JITTER));
+            free[fixed.index()] = clear;
         }
         self.free = free;
         self.handles = handles;
@@ -716,183 +808,103 @@ impl Arena {
         out
     }
 
-    /// The free triangle holding `p`, or the free triangles round the
-    /// vertex or edge it sits on.
-    fn free_at(&self, p: Point) -> Vec<usize> {
-        match self.cdt.locate(point2(p)) {
-            PositionInTriangulation::OnFace(f) => {
-                let t = f.index();
-                if self.free[t] {
-                    vec![t]
-                } else {
-                    Vec::new()
-                }
-            }
-            PositionInTriangulation::OnVertex(v) => self.free_around(v),
-            PositionInTriangulation::OnEdge(e) => {
-                let e = self.cdt.directed_edge(e);
-                let mut out: Vec<usize> = [e.face(), e.rev().face()]
-                    .into_iter()
-                    .filter_map(|f| f.as_inner().map(|f| f.fix().index()))
-                    .filter(|&t| self.free[t])
-                    .collect();
-                out.sort_unstable();
-                out
-            }
-            _ => Vec::new(),
-        }
-    }
-
-    /// Whether the segment from `a` to `p` crosses no wall, keeps the node
-    /// clearance from every node it must, ends two fit tolerances from
-    /// every wall, and past the stretch where the validator forgives a
-    /// crossing at the node keeps two fit tolerances from every wall but
-    /// the node's own spokes, so the fitted curve cannot cross one. The
-    /// spokes diverge from the leg's start, and a straight leg's fit stays
-    /// straight, so they need no margin along the leg.
-    fn leg_clear(
-        &self,
-        a: Point,
-        p: Point,
-        spokes: &[Vec<Point>],
-        forgiven: f64,
-        tolerance: f64,
-    ) -> bool {
-        if self.walls.distance(p, 2.0 * tolerance) < 2.0 * tolerance {
-            return false;
-        }
-        if self
-            .walls
-            .segments
-            .iter()
-            .any(|(u, v)| proper_crossing(a, p, *u, *v))
-        {
-            return false;
-        }
-        if self
-            .nodes
-            .iter()
-            .any(|n| closest_point_on_segment(&a, &p, n).1 < self.node_clearance)
-        {
-            return false;
-        }
-        let len = a.distance_to(&p);
-        if len <= forgiven {
-            return true;
-        }
-        let t = forgiven / len;
-        let from = Point::new(a.x + (p.x - a.x) * t, a.y + (p.y - a.y) * t);
-        let on_spoke = |u: &Point, v: &Point| {
-            let mid = Point::new((u.x + v.x) / 2.0, (u.y + v.y) / 2.0);
-            spokes
-                .iter()
-                .any(|spoke| closest_point_on_polyline(spoke, &mid).1 < SAME_POINT * 1e3)
-        };
-        self.walls.segments.iter().all(|(u, v)| {
-            on_spoke(u, v)
-                || ([from, p]
-                    .iter()
-                    .all(|q| closest_point_on_segment(u, v, q).1 >= 2.0 * tolerance)
-                    && closest_point_on_segment(&from, &p, u).1 >= 2.0 * tolerance
-                    && closest_point_on_segment(&from, &p, v).1 >= 2.0 * tolerance)
-        })
-    }
-
-    /// Where a path may enter the free region from node `v` through the
-    /// corner that follows spoke `at`: the node itself when it sits in the
-    /// free region, else the free vertices a straight leg reaches without
-    /// crossing a wall, heading out between the corner's spokes, the ones
-    /// costing the least detour towards `target` first. Room when no free
-    /// triangle lies within a leg's reach of the node at all.
+    /// Where a path leaves node `v` through the corner that follows spoke
+    /// `at`: the free triangles at the node's own vertex between that
+    /// spoke and the next one round the node, every one of them for a bare
+    /// node. Room when there is none.
     pub(super) fn entries(
         &self,
         state: &GameState,
         v: NodeId,
         at: Option<HalfEdgeId>,
-        c: f64,
-        target: Point,
-    ) -> Result<Vec<Entry>, Unroutable> {
+    ) -> Result<Entry, Unroutable> {
         let a = state.nodes[v].position;
-        if at.is_none() {
-            let tris = self.free_at(a);
-            if !tris.is_empty() {
-                return Ok(vec![Entry {
-                    at: a,
-                    tris,
-                    leg: None,
-                }]);
-            }
-        }
-        let radius = MIN_PATH_CLEARANCE * scale(state.board_size);
-        let spokes: Vec<Vec<Point>> = state
-            .face
-            .rotation(v)
-            .iter()
-            .map(|&h| spoke_path(state, h))
-            .collect();
-        // A narrow corner gets a narrower margin; the leg is straight, so
-        // the embedding reads its heading exactly.
-        let wedge = at.map(|h| {
+        let vertex = self.vertex_at(a).ok_or(Unroutable::Bug("end vertex"))?;
+        let mut tris = self.free_around(vertex);
+        if let Some(h) = at {
             let rotation = state.face.rotation(v);
             let k = rotation.iter().position(|&x| x == h).expect("own spoke");
             let next = rotation[(k + 1) % rotation.len()];
-            let angle = |h| leaving_angle(a, &spoke_path(state, h), radius);
-            let from = angle(h);
-            let span = if next == h {
-                std::f64::consts::TAU
-            } else {
-                turn(from, angle(next))
-            };
-            (from, span, LEG_MARGIN.min(span / 4.0))
-        });
-        let reach = LEG_REACH * c;
-        // Half the distance from a node within which the validator lets a
-        // line cross a spoke of that node.
-        let forgiven = AI_INTERSECTION_TOLERANCE * scale(state.board_size) / 2.0;
-        let tolerance = curve::tolerance(state.board_size);
-        let mut candidates: Vec<(f64, FixedVertexHandle)> = self
-            .cdt
-            .vertices()
-            .filter_map(|vertex| {
-                let p = point(vertex.position());
-                let d = p.distance_to(&a);
-                (d > radius + LEG_PAST && d <= reach)
-                    .then_some((d + p.distance_to(&target), vertex.fix()))
-            })
-            .collect();
-        candidates.sort_by(|x, y| x.0.total_cmp(&y.0).then(x.1.index().cmp(&y.1.index())));
-        let mut out = Vec::new();
-        let mut any_free = false;
-        for (_, handle) in candidates {
-            let p = self.vertex_point(handle);
-            let tris = self.free_around(handle);
-            if tris.is_empty() {
-                continue;
-            }
-            any_free = true;
-            if let Some((from, span, margin)) = wedge {
-                let heading = (a.y - p.y).atan2(p.x - a.x);
-                let into = turn(from, heading);
-                if into < margin || into > span - margin {
-                    continue;
-                }
-            }
-            if !self.leg_clear(a, p, &spokes, forgiven, tolerance) {
-                continue;
-            }
-            out.push(Entry {
-                at: p,
-                tris,
-                leg: Some((a, p)),
-            });
-            if out.len() == LEGS {
-                break;
+            if next != h {
+                let heading = |h: HalfEdgeId| {
+                    let path = spoke_path(state, h);
+                    Point::new(path[1].x - a.x, path[1].y - a.y)
+                };
+                let (from, to) = (heading(h), heading(next));
+                tris.retain(|&t| {
+                    let q = self.centroid(self.handles[t].expect("a triangle"));
+                    in_corner(from, to, Point::new(q.x - a.x, q.y - a.y))
+                });
             }
         }
-        if !any_free {
+        if tris.is_empty() {
             return Err(Unroutable::Room);
         }
-        Ok(out)
+        Ok(Entry { at: a, tris })
+    }
+
+    /// The cut parity of the straight segment from `p` to `q` when it runs
+    /// through free triangles across non-wall edges only, else None. A
+    /// segment through a vertex is refused as unclear; one along an edge
+    /// between two free triangles crosses nothing, as the funnel's own
+    /// segments between wrap vertices do.
+    fn segment_parity(&self, cuts: &Cuts, p: Point, q: Point) -> Option<u64> {
+        let mut parity = 0;
+        for hit in spade::LineIntersectionIterator::new(&self.cdt, point2(p), point2(q)) {
+            let (edge, crossing) = match hit {
+                spade::Intersection::EdgeIntersection(e) => (e, true),
+                spade::Intersection::EdgeOverlap(e) => (e, false),
+                spade::Intersection::VertexIntersection(v) => {
+                    let at = point(v.position());
+                    if at.distance_to(&p) > SAME_POINT && at.distance_to(&q) > SAME_POINT {
+                        return None;
+                    }
+                    continue;
+                }
+            };
+            let index = edge.as_undirected().fix().index();
+            if self.wall_edge[index] {
+                return None;
+            }
+            let free = [edge.face(), edge.rev().face()]
+                .into_iter()
+                .all(|f| f.as_inner().is_some_and(|f| self.free[f.fix().index()]));
+            if !free {
+                return None;
+            }
+            if crossing {
+                parity ^= cuts.bits[index];
+            }
+        }
+        Some(parity)
+    }
+
+    /// The path with every detour the corridor forced on it cut short: any
+    /// two points joined by a straight segment through free triangles that
+    /// crosses the cuts with the same parity as the path between them.
+    pub(super) fn tighten(&self, cuts: &Cuts, path: &[Point]) -> Vec<Point> {
+        let mut out = vec![path[0]];
+        let mut i = 0;
+        while i + 1 < path.len() {
+            let mut next = i + 1;
+            let mut parity = self.segment_parity(cuts, path[i], path[i + 1]);
+            let mut along = parity;
+            for j in i + 2..path.len() {
+                along = match (along, self.segment_parity(cuts, path[j - 1], path[j])) {
+                    (Some(a), Some(b)) => Some(a ^ b),
+                    _ => None,
+                };
+                let Some(along) = along else { break };
+                if self.segment_parity(cuts, path[i], path[j]) == Some(along) {
+                    next = j;
+                    parity = Some(along);
+                }
+            }
+            let _ = parity;
+            out.push(path[next]);
+            i = next;
+        }
+        out
     }
 
     /// A vertex on the piece, to start its cut from: a node on a cycle,
@@ -938,7 +950,6 @@ impl Arena {
             .map_err(|_| Unroutable::Bug("corner"))?;
         let mut cuts = Cuts {
             bits: vec![0; self.cdt.num_undirected_edges()],
-            edges: Vec::new(),
             all: 0,
             piece_bits: Vec::new(),
             own_bit: 0,
@@ -1005,8 +1016,6 @@ impl Arena {
                     .get_edge_from_neighbors(u, v)
                     .ok_or(Unroutable::Bug("cut edge"))?;
                 cuts.bits[e.as_undirected().fix().index()] |= bit;
-                cuts.edges
-                    .push((self.vertex_point(u), self.vertex_point(v), bit));
             }
             cuts.all |= bit;
             match comp {
@@ -1074,15 +1083,4 @@ impl Arena {
             _ => None,
         }
     }
-}
-
-/// Bits of the cuts a leg crosses.
-pub(super) fn leg_bits(cuts: &Cuts, leg: Option<(Point, Point)>) -> u64 {
-    let Some((a, p)) = leg else {
-        return 0;
-    };
-    cuts.edges
-        .iter()
-        .filter(|(u, v, _)| proper_crossing(a, p, *u, *v))
-        .fold(0, |acc, (_, _, bit)| acc ^ bit)
 }

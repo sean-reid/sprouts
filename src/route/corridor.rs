@@ -14,7 +14,7 @@ use std::collections::{BinaryHeap, HashMap, HashSet};
 use spade::handles::FixedVertexHandle;
 
 use super::cross;
-use super::erode::{leg_bits, Arena, Cuts, Entry};
+use super::erode::{Arena, Cuts, Entry};
 use super::Unroutable;
 use crate::types::Point;
 
@@ -94,8 +94,8 @@ pub(super) fn search(
     want: Want,
     is_loop: bool,
 ) -> Result<Corridor, Unroutable> {
-    let entry_bits: Vec<u64> = entries.iter().map(|e| leg_bits(cuts, e.leg)).collect();
-    let exit_bits: Vec<u64> = exits.iter().map(|e| leg_bits(cuts, e.leg)).collect();
+    let entry_bits: Vec<u64> = vec![0; entries.len()];
+    let exit_bits: Vec<u64> = vec![0; exits.len()];
     // Exits by triangle, for the goal test.
     let mut goal: HashMap<usize, Vec<usize>> = HashMap::new();
     for (i, e) in exits.iter().enumerate() {
@@ -275,19 +275,12 @@ pub(super) fn funnel(start: Point, portals: &[(Point, Point)], end: Point) -> Ve
     path
 }
 
-/// The whole path of a corridor: the leg in, the taut path through the
-/// free region, the leg out.
+/// The whole path of a corridor: the taut path from the entry node to the
+/// exit node through the free region.
 pub(super) fn draw(corridor: &Corridor, entries: &[Entry], exits: &[Entry]) -> Vec<Point> {
     let entry = &entries[corridor.entry];
     let exit = &exits[corridor.exit];
-    let mut out = Vec::new();
-    if let Some((a, _)) = entry.leg {
-        out.push(a);
-    }
-    out.extend(funnel(entry.at, &corridor.portals, exit.at));
-    if let Some((b, _)) = exit.leg {
-        out.push(b);
-    }
+    let mut out = funnel(entry.at, &corridor.portals, exit.at);
     out.dedup_by(|p, q| p.distance_to(q) < 1e-9);
     out
 }
