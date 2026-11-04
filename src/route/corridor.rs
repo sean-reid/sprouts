@@ -76,14 +76,20 @@ impl Ord for Item {
 }
 
 /// Whether a corridor may step from triangle `from` into `to`, and
-/// whether it has then been outside the exit's guard: the middle of the
-/// path keeps out of each end's guard, so no guard is entered except the
-/// exit's, to finish, and the exit's is left only by a path that has
-/// never been outside it, a loop or a chord setting out. Where the exit's
-/// guard overlaps the other end's, a triangle inside both is the exit's.
+/// whether it has then been outside the exit's guard.
 fn step_out(arena: &Arena, from: usize, to: usize, exit: &Entry, out: bool) -> Option<bool> {
-    let (was, now) = (arena.guard(from), arena.guard(to));
-    let exit_bit = 1u8 << exit.end;
+    step_bits(arena.guard(from), arena.guard(to), 1u8 << exit.end, out)
+}
+
+/// The guard rule on the bits of the triangle left, `was`, and the one
+/// entered, `now`: the middle of the path keeps out of each end's guard,
+/// so no guard is entered except the exit's, and entering a triangle with
+/// the exit's bit commits the path to finishing there, since the exit's
+/// guard is left only by a path that has never been outside it, a loop or
+/// a chord setting out. A triangle carrying both ends' bits may be entered
+/// on the exit's account, and nothing inside it leads back into the
+/// entry's guard alone.
+pub(super) fn step_bits(was: u8, now: u8, exit_bit: u8, out: bool) -> Option<bool> {
     let entering = now & !was;
     let leaving = was & !now;
     if (entering & !exit_bit != 0 && now & exit_bit == 0) || (leaving & exit_bit != 0 && out) {

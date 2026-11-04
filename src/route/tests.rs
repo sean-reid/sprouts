@@ -903,6 +903,62 @@ fn a_chord_between_ends_inside_each_others_guard_routes_round_a_detour() {
         routed.iter().any(|r| r.as_ref().is_ok_and(|&l| l > 400.0)),
         "{routed:?}"
     );
+    // Once the detour has left node 0's guard it stays out of it, except
+    // where node 3's guard overlaps, which is the exit's.
+    let b = state.nodes[3].position;
+    let detour = moves
+        .iter()
+        .find_map(|mv| route(&state, mv).ok())
+        .expect("the detour routes");
+    let left = detour
+        .polyline
+        .iter()
+        .position(|q| q.distance_to(&a) > guard)
+        .expect("the detour leaves node 0's guard");
+    for q in &detour.polyline[left..] {
+        assert!(
+            q.distance_to(&a) > guard || q.distance_to(&b) <= guard,
+            "{q:?} is back inside node 0's guard"
+        );
+    }
+    // A loop has one end, so it starts inside its own guard as before. The
+    // loops round node 3 from the wedge's far ends find no room, since node
+    // 3's disc overlaps node 0's, and say so rather than fail as a bug.
+    let loops: Vec<FaceMove> = state
+        .face
+        .moves()
+        .into_iter()
+        .filter(|m| m.a == m.b && m.enclosed == vec![3])
+        .collect();
+    assert_eq!(loops.len(), 2);
+    for mv in &loops {
+        assert!(matches!(route(&state, mv), Err(Unroutable::Room)), "{mv:?}");
+    }
+}
+
+/// The guard rule on the bits alone: a chord that has left the exit's
+/// guard may pass a triangle inside both guards on its way, and from there
+/// may not go on into the entry's guard alone.
+#[test]
+fn a_path_through_an_overlap_may_not_slide_into_the_entry_guard() {
+    use corridor::step_bits;
+    let (entry, exit) = (1u8, 2u8);
+    let both = entry | exit;
+    // A chord sets out through its own guard, then free ground.
+    assert_eq!(step_bits(entry, 0, exit, true), Some(true));
+    // Into an overlap mid-route is allowed, and commits it to finishing.
+    assert_eq!(step_bits(0, both, exit, true), Some(true));
+    assert_eq!(step_bits(both, entry, exit, true), None);
+    assert_eq!(step_bits(both, 0, exit, true), None);
+    assert_eq!(step_bits(both, exit, exit, true), Some(true));
+    // The entry's guard alone is never entered from outside it.
+    assert_eq!(step_bits(0, entry, exit, true), None);
+    assert_eq!(step_bits(exit, both, exit, true), Some(true));
+    // A loop, or a chord starting inside the overlap, leaves the exit's
+    // guard once and is then out.
+    assert_eq!(step_bits(both, entry, exit, false), Some(true));
+    assert_eq!(step_bits(exit, 0, exit, false), Some(true));
+    assert_eq!(step_bits(0, exit, exit, true), Some(true));
 }
 
 /// Two legs through one vertex in opposite directions are set a quarter
@@ -925,7 +981,7 @@ fn split_pinches_parts_opposite_legs_and_leaves_parallel_ones() {
         v,
         p(20.0, 0.0),
         p(20.0, 10.0),
-        p(0.0, 10.0),
+        p(-10.0, -5.0),
         p(0.0, 0.0),
         v,
         p(20.0, -10.0),
@@ -948,6 +1004,29 @@ fn split_pinches_parts_opposite_legs_and_leaves_parallel_ones() {
     assert!(split[1].y < 0.0 && split[3].y > 0.0 && split[5].y < 0.0);
 }
 
+/// A hairpin at a vertex a second leg passes is parted too: the hairpin
+/// backs out the way it came and the other leg moves to its left.
+#[test]
+fn split_pinches_parts_a_hairpin_from_a_pass_through_its_vertex() {
+    let v = p(10.0, 0.0);
+    let path = vec![
+        p(0.0, 0.0),
+        v,
+        p(0.0, 0.0),
+        p(10.0, -10.0),
+        v,
+        p(10.0, 10.0),
+    ];
+    let split = split_pinches(path, 2.0, |_| true);
+    assert!((split[1].distance_to(&v) - 2.0).abs() < 1e-9, "{split:?}");
+    assert!((split[4].distance_to(&v) - 2.0).abs() < 1e-9, "{split:?}");
+    assert!(
+        split[1].x < v.x && (split[1].y - v.y).abs() < 1e-9,
+        "{split:?}"
+    );
+    assert!(split[4].distance_to(&split[1]) > 2.0, "{split:?}");
+}
+
 /// A leg whose left is not free stays on the vertex while the other leg
 /// still parts from it, and legs with no free left both stay put.
 #[test]
@@ -959,6 +1038,40 @@ fn split_pinches_keeps_the_displaced_points_free() {
     assert!((split[4].distance_to(&v) - 2.0).abs() < 1e-9 && split[4].y > 0.0);
     let stuck = split_pinches(pinch.clone(), 2.0, |q| q.distance_to(&v) < 1.0);
     assert_eq!(stuck, pinch);
+}
+
+/// A pinch both of whose legs stay on their vertex, as when neither side
+/// is free, still goes through the rest of the route: the loop on node 2
+/// round node 3 is drawn from its taut path with the pinch left in, and
+/// comes out as the move or as a shape refusal, never a bug.
+#[test]
+fn a_pinch_left_coincident_still_routes_or_is_refused_as_a_shape() {
+    let mut state = GameState::new(7);
+    state.current_player = Player::Human;
+    let mv = FaceMove {
+        a: 2,
+        at_a: None,
+        b: 2,
+        at_b: None,
+        enclosed: vec![3],
+    };
+    let want = rules(&state);
+    let (arena, taut) = taut_path(&state, &mv, &want).unwrap();
+    let n = taut.len();
+    assert!(
+        (1..n - 1).any(|i| (i + 1..n - 1).any(|j| taut[i].distance_to(&taut[j]) < 1e-9)),
+        "the taut path pinches"
+    );
+    let path = settle(taut).unwrap();
+    let drawn = match relax(&state, &mv, &want, &arena, &path) {
+        Some(relaxed) => finish(&state, &mv, relaxed).or_else(|_| finish(&state, &mv, path)),
+        None => finish(&state, &mv, path),
+    };
+    assert!(
+        matches!(drawn, Ok(_) | Err(Unroutable::Shape(_))),
+        "{:?}",
+        drawn.map(|m| m.polyline.len())
+    );
 }
 
 /// Two lines leaving one node 11 degrees apart make a wedge whose offset
