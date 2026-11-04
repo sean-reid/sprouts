@@ -847,9 +847,21 @@ impl Arena {
     /// through free triangles across non-wall edges only, else None. A
     /// segment through a vertex is refused as unclear; one along an edge
     /// between two free triangles crosses nothing, as the funnel's own
-    /// segments between wrap vertices do.
-    fn segment_parity(&self, cuts: &Cuts, p: Point, q: Point) -> Option<u64> {
+    /// segments between wrap vertices do. When `from` or `to` is an end,
+    /// the first triangle the segment enters, or the last it leaves, has
+    /// to be one of that end's corner triangles, or the segment would
+    /// reach the node from the wrong side of one of its own lines.
+    fn segment_parity(
+        &self,
+        cuts: &Cuts,
+        p: Point,
+        q: Point,
+        from: Option<&Entry>,
+        to: Option<&Entry>,
+    ) -> Option<u64> {
         let mut parity = 0;
+        let mut first: Option<[usize; 2]> = None;
+        let mut last: Option<[usize; 2]> = None;
         for hit in spade::LineIntersectionIterator::new(&self.cdt, point2(p), point2(q)) {
             let (edge, crossing) = match hit {
                 spade::Intersection::EdgeIntersection(e) => (e, true),
@@ -866,14 +878,29 @@ impl Arena {
             if self.wall_edge[index] {
                 return None;
             }
-            let free = [edge.face(), edge.rev().face()]
-                .into_iter()
-                .all(|f| f.as_inner().is_some_and(|f| self.free[f.fix().index()]));
-            if !free {
+            let faces =
+                [edge.face(), edge.rev().face()].map(|f| f.as_inner().map(|f| f.fix().index()));
+            let [Some(a), Some(b)] = faces else {
+                return None;
+            };
+            if !self.free[a] || !self.free[b] {
                 return None;
             }
+            first.get_or_insert([a, b]);
+            last = Some([a, b]);
             if crossing {
                 parity ^= cuts.bits[index];
+            }
+        }
+        for (end, faces, at) in [(from, first, p), (to, last, q)] {
+            let Some(end) = end else { continue };
+            let vertex = self.vertex_at(at)?;
+            let touching = faces?
+                .into_iter()
+                .filter(|&t| self.ccw_vertices(t).contains(&vertex))
+                .collect::<Vec<_>>();
+            if touching.is_empty() || !touching.iter().any(|t| end.tris.contains(t)) {
+                return None;
             }
         }
         Some(parity)
@@ -881,26 +908,36 @@ impl Arena {
 
     /// The path with every detour the corridor forced on it cut short: any
     /// two points joined by a straight segment through free triangles that
-    /// crosses the cuts with the same parity as the path between them.
-    pub(super) fn tighten(&self, cuts: &Cuts, path: &[Point]) -> Vec<Point> {
+    /// crosses the cuts with the same parity as the path between them. A
+    /// shortcut from the entry node or to the exit node has to leave or
+    /// arrive through that end's corner.
+    pub(super) fn tighten(
+        &self,
+        cuts: &Cuts,
+        path: &[Point],
+        entry: &Entry,
+        exit: &Entry,
+    ) -> Vec<Point> {
         let mut out = vec![path[0]];
         let mut i = 0;
         while i + 1 < path.len() {
             let mut next = i + 1;
-            let mut parity = self.segment_parity(cuts, path[i], path[i + 1]);
-            let mut along = parity;
+            let mut along = self.segment_parity(cuts, path[i], path[i + 1], None, None);
             for j in i + 2..path.len() {
-                along = match (along, self.segment_parity(cuts, path[j - 1], path[j])) {
+                along = match (
+                    along,
+                    self.segment_parity(cuts, path[j - 1], path[j], None, None),
+                ) {
                     (Some(a), Some(b)) => Some(a ^ b),
                     _ => None,
                 };
                 let Some(along) = along else { break };
-                if self.segment_parity(cuts, path[i], path[j]) == Some(along) {
+                let from = (i == 0).then_some(entry);
+                let to = (j + 1 == path.len()).then_some(exit);
+                if self.segment_parity(cuts, path[i], path[j], from, to) == Some(along) {
                     next = j;
-                    parity = Some(along);
                 }
             }
-            let _ = parity;
             out.push(path[next]);
             i = next;
         }
@@ -973,25 +1010,25 @@ impl Arena {
             .map(|(c, v)| v.map(|v| (c, v)).ok_or(Unroutable::Bug("piece vertex")))
             .collect::<Result<_, _>>()?;
         if let Component::Cycle(start) = own {
-            // The own cut starts at the node of the piece farthest from
-            // both ends, so neither leg can land on it.
+            // The own cut starts at the vertex of the piece farthest from
+            // both ends: never an end itself, or a corridor would flip the
+            // bit by starting in the next fan triangle and change nothing.
             let ends = [state.nodes[mv.a].position, state.nodes[mv.b].position];
-            let room = |v: NodeId| {
-                let p = state.nodes[v].position;
+            let room = |p: Point| {
                 ends.iter()
                     .map(|e| e.distance_to(&p))
                     .fold(f64::INFINITY, f64::min)
             };
-            let probe = model
-                .cycle(start)
+            let mut candidates: Vec<(usize, Point)> = cycle_polygon(state, start)
                 .into_iter()
-                .map(|h| model.origin(h))
-                .max_by(|&x, &y| room(x).total_cmp(&room(y)).then(y.cmp(&x)))
-                .ok_or(Unroutable::Bug("own piece"))?;
-            let v = match self.cdt.locate(point2(state.nodes[probe].position)) {
-                PositionInTriangulation::OnVertex(v) => v,
-                _ => return Err(Unroutable::Bug("own vertex")),
-            };
+                .enumerate()
+                .collect();
+            candidates.sort_by(|(i, p), (j, q)| room(*q).total_cmp(&room(*p)).then(i.cmp(j)));
+            let v = candidates
+                .iter()
+                .filter(|(_, p)| room(*p) > SAME_POINT)
+                .find_map(|(_, p)| self.vertex_at(*p))
+                .ok_or(Unroutable::Bug("own vertex"))?;
             sources.push((None, v));
         }
         if sources.len() > 64 {

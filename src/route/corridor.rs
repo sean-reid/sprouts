@@ -23,13 +23,11 @@ const SEARCH_STATES: usize = 400_000;
 
 type Portals = Vec<(Point, Point)>;
 
-/// A corridor from an entry to an exit: the portals crossed in travel
-/// order, the parity reached, and which entry and exit it joins.
+/// A corridor from the entry to the exit: the portals crossed in travel
+/// order and the parity reached.
 pub(super) struct Corridor {
     pub portals: Portals,
-    pub entry: usize,
-    pub exit: usize,
-    /// Parity of every cut along the whole path, legs included.
+    /// Parity of every cut along the whole path.
     pub parity: u64,
 }
 
@@ -46,7 +44,6 @@ pub(super) enum Want {
 struct Key {
     tri: usize,
     mask: u64,
-    entry: usize,
 }
 
 #[derive(Clone, Copy)]
@@ -83,84 +80,53 @@ fn accepts(want: Want, parity: u64, all: u64) -> bool {
     }
 }
 
-/// Dijkstra over (triangle, parity) from any entry to any exit whose
-/// parity the move accepts, returning the portals crossed as (left, right)
-/// pairs in travel order.
+/// Dijkstra over (triangle, parity) from the entry's triangles to an exit
+/// triangle whose parity the move accepts, returning the portals crossed
+/// as (left, right) pairs in travel order.
 pub(super) fn search(
     arena: &Arena,
     cuts: &Cuts,
-    entries: &[Entry],
-    exits: &[Entry],
+    entry: &Entry,
+    exit: &Entry,
     want: Want,
     is_loop: bool,
 ) -> Result<Corridor, Unroutable> {
-    let entry_bits: Vec<u64> = vec![0; entries.len()];
-    let exit_bits: Vec<u64> = vec![0; exits.len()];
-    // Exits by triangle, for the goal test.
-    let mut goal: HashMap<usize, Vec<usize>> = HashMap::new();
-    for (i, e) in exits.iter().enumerate() {
-        for &t in &e.tris {
-            goal.entry(t).or_default().push(i);
-        }
-    }
-    let nearest_exit = |p: Point| {
-        exits
-            .iter()
-            .map(|e| e.at.distance_to(&p))
-            .fold(f64::INFINITY, f64::min)
-    };
+    let goal: HashSet<usize> = exit.tris.iter().copied().collect();
     let mut heap = BinaryHeap::new();
     let mut best: HashMap<Key, f64> = HashMap::new();
     let mut parent: HashMap<Key, (Key, (Point, Point))> = HashMap::new();
-    for (i, e) in entries.iter().enumerate() {
-        for &t in &e.tris {
-            let key = Key {
-                tri: t,
-                mask: entry_bits[i],
-                entry: i,
-            };
-            best.insert(key, 0.0);
-            heap.push(Item {
-                cost: 0.0,
-                bound: nearest_exit(e.at),
-                key,
-                pos: e.at,
-            });
-        }
+    for &t in &entry.tris {
+        let key = Key { tri: t, mask: 0 };
+        best.insert(key, 0.0);
+        heap.push(Item {
+            cost: 0.0,
+            bound: exit.at.distance_to(&entry.at),
+            key,
+            pos: entry.at,
+        });
     }
     while let Some(item) = heap.pop() {
         let key = item.key;
         if best.get(&key).is_some_and(|&c| c < item.cost) {
             continue;
         }
-        if let Some(exits_here) = goal.get(&key.tri) {
-            // A loop has to have gone somewhere before it returns, and
-            // returns by another entry when it can.
-            let open = !is_loop || parent.contains_key(&key);
-            let fits = |x: &&usize| open && accepts(want, key.mask ^ exit_bits[**x], cuts.all);
-            let found = exits_here
-                .iter()
-                .filter(|x| **x != key.entry)
-                .find(fits)
-                .or_else(|| exits_here.iter().find(fits));
-            if let Some(&exit) = found {
-                let mut portals = Vec::new();
-                let mut cur = key;
-                while let Some((prev, portal)) = parent.get(&cur) {
-                    portals.push(*portal);
-                    cur = *prev;
-                    if portals.len() > parent.len() {
-                        return Err(Unroutable::Bug("corridor cycle"));
-                    }
+        // A loop has to have gone somewhere before it returns.
+        let open = !is_loop || parent.contains_key(&key);
+        if goal.contains(&key.tri) && open && accepts(want, key.mask, cuts.all) {
+            let mut portals = Vec::new();
+            let mut cur = key;
+            while let Some((prev, portal)) = parent.get(&cur) {
+                portals.push(*portal);
+                cur = *prev;
+                if portals.len() > parent.len() {
+                    return Err(Unroutable::Bug("corridor cycle"));
                 }
-                portals.reverse();
-                return Ok(Corridor {
-                    portals,
-                    entry: key.entry,
-                    exit,
-                    parity: key.mask ^ exit_bits[exit],
-                });
             }
+            portals.reverse();
+            return Ok(Corridor {
+                portals,
+                parity: key.mask,
+            });
         }
         if best.len() > SEARCH_STATES {
             return Err(Unroutable::Bug("search states"));
@@ -176,7 +142,6 @@ pub(super) fn search(
             let next = Key {
                 tri: next_tri,
                 mask: key.mask ^ cuts.bits[edge],
-                entry: key.entry,
             };
             let cost = item.cost + item.pos.distance_to(&mid);
             if best.get(&next).is_none_or(|&c| cost < c) {
@@ -186,7 +151,7 @@ pub(super) fn search(
                 parent.insert(next, (key, (qq, pp)));
                 heap.push(Item {
                     cost,
-                    bound: cost + nearest_exit(mid),
+                    bound: cost + exit.at.distance_to(&mid),
                     key: next,
                     pos: mid,
                 });
@@ -198,14 +163,11 @@ pub(super) fn search(
 
 /// Whether an exit triangle can be reached from an entry triangle through
 /// the free triangles, parity aside, crossing at least one edge: a loop's
-/// exits are its entries, and a path has to go somewhere first.
-pub(super) fn reachable(arena: &Arena, entries: &[Entry], exits: &[Entry]) -> bool {
-    let goal: HashSet<usize> = exits.iter().flat_map(|e| e.tris.iter().copied()).collect();
+/// exit is its entry, and a path has to go somewhere first.
+pub(super) fn reachable(arena: &Arena, entry: &Entry, exit: &Entry) -> bool {
+    let goal: HashSet<usize> = exit.tris.iter().copied().collect();
     let mut seen: HashSet<usize> = HashSet::new();
-    let mut stack: Vec<usize> = entries
-        .iter()
-        .flat_map(|e| e.tris.iter().copied())
-        .collect();
+    let mut stack: Vec<usize> = entry.tris.clone();
     while let Some(t) = stack.pop() {
         if !seen.insert(t) {
             continue;
@@ -277,27 +239,17 @@ pub(super) fn funnel(start: Point, portals: &[(Point, Point)], end: Point) -> Ve
 
 /// The whole path of a corridor: the taut path from the entry node to the
 /// exit node through the free region.
-pub(super) fn draw(corridor: &Corridor, entries: &[Entry], exits: &[Entry]) -> Vec<Point> {
-    let entry = &entries[corridor.entry];
-    let exit = &exits[corridor.exit];
+pub(super) fn draw(corridor: &Corridor, entry: &Entry, exit: &Entry) -> Vec<Point> {
     let mut out = funnel(entry.at, &corridor.portals, exit.at);
     out.dedup_by(|p, q| p.distance_to(q) < 1e-9);
     out
 }
 
-/// Vertices the cuts keep off: the end nodes, entries and exits, so no leg
-/// starts or ends on a cut.
-pub(super) fn blocked(
-    arena: &Arena,
-    entries: &[Entry],
-    exits: &[Entry],
-    ends: [Point; 2],
-) -> Vec<FixedVertexHandle> {
-    entries
-        .iter()
-        .chain(exits)
-        .map(|e| e.at)
-        .chain(ends)
+/// Vertices the cuts keep off: the end nodes, so no path starts or ends
+/// on a cut.
+pub(super) fn blocked(arena: &Arena, entry: &Entry, exit: &Entry) -> Vec<FixedVertexHandle> {
+    [entry.at, exit.at]
+        .into_iter()
         .filter_map(|p| arena.vertex_at(p))
         .collect()
 }

@@ -161,43 +161,40 @@ fn plan(
     // The fit may move the curve a tolerance off the path at a disc too.
     let disc = want.node_clearance + curve::tolerance(state.board_size);
     let arena = erode::Arena::build(state, face, mv.a, mv.b, c, disc, want.forgiven)?;
-    let entries = vec![arena.entries(state, mv.a, mv.at_a)?];
-    let exits = vec![arena.entries(state, mv.b, mv.at_b)?];
-    let ends = [state.nodes[mv.a].position, state.nodes[mv.b].position];
-    let blocked = corridor::blocked(&arena, &entries, &exits, ends);
+    let entry = arena.entries(state, mv.a, mv.at_a)?;
+    let exit = arena.entries(state, mv.b, mv.at_b)?;
+    let blocked = corridor::blocked(&arena, &entry, &exit);
     let cuts = arena.cuts(state, mv, face, &blocked)?;
     let own = state
         .face
         .component_of(mv.a, mv.at_a)
         .map_err(|_| Unroutable::Bug("corner"))?;
     let is_loop = mv.a == mv.b;
-    let first = corridor::search(
-        &arena,
-        &cuts,
-        &entries,
-        &exits,
-        corridor::Want::Any,
-        is_loop,
-    );
+    let first = corridor::search(&arena, &cuts, &entry, &exit, corridor::Want::Any, is_loop);
     // A chord's Room means the free triangles disconnect its ends, so a
     // path the search missed is a bug. A loop's Room means no closed walk
     // from the node crosses a cut, which only the parity search decides.
     if !is_loop
         && matches!(first, Err(Unroutable::Room))
-        && corridor::reachable(&arena, &entries, &exits)
+        && corridor::reachable(&arena, &entry, &exit)
     {
         return Err(Unroutable::Bug("room with a path"));
     }
     let first = first?;
-    let mut path = arena.tighten(&cuts, &corridor::draw(&first, &entries, &exits));
+    let mut path = arena.tighten(&cuts, &corridor::draw(&first, &entry, &exit), &entry, &exit);
     if cuts.all != 0 {
         let wrong = wrong_sides(state, mv, own, &cuts, &path);
         if wrong != 0 {
             // Flipping every bit at once is the same move drawn round the
             // other side of its own piece, and a bare node has no sides.
             let want = corridor::Want::Parity(first.parity ^ wrong);
-            let second = corridor::search(&arena, &cuts, &entries, &exits, want, is_loop)?;
-            path = arena.tighten(&cuts, &corridor::draw(&second, &entries, &exits));
+            let second = corridor::search(&arena, &cuts, &entry, &exit, want, is_loop)?;
+            path = arena.tighten(
+                &cuts,
+                &corridor::draw(&second, &entry, &exit),
+                &entry,
+                &exit,
+            );
         }
     }
     let path = uncross(untwist_legs(path)).ok_or(Unroutable::Shape("tangled"))?;
