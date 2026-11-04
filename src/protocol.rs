@@ -580,7 +580,7 @@ pub fn ai_move(state: &mut GameState) -> AiReply {
             Err(_) => AiReply::Undrawn,
         },
         ai::Reply::GameOver => AiReply::GameOver,
-        ai::Reply::Undrawn => AiReply::Undrawn,
+        ai::Reply::Undrawn(_) => AiReply::Undrawn,
     }
 }
 

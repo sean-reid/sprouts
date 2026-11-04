@@ -213,6 +213,31 @@ fn validate_for(state: &GameState, mov: &Move) -> Result<(), Rejection> {
     protocol::check(state, mov)
 }
 
+/// The board after every recorded move, each checked as the page would.
+#[cfg(test)]
+pub(crate) fn play(fixture: &Fixture) -> GameState {
+    play_as(fixture, Player::Human)
+}
+
+/// `play` with `first` making the first move.
+#[cfg(test)]
+pub(crate) fn play_as(fixture: &Fixture, first: Player) -> GameState {
+    let nodes = fixture
+        .nodes
+        .as_ref()
+        .map(|nodes| nodes.iter().map(|p| Point::new(p[0], p[1])).collect());
+    let mut state =
+        protocol::start(fixture.initial_nodes, fixture.board_size, first, nodes).unwrap();
+    for (index, recorded) in fixture.moves.iter().enumerate() {
+        let mov = recorded.to_move(state.current_player, state.board_size);
+        if let Err(e) = validate_for(&state, &mov) {
+            panic!("move {index} rejected: {}", e.message);
+        }
+        state.apply_move(mov).unwrap();
+    }
+    state
+}
+
 /// Runs every phase of a turn at each position, including the one after the
 /// last move, and applies each recorded move in turn.
 pub fn replay(fixture: &Fixture) -> Replay {
@@ -233,13 +258,22 @@ pub fn replay(fixture: &Fixture) -> Replay {
         phases.search = t.elapsed();
 
         let t = Instant::now();
-        let (routing_failures, undrawn) = if candidates.is_empty() {
-            (0, false)
+        let (routing_failures, undrawn, out_of_time) = if candidates.is_empty() {
+            (0, false, false)
         } else {
             let (drawn, failures) = ai::draw(&state, &candidates, &order);
-            (failures, black_box(drawn).is_none())
+            let drawn = black_box(drawn);
+            (
+                failures,
+                drawn.is_err(),
+                matches!(drawn, Err(ai::Undrawn::OutOfTime)),
+            )
         };
         phases.routing = t.elapsed();
+        if out_of_time {
+            failure = Some(format!("move {index}: the draw ran out of time"));
+            break;
+        }
 
         let recorded = fixture.moves.get(index);
         let verdict = recorded.map(|recorded| {
@@ -332,21 +366,26 @@ pub fn record(initial_nodes: usize, board_size: usize) -> Fixture {
     }
 }
 
-/// The AI's move for the position, or none when the game is over, the AI
-/// could not draw a move, or its move fails the validation the page would
-/// apply; the last two are reported on stderr since they end the recording
-/// early.
+/// The AI's move for the position, or none when the game is over, every
+/// listed move was refused, or its move fails the validation the page
+/// would apply; the last two are reported on stderr since they end the
+/// recording early. A draw that stops at its time limit is an error, not a
+/// position to record.
 fn next_accepted_move(state: &mut GameState) -> Option<Move> {
     let mov = match ai::choose(state) {
         ai::Reply::Move(mov) => mov,
         ai::Reply::GameOver => return None,
-        ai::Reply::Undrawn => {
+        ai::Reply::Undrawn(ai::Undrawn::Exhausted) => {
             eprintln!(
-                "recording stopped after {} moves: no listed move could be drawn",
+                "recording stopped after {} moves: every listed move was refused",
                 state.move_history.len()
             );
             return None;
         }
+        ai::Reply::Undrawn(ai::Undrawn::OutOfTime) => panic!(
+            "the draw ran out of time after {} moves; the recording would differ between runs",
+            state.move_history.len()
+        ),
     };
     match validate_for(state, &mov) {
         Ok(()) => Some(mov),
@@ -399,19 +438,6 @@ mod tests {
         assert!(run.timings[2].terminal);
     }
 
-    /// The board after every recorded move, each checked as the page would.
-    fn play(fixture: &Fixture) -> GameState {
-        let mut state = fixture.start();
-        for (index, recorded) in fixture.moves.iter().enumerate() {
-            let mov = recorded.to_move(state.current_player, state.board_size);
-            if let Err(e) = validate_for(&state, &mov) {
-                panic!("move {index} rejected: {}", e.message);
-            }
-            state.apply_move(mov).unwrap();
-        }
-        state
-    }
-
     /// Recorded on the live site on 2026-11-03, where the page declared the
     /// human the winner with nodes 8 and 12 still joinable.
     #[test]
@@ -444,7 +470,7 @@ mod tests {
         assert_eq!(state.current_player, Player::AI);
         let moves = state.face.search_moves();
         let order = ai::rank(&state, &moves);
-        let (Some(mov), failures) = ai::draw(&state, &moves, &order) else {
+        let (Ok(mov), failures) = ai::draw(&state, &moves, &order) else {
             panic!("the AI draws the last move");
         };
         assert_eq!(failures, 0);

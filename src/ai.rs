@@ -6,14 +6,26 @@ use crate::nimber::Nimbers;
 use crate::route;
 use crate::types::{GameState, Move, Player};
 
+#[cfg(test)]
+mod tests;
+
 /// The AI's answer to a position.
 #[derive(Debug, Clone)]
 pub enum Reply {
     Move(Move),
-    /// The model lists moves but none of them could be drawn; the game is
+    /// The model lists moves but the draw produced none; the game is
     /// still open.
-    Undrawn,
+    Undrawn(Undrawn),
     GameOver,
+}
+
+/// Why a draw produced no move.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Undrawn {
+    /// Every listed move was tried and refused.
+    Exhausted,
+    /// `DRAW_LIMIT_MS` passed with listed moves still untried.
+    OutOfTime,
 }
 
 /// Class members tried for a listed move that cannot be drawn, before the
@@ -21,6 +33,9 @@ pub enum Reply {
 const CLASS_TRIES: usize = 6;
 /// Wall clock for drawing, after the search has had its own.
 const ROUTE_BUDGET_MS: f64 = 800.0;
+/// Wall clock after which the rest of the ranking goes untried and the
+/// position is given up as Undrawn.
+const DRAW_LIMIT_MS: f64 = 10_000.0;
 
 /// Lists the search moves, ranks them once on the model, and draws the
 /// best one that routes, walking the ranking on failure.
@@ -31,8 +46,8 @@ pub fn choose(state: &GameState) -> Reply {
     }
     let order = rank(state, &candidates);
     match draw(state, &candidates, &order) {
-        (Some(mov), _) => Reply::Move(mov),
-        (None, _) => Reply::Undrawn,
+        (Ok(mov), _) => Reply::Move(mov),
+        (Err(why), _) => Reply::Undrawn(why),
     }
 }
 
@@ -55,38 +70,56 @@ pub(crate) fn rank(state: &GameState, candidates: &[FaceMove]) -> Vec<usize> {
 
 /// Routes the candidates in ranked order until one draws, trying the other
 /// members of a move's class before moving down the ranking. Once
-/// `ROUTE_BUDGET_MS` has passed, every remaining candidate still gets one
-/// attempt at the cheap clearance, so Undrawn means every listed move was
-/// tried. Returns the drawn move and the number of ranked moves passed
-/// over.
+/// `ROUTE_BUDGET_MS` has passed, each remaining candidate gets one attempt
+/// at the cheap clearance, until `DRAW_LIMIT_MS` has passed and the rest
+/// go untried. Returns the drawn move, or why there is none, and the
+/// number of ranked moves passed over.
 pub(crate) fn draw(
     state: &GameState,
     candidates: &[FaceMove],
     order: &[usize],
-) -> (Option<Move>, usize) {
-    let mut clock = WallClock::start();
+) -> (Result<Move, Undrawn>, usize) {
+    draw_within(state, candidates, order, WallClock::start())
+}
+
+/// `draw` on the given clock.
+pub(crate) fn draw_within(
+    state: &GameState,
+    candidates: &[FaceMove],
+    order: &[usize],
+    mut clock: impl Clock,
+) -> (Result<Move, Undrawn>, usize) {
+    let mut router = route::Router::new();
     let mut failures = 0;
     for &idx in order {
         let listed = &candidates[idx];
-        if clock.elapsed_ms() > ROUTE_BUDGET_MS {
-            if let Ok(mov) = route::route_cheap(state, listed) {
-                return (Some(mov), failures);
+        let elapsed = clock.elapsed_ms();
+        if elapsed > DRAW_LIMIT_MS {
+            return (Err(Undrawn::OutOfTime), failures);
+        }
+        if elapsed > ROUTE_BUDGET_MS {
+            if let Ok(mov) = router.route_cheap(state, listed) {
+                return (Ok(mov), failures);
             }
             failures += 1;
             continue;
         }
         let tries = std::iter::once(listed.clone()).chain(class_members(state, listed));
         for attempt in tries {
-            if let Ok(mov) = route::route(state, &attempt) {
-                return (Some(mov), failures);
+            if let Ok(mov) = router.route(state, &attempt) {
+                return (Ok(mov), failures);
             }
-            if clock.elapsed_ms() > ROUTE_BUDGET_MS {
+            let elapsed = clock.elapsed_ms();
+            if elapsed > DRAW_LIMIT_MS {
+                return (Err(Undrawn::OutOfTime), failures);
+            }
+            if elapsed > ROUTE_BUDGET_MS {
                 break;
             }
         }
         failures += 1;
     }
-    (None, failures)
+    (Err(Undrawn::Exhausted), failures)
 }
 
 /// Other moves reaching the same position as `rep` up to relabelling the
