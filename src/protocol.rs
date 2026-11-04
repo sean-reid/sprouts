@@ -204,8 +204,6 @@ pub enum RouteReply {
     Unroutable { reason: UnroutableKind },
 }
 
-/// A fresh board on the recorded positions, or on the default layout when
-/// none are given. Positions that do not match the count are an error.
 /// FNV-1a over the node positions and the line flattenings, as hex.
 pub fn hash_board(state: &GameState) -> String {
     let mut fnv = crate::exact::Fnv::default();
@@ -216,6 +214,8 @@ pub fn hash_board(state: &GameState) -> String {
     fnv.hex()
 }
 
+/// A fresh board on the recorded positions, or on the default layout when
+/// none are given. Positions that do not match the count are an error.
 pub fn start(
     initial_nodes: usize,
     board_size: usize,
@@ -408,7 +408,7 @@ pub struct RouteHashPlan {
 /// and node fed to one FNV-1a. The native test records the value a
 /// platform must match.
 pub fn route_hash(plan: RouteHashPlan) -> Result<String, String> {
-    let mut fnv = route::Fnv::default();
+    let mut fnv = crate::exact::Fnv::default();
     for plan in plan.plans {
         let mut state = start(plan.initial_nodes, plan.board_size, Player::AI, plan.nodes)?;
         for (index, mov) in plan.moves.into_iter().enumerate() {
@@ -420,7 +420,7 @@ pub fn route_hash(plan: RouteHashPlan) -> Result<String, String> {
         state.current_player = Player::AI;
         route::hash_routes(&mut fnv, &state);
     }
-    Ok(format!("{:#018x}", fnv.0))
+    Ok(fnv.hex())
 }
 
 /// A move as a share link carries it: drawn, or routed from its face move
@@ -622,7 +622,7 @@ pub fn fit(state: &GameState, query: FitQuery) -> Curve {
 
 pub fn placement(state: &GameState, query: PlacementQuery) -> Placement {
     let Some(hit) = curve::nearest(&query.segments, &query.at).map(|hit| curve::Nearest {
-        point: curve::snap_to_grid(hit.point),
+        point: crate::exact::snap_to_grid(hit.point),
         ..hit
     }) else {
         return Placement {
@@ -656,7 +656,7 @@ pub fn auto_placement(state: &GameState, query: AutoPlacementQuery) -> AutoPlace
     let chosen = ai::rank_node_placements(&path, state)
         .into_iter()
         .filter_map(|at| curve::nearest(&query.segments, &at))
-        .map(|hit| curve::snap_to_grid(hit.point))
+        .map(|hit| crate::exact::snap_to_grid(hit.point))
         .filter(inside)
         .find(valid);
     match chosen {
@@ -683,7 +683,7 @@ pub fn auto_placement(state: &GameState, query: AutoPlacementQuery) -> AutoPlace
 mod tests {
     /// The hash of a fresh four-node board on fixed positions, recorded on
     /// a Mac; tests/unit/board-hash.test.ts asks the wasm build for it.
-    const BOARD_HASH: &str = "0x88c8d6882977d382";
+    const BOARD_HASH: &str = "0x8d980b253c42108e";
 
     #[test]
     fn a_fixed_board_hashes_to_the_recorded_value() {

@@ -56,7 +56,7 @@ pub fn opening_layout(count: usize, board_size: usize) -> Vec<Point> {
         .map(|i| {
             let radius = unit * (i as f64 + 0.5).sqrt();
             let angle = i as f64 * golden_angle;
-            curve::snap_to_grid(Point::new(
+            crate::exact::snap_to_grid(Point::new(
                 centre + radius * angle.cos(),
                 centre + radius * angle.sin(),
             ))
@@ -101,7 +101,7 @@ impl Node {
     pub fn new(id: usize, position: Point) -> Self {
         Self {
             id,
-            position: curve::snap_to_grid(position),
+            position: crate::exact::snap_to_grid(position),
             connection_count: 0,
         }
     }
@@ -150,7 +150,7 @@ impl Move {
         board_size: usize,
     ) -> Self {
         let segments = curve::fit(&polyline, curve::tolerance(board_size));
-        let new_node_pos = curve::snap_to_grid(
+        let new_node_pos = crate::exact::snap_to_grid(
             curve::nearest(&segments, &new_node_pos).map_or(new_node_pos, |hit| hit.point),
         );
         Self {
@@ -172,7 +172,7 @@ impl Move {
         new_node_pos: Point,
         player: Player,
     ) -> Self {
-        let new_node_pos = curve::snap_to_grid(
+        let new_node_pos = crate::exact::snap_to_grid(
             curve::nearest(&segments, &new_node_pos).map_or(new_node_pos, |hit| hit.point),
         );
         Self {

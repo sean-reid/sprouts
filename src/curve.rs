@@ -1,3 +1,4 @@
+use crate::exact::snap_to_grid;
 use kurbo::{CubicBez, ParamCurve, ParamCurveDeriv, Vec2};
 use serde::{Deserialize, Serialize};
 use tsify::Tsify;
@@ -128,16 +129,10 @@ fn turn_cos(pts: &[kurbo::Point], i: usize, span: f64) -> f64 {
     };
     let u = pts[i] - reach(-1);
     let v = reach(1) - pts[i];
-    if length(u) < span / 2.0 || length(v) < span / 2.0 {
+    if crate::exact::length(u.x, u.y) < span / 2.0 || crate::exact::length(v.x, v.y) < span / 2.0 {
         return 1.0;
     }
-    u.dot(v) / (length(u) * length(v))
-}
-
-/// The length of `v` from a plain square root, which every platform
-/// rounds the same way, where `hypot` would not.
-fn length(v: Vec2) -> f64 {
-    (v.x * v.x + v.y * v.y).sqrt()
+    u.dot(v) / (crate::exact::length(u.x, u.y) * crate::exact::length(v.x, v.y))
 }
 
 fn fit_run(pts: &[kurbo::Point], accuracy: f64, out: &mut Vec<Cubic>) {
@@ -178,7 +173,7 @@ fn tangent_from(pts: &[kurbo::Point], at: usize, step: isize, span: f64) -> Vec2
     } else {
         Vec2::new(sxy, root - half)
     };
-    let len = length(raw);
+    let len = crate::exact::length(raw.x, raw.y);
     let direction = if len > 0.0 {
         raw / len
     } else {
@@ -195,7 +190,7 @@ fn tangent_from(pts: &[kurbo::Point], at: usize, step: isize, span: f64) -> Vec2
 fn shared_tangent(pts: &[kurbo::Point], split: usize, span: f64) -> Vec2 {
     let back = tangent_from(pts, split, -1, span);
     let center = back - tangent_from(pts, split, 1, span);
-    let len = length(center);
+    let len = crate::exact::length(center.x, center.y);
     if len * len < 1e-12 {
         back
     } else {
@@ -438,20 +433,6 @@ fn segment_distance(a: kurbo::Point, b: kurbo::Point, p: kurbo::Point) -> f64 {
 }
 
 /// Polyline within `tolerance` of the spline, starting at its first point.
-/// Flattenings and fitted curves are rounded to this many units, so a
-/// last-digit difference between platforms or build profiles cannot
-/// reach the geometry a share link redraws.
-pub const GRID: f64 = 1.0 / 1_048_576.0;
-
-/// `p` rounded to the grid.
-pub fn snap_to_grid(p: Point) -> Point {
-    Point::new((p.x / GRID).round() * GRID, (p.y / GRID).round() * GRID)
-}
-
-/// The polyline within `tolerance` of the curve, by halving each cubic
-/// until its control points lie within the tolerance of its chord. Only
-/// sums, products and halvings reach the result, which every platform
-/// rounds the same way, so a share link redraws to the same points.
 pub fn flatten(segments: &[Cubic], tolerance: f64) -> Vec<Point> {
     let mut out = Vec::new();
     let Some(first) = segments.first() else {
@@ -546,6 +527,7 @@ fn from_kurbo(p: kurbo::Point) -> Point {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::exact::GRID;
     use crate::geometry::{closest_point_on_polyline, polyline_length};
     use proptest::prelude::*;
 

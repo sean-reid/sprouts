@@ -1,5 +1,6 @@
 use super::sweep::{self, draws};
 use super::*;
+use crate::exact::Fnv;
 use crate::face::Move as FaceMove;
 use crate::geometry::closest_point_on_polyline;
 use crate::protocol;

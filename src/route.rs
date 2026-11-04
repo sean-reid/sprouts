@@ -12,6 +12,7 @@
 use crate::ai::rank_node_placements;
 use crate::curve;
 use crate::embedding;
+use crate::exact::Fnv;
 use crate::face::{Component, Move as FaceMove, NodeId};
 use crate::geometry::resample_polyline;
 use crate::types::{
@@ -57,11 +58,7 @@ const NODE_ROOM: f64 = 2.0;
 /// as close together as they like.
 const END_FREE: f64 = 3.0;
 
-/// Screen-side test: positive when `q` is on the right of the heading
-/// `o` to `p`, where y grows downward.
-pub(crate) fn cross(o: Point, p: Point, q: Point) -> f64 {
-    (p.x - o.x) * (q.y - o.y) - (p.y - o.y) * (q.x - o.x)
-}
+pub(crate) use crate::exact::cross;
 
 /// Clearances the validator holds the player to move to.
 #[derive(Clone, Copy)]
@@ -232,31 +229,6 @@ fn relax(
     };
     let obstacles = clearance::Obstacles::new(arena.walls(), nodes, ends, rooms, path);
     clearance::push(path.to_vec(), &obstacles)
-}
-
-/// FNV-1a over f64 bits, for comparing routes across platforms.
-pub struct Fnv(pub u64);
-
-impl Default for Fnv {
-    fn default() -> Self {
-        Self(0xcbf2_9ce4_8422_2325)
-    }
-}
-
-impl Fnv {
-    pub fn feed(&mut self, x: f64) {
-        for byte in x.to_bits().to_le_bytes() {
-            self.0 ^= byte as u64;
-            self.0 = self.0.wrapping_mul(0x0000_0100_0000_01b3);
-        }
-    }
-
-    pub fn points(&mut self, pts: &[Point]) {
-        for p in pts {
-            self.feed(p.x);
-            self.feed(p.y);
-        }
-    }
 }
 
 /// Feeds the flattening and node of every routed search move of `state`

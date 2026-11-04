@@ -174,8 +174,8 @@ impl Arrangement {
     fn add_closed(&mut self, pts: &[Point], wall: bool) {
         for i in 0..pts.len() {
             let (p, q) = (
-                curve::snap_to_grid(pts[i]),
-                curve::snap_to_grid(pts[(i + 1) % pts.len()]),
+                crate::exact::snap_to_grid(pts[i]),
+                crate::exact::snap_to_grid(pts[(i + 1) % pts.len()]),
             );
             if p.distance_to(&q) < SAME_POINT {
                 continue;
