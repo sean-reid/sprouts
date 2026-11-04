@@ -199,20 +199,91 @@ fn the_draw_limit_stops_a_class_walk_between_members() {
     assert!(attempts <= 2, "{attempts} attempts for one member");
 }
 
+/// The face move a drawn move reads back as, with its enclosed pieces
+/// sorted as the enumeration lists them.
+fn reads_as(state: &GameState, mov: &Move) -> FaceMove {
+    let read = crate::embedding::embed(state, mov).expect("the drawn move reads back");
+    let mut enclosed = read.enclosed;
+    enclosed.sort_unstable();
+    FaceMove {
+        a: read.a,
+        at_a: read.at_a,
+        b: read.b,
+        at_b: read.at_b,
+        enclosed,
+    }
+}
+
 /// Between the route budget and the draw limit the opening still draws
-/// under the cheap pass, with one attempt per refused candidate on the
-/// first sweep and at most a second on the deferred ones.
+/// under the cheap pass: one attempt per candidate on the first sweep,
+/// which runs no parity search, and one more per candidate it held back.
 #[test]
-fn past_the_route_budget_each_candidate_gets_one_cheap_attempt() {
+fn past_the_route_budget_the_cheap_pass_sweeps_once_then_retries_the_deferred() {
     let state = GameState::with_board_size(4, 1000);
     let candidates = state.face.search_moves();
     let order: Vec<usize> = (0..candidates.len()).collect();
     stats::take();
     let (drawn, passed) = draw_within(&state, &candidates, &order, Stopped(ROUTE_BUDGET_MS + 1.0));
-    assert!(drawn.is_ok());
     let s = stats::take();
+    let mov = drawn.expect("the opening draws");
+    assert!(candidates.contains(&reads_as(&state, &mov)));
     assert!(s.attempts > passed);
-    assert!(s.attempts <= 2 * (passed + 1) + s.refused.sides);
+    assert!(s.attempts <= candidates.len() + s.refused.sides);
+    assert!(s.parity.len() <= s.refused.sides);
+}
+
+/// Two nodes joined by a straight line, with a bare third node below it:
+/// the two chords listed between the line's ends run round it on the
+/// side the first path happens to take and on the other, so one has a
+/// wrong-sided first path. Skipping the parity search refuses that one
+/// as Sides and draws the other, searching draws it, and no corner pair
+/// is remembered as having no room.
+#[test]
+fn skipping_the_parity_search_refuses_a_wrong_sided_first_path_as_sides() {
+    use crate::types::Point;
+    let (a, b) = (Point::new(300.0, 500.0), Point::new(700.0, 500.0));
+    let mut state = GameState::with_nodes(vec![a, b, Point::new(500.0, 650.0)], 1000);
+    let along: Vec<Point> = (0..=8)
+        .map(|k| Point::new(a.x + (b.x - a.x) * k as f64 / 8.0, a.y))
+        .collect();
+    state
+        .apply_move(Move::new(
+            0,
+            1,
+            along,
+            Point::new(500.0, 500.0),
+            Player::Human,
+            1000,
+        ))
+        .unwrap();
+    state.current_player = Player::AI;
+    let chords: Vec<FaceMove> = state
+        .face
+        .search_moves()
+        .into_iter()
+        .filter(|m| m.a == 0 && m.b == 1)
+        .collect();
+    assert!(chords.len() >= 2, "{chords:?}");
+    let mut router = route::Router::new();
+    let skipped: Vec<Result<Move, route::Unroutable>> = chords
+        .iter()
+        .map(|m| router.route_cheap_with(&state, m, route::Parity::Skip))
+        .collect();
+    let wrong: Vec<usize> = (0..chords.len())
+        .filter(|&i| matches!(skipped[i], Err(route::Unroutable::Sides)))
+        .collect();
+    assert_eq!(wrong.len(), 1, "{chords:?} gave {skipped:?}");
+    for (i, drawn) in skipped.iter().enumerate() {
+        if i != wrong[0] {
+            let drawn = drawn.as_ref().expect("the other chords draw");
+            assert_eq!(reads_as(&state, drawn), chords[i]);
+        }
+    }
+    let searched = router
+        .route_cheap(&state, &chords[wrong[0]])
+        .expect("the parity search draws it");
+    assert_eq!(reads_as(&state, &searched), chords[wrong[0]]);
+    assert_eq!(router.corners_without_room(), 0);
 }
 
 /// Every listed move refused, with time to spare, is Exhausted. The sealed
@@ -299,11 +370,11 @@ fn a_second_chord_between_corners_without_room_is_refused_from_memory() {
 
 /// Work the draw does on the pinned position under a stopped clock past
 /// the route budget, one cheap attempt per candidate, with the most
-/// enclosing moves first as the ranking tends to put them: 32 attempts
-/// and 5 arena builds measured, 31 candidates passed over out of 60; the
-/// bounds are twice that.
-const PINNED_ATTEMPTS: usize = 64;
-const PINNED_ARENAS: usize = 10;
+/// enclosing moves first as the ranking tends to put them: 43 attempts
+/// and 7 arena builds measured on the settled board, 1 candidate passed
+/// over out of 56; the bounds are twice that.
+const PINNED_ATTEMPTS: usize = 86;
+const PINNED_ARENAS: usize = 14;
 
 /// The 24-node opening after four splitting moves draws under the cheap
 /// pass within its measured work, most enclosing first and least first.
@@ -427,16 +498,11 @@ fn position_of_record(name: &str) -> GameState {
     state
 }
 
-/// Work the cheap pass does on the live position under a stopped clock:
-/// 41 attempts and 1 arena build in listed order, 40 and 1 reversed; the
-/// bounds are twice that. The ranked walk on the same position took 1_300
-/// attempts and 19 builds.
-const LIVE_ROOM_ATTEMPTS: usize = 82;
-const LIVE_ROOM_ARENAS: usize = 2;
-
 /// The live position where the page answered Undrawn with room to spare
-/// draws under the cheap pass within its measured work, in listed order
-/// and reversed.
+/// has moves that draw without a parity search, so the cheap pass draws
+/// one on its first sweep, before any parity search runs, in listed order
+/// and reversed, and the move reads back as a listed one. The ranked walk
+/// on this position took 1_300 attempts; the sweep takes 41 and 40.
 #[test]
 fn the_live_room_position_draws_under_the_cheap_pass() {
     let state = position_of_record("room-24n-1000.json");
@@ -456,9 +522,14 @@ fn the_live_room_position_draws_under_the_cheap_pass() {
             s.arenas,
             s.memo_hits
         );
-        assert!(drawn.is_ok(), "{passed} passed and nothing drew: {drawn:?}");
-        assert!(s.attempts <= LIVE_ROOM_ATTEMPTS, "{} attempts", s.attempts);
-        assert!(s.arenas <= LIVE_ROOM_ARENAS, "{} arenas", s.arenas);
+        let mov = drawn.unwrap_or_else(|why| panic!("{passed} passed and nothing drew: {why:?}"));
+        assert!(candidates.contains(&reads_as(&state, &mov)));
+        assert!(
+            s.parity.is_empty(),
+            "{} parity searches ran",
+            s.parity.len()
+        );
+        assert!(s.attempts <= candidates.len());
     }
 }
 
