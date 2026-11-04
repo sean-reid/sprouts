@@ -1101,6 +1101,14 @@ fn a_shortcut_into_an_end_has_to_arrive_through_its_corner() {
     };
     assert!(arrives(&corners[0], above) || arrives(&corners[1], above));
     assert!(arrives(&corners[0], below) || arrives(&corners[1], below));
+    // The same segments end inside node 3's guard, so with no end allowed
+    // the guard rule refuses them.
+    assert!(arena
+        .segment_parity(&cuts, above, mid, None, None)
+        .is_none());
+    assert!(arena
+        .segment_parity(&cuts, below, mid, None, None)
+        .is_none());
     assert_ne!(arrives(&corners[0], above), arrives(&corners[1], above));
     assert_ne!(arrives(&corners[0], below), arrives(&corners[1], below));
     assert_ne!(arrives(&corners[0], above), arrives(&corners[0], below));
