@@ -1,5 +1,9 @@
 import type { Point } from "./state";
 
+export function distance(a: Point, b: Point): number {
+  return Math.hypot(a.x - b.x, a.y - b.y);
+}
+
 function ccw(a: Point, b: Point, c: Point): boolean {
   return (c.y - a.y) * (b.x - a.x) > (b.y - a.y) * (c.x - a.x);
 }

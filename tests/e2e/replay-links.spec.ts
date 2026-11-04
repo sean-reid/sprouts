@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { basename } from "node:path";
 import { expect, test, type BrowserContextOptions, type Page } from "@playwright/test";
-import { decodeRecord, hasStroke, sameGame } from "../../web/history";
+import { decodeRecord, DRIFT_TOLERANCE, hasStroke, sameGame } from "../../web/history";
 import type { Fixture } from "../../web/record";
 import { HIGHLIGHT_COLOR } from "../../web/render";
 import {
@@ -33,11 +33,11 @@ const fixtures = [
 // face moves and human moves as geometry. Per game: the payload budget in
 // characters and how many of the AI's moves go as topology. The budget
 // belongs to the recording: it is the payload measured when the game was
-// recorded (274 and 336) with about 10 percent headroom, and a new
+// recorded (298 and 322) with about 10 percent headroom, and a new
 // recording brings its own.
 const routed: [string, number, number][] = [
-  ["fixtures/saved/eight-moves-4n-1000.json", 300, 4],
-  ["fixtures/saved/ten-moves-9n-1000.json", 370, 5],
+  ["fixtures/saved/eight-moves-4n-1000.json", 330, 4],
+  ["fixtures/saved/ten-moves-9n-1000.json", 355, 4],
 ];
 
 const entries = (page: Page) => page.locator("#moveList li");
@@ -153,6 +153,18 @@ for (const [file, budget, topologyMoves] of routed) {
     if (!relinked) throw new Error("the visitor's link does not decode");
     expect(sameGame(linked, relinked)).toBe(true);
     expect(relinked.moves.map(hasStroke)).toEqual(linked.moves.map(hasStroke));
+    // The visitor's router placed every topology move's node within the
+    // drift the share allowed of the sharer's.
+    const drift = linked.moves.map((move, i) => {
+      const other = relinked.moves[i];
+      if (!other || hasStroke(move) || hasStroke(other)) return 0;
+      return Math.hypot(move.node[0] - other.node[0], move.node[1] - other.node[1]);
+    });
+    const largest = Math.max(...drift);
+    test
+      .info()
+      .annotations.push({ type: `${name}-largest-drift`, description: largest.toFixed(3) });
+    expect(largest).toBeLessThanOrEqual((DRIFT_TOLERANCE * linked.boardSize) / 1000);
     await visitor.close();
   });
 }

@@ -1,3 +1,4 @@
+import { distance } from "./path";
 import type { Point } from "./state";
 import { DOUBLE_TAP_ZOOM, type View, wheelZoomFactor } from "./view";
 
@@ -50,10 +51,6 @@ const DOUBLE_TAP_SLOP = 30;
 
 function kindOf(e: PointerEvent): PointerKind {
   return e.pointerType === "touch" || e.pointerType === "pen" ? e.pointerType : "mouse";
-}
-
-function distance(a: Point, b: Point): number {
-  return Math.hypot(a.x - b.x, a.y - b.y);
 }
 
 function midpoint(a: Point, b: Point): Point {

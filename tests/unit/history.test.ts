@@ -5,6 +5,7 @@ import type { Cubic, FaceMove, Line, Point, Rehearsal } from "../../pkg/sprouts"
 import {
   decodeRecord,
   demote,
+  DRIFT_TOLERANCE,
   encodeRecord,
   hasStroke,
   History,
@@ -444,7 +445,26 @@ describe("a move that arrives as topology", () => {
         expect(plan.moves).toHaveLength(faces.length);
         return Promise.resolve({ topology: faces });
       },
-      rehearse: () => Promise.resolve(refusals[seen.rehearsed++]),
+      rehearse: () => Promise.resolve({ refused: refusals[seen.rehearsed++], nodes: [] }),
+    };
+    return { engine, seen };
+  }
+
+  // An engine whose rehearsals all apply, reporting the given node for the
+  // second move while it travels as topology.
+  const second: FaceMove = { a: 2, atA: undefined, b: 3, atB: undefined, enclosed: [] };
+  function drifting(node: Point) {
+    const seen = { rehearsed: 0 };
+    const engine: LinkEngine = {
+      classify: () => Promise.resolve({ topology: [chord, second] }),
+      rehearse: (plan) => {
+        seen.rehearsed++;
+        const routed = plan.moves[1]?.kind === "routed";
+        return Promise.resolve({
+          refused: undefined,
+          nodes: [undefined, routed ? node : undefined],
+        });
+      },
     };
     return { engine, seen };
   }
@@ -487,6 +507,21 @@ describe("a move that arrives as topology", () => {
     expect(history.moves.map((m) => m.topology)).toEqual([undefined, chord]);
   });
 
+  it("demotes a topology move whose rehearsed node drifts past the tolerance", async () => {
+    const { engine, seen } = drifting(at(500, 650 + DRIFT_TOLERANCE + 0.5));
+    const { history, refusedAt } = await prepareLink(twoDrawnMoves(), engine);
+    expect(refusedAt).toBeUndefined();
+    expect(seen.rehearsed).toBe(2);
+    expect(history.moves.map((m) => m.topology)).toEqual([chord, undefined]);
+  });
+
+  it("keeps a topology move whose rehearsed node drifts within the tolerance", async () => {
+    const { engine, seen } = drifting(at(500, 650 + DRIFT_TOLERANCE));
+    const { history } = await prepareLink(twoDrawnMoves(), engine);
+    expect(seen.rehearsed).toBe(1);
+    expect(history.moves.map((m) => m.topology)).toEqual([chord, second]);
+  });
+
   it("blames a refused drawn move on the topology move before it", async () => {
     const { engine, seen } = scripted([chord, undefined], [1, undefined]);
     const { history, refusedAt } = await prepareLink(twoDrawnMoves(), engine);
@@ -504,7 +539,7 @@ describe("a move that arrives as topology", () => {
       classify: () => Promise.reject(new Error("move 1: Path crosses an existing line")),
       rehearse: (plan) => {
         rehearsed = plan;
-        return Promise.resolve(undefined);
+        return Promise.resolve({ refused: undefined, nodes: [] });
       },
     };
     const { history, refusedAt } = await prepareLink(source, engine);

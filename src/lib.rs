@@ -19,8 +19,8 @@ mod validation;
 use protocol::RouteHashPlan;
 use protocol::{
     AiReply, AutoPlacement, AutoPlacementQuery, Classification, Classified, Curve, FaceMove,
-    FitQuery, Layout, Move, MovesFrom, Outcome, Placement, PlacementQuery, Rehearsal, RouteReply,
-    Snapshot,
+    FitQuery, Layout, Move, MovesFrom, Outcome, Placement, PlacementQuery, Rehearsal, Rehearsed,
+    RouteReply, Snapshot,
 };
 use tsify::{Ts, Tsify};
 use types::{GameState, Player, Point};
@@ -64,9 +64,12 @@ impl SproutsGame {
         Ok(protocol::apply_face_move(&mut self.state, mov.to_rust()?, at.to_rust()?).into_ts()?)
     }
 
-    /// The index of the first move of a link a fresh engine refuses, if any.
-    pub fn rehearse(&self, plan: Ts<Rehearsal>) -> Result<Option<usize>, JsError> {
-        protocol::rehearse(plan.to_rust()?).map_err(|e| JsError::new(&e))
+    /// The first move of a link a fresh engine refuses, if any, and the
+    /// node each routed move landed on.
+    pub fn rehearse(&self, plan: Ts<Rehearsal>) -> Result<Ts<Rehearsed>, JsError> {
+        Ok(protocol::rehearse(plan.to_rust()?)
+            .map_err(|e| JsError::new(&e))?
+            .into_ts()?)
     }
 
     /// For each move of a game, the face move the router redraws it from.

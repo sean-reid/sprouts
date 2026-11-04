@@ -447,12 +447,20 @@ pub struct Rehearsal {
     pub moves: Vec<LinkMove>,
 }
 
+/// What a rehearsal found: the first move refused, if any, and for every
+/// routed move before it the node the replay placed.
+#[derive(Debug, Clone, PartialEq, Serialize, Tsify)]
+pub struct Rehearsed {
+    pub refused: Option<usize>,
+    pub nodes: Vec<Option<Point>>,
+}
+
 /// Replays a link on a fresh board the way a visitor's engine will, and
-/// names the first move that is refused, if any. Drawn moves arrive with
-/// the link's rounded geometry, so a routed move after them meets a board
-/// that differs a little from the one it was drawn on. A link made for
-/// another router is an error.
-pub fn rehearse(plan: Rehearsal) -> Result<Option<usize>, String> {
+/// names the first move that is refused, if any, with the node each routed
+/// move landed on. Drawn moves arrive with the link's rounded geometry, so
+/// a routed move after them meets a board that differs a little from the
+/// one it was drawn on. A link made for another router is an error.
+pub fn rehearse(plan: Rehearsal) -> Result<Rehearsed, String> {
     if plan.router_version != ROUTER_VERSION {
         return Err(format!(
             "the link is for router version {}, this engine is {ROUTER_VERSION}",
@@ -465,16 +473,27 @@ pub fn rehearse(plan: Rehearsal) -> Result<Option<usize>, String> {
         plan.first_player,
         plan.nodes,
     )?;
+    let mut nodes = vec![None; plan.moves.len()];
     for (index, mov) in plan.moves.into_iter().enumerate() {
+        let routed = matches!(mov, LinkMove::Routed { .. });
         let outcome = match mov {
             LinkMove::Drawn { mov } => apply(&mut state, mov),
             LinkMove::Routed { face, at } => apply_face_move(&mut state, face, at),
         };
         if matches!(outcome, Outcome::Rejected { .. }) {
-            return Ok(Some(index));
+            return Ok(Rehearsed {
+                refused: Some(index),
+                nodes,
+            });
+        }
+        if routed {
+            nodes[index] = state.lines.last().map(|line| line.new_node_pos);
         }
     }
-    Ok(None)
+    Ok(Rehearsed {
+        refused: None,
+        nodes,
+    })
 }
 
 /// Whether the router, given the face move, draws the curve of `mov`: the
@@ -1014,12 +1033,27 @@ mod tests {
                 },
             ],
         };
-        assert_eq!(rehearse(plan(face.clone())), Ok(None));
+        let rehearsed = rehearse(plan(face.clone())).unwrap();
+        assert_eq!(rehearsed.refused, None);
+        // The node reported is the one the same replay places on its board.
+        let mut replayed = GameState::new(4);
+        assert!(matches!(
+            apply(&mut replayed, chord.clone()),
+            Outcome::Applied { .. }
+        ));
+        assert!(matches!(
+            apply_face_move(&mut replayed, face.clone(), reply.new_node_pos),
+            Outcome::Applied { .. }
+        ));
+        let placed = replayed.lines.last().unwrap().new_node_pos;
+        assert_eq!(rehearsed.nodes, vec![None, Some(placed)]);
         let wrong = FaceMove {
             at_a: Some(1),
             ..face.clone()
         };
-        assert_eq!(rehearse(plan(wrong)), Ok(Some(1)));
+        let refused = rehearse(plan(wrong)).unwrap();
+        assert_eq!(refused.refused, Some(1));
+        assert_eq!(refused.nodes, vec![None, None]);
         let other_router = Rehearsal {
             router_version: ROUTER_VERSION + 1,
             ..plan(face.clone())
@@ -1033,7 +1067,7 @@ mod tests {
             "moves": [{ "kind": "drawn", "mov": chord }],
         });
         let parsed: Rehearsal = serde_json::from_value(wire).unwrap();
-        assert_eq!(rehearse(parsed), Ok(None));
+        assert_eq!(rehearse(parsed).unwrap().refused, None);
         // A drawn move the visitor's engine refuses is named the same way.
         let short = Move {
             polyline: vec![a, a],
@@ -1046,8 +1080,10 @@ mod tests {
                     LinkMove::Drawn { mov: short }
                 ],
                 ..plan(face.clone())
-            }),
-            Ok(Some(1))
+            })
+            .unwrap()
+            .refused,
+            Some(1)
         );
         assert!(rehearse(Rehearsal {
             nodes: Some(vec![a]),
