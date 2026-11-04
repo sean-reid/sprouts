@@ -1,4 +1,4 @@
-use sprouts::replay::{self, ms, Fixture, MoveTiming, PHASES, PHASE_COUNT};
+use sprouts::replay::{self, ms, Fixture, MoveTiming, Player, PHASES, PHASE_COUNT};
 
 /// Seeded random games routed after the fixtures, so the report keeps the
 /// share of search moves the router cannot draw.
@@ -118,13 +118,15 @@ fn run_bench() -> Result<bool, String> {
         }
     }
 
-    let tally = replay::sweep(SWEEP_SEED, SWEEP_GAMES);
-    println!("\nrouting over {SWEEP_GAMES} seeded games: {tally}");
-    if tally.bug > 0 {
-        failures.push(format!(
-            "{} routes failed as bugs: {:?}",
-            tally.bug, tally.bugs
-        ));
+    for (label, player) in [("AI", Player::AI), ("human", Player::Human)] {
+        let tally = replay::sweep(SWEEP_SEED, SWEEP_GAMES, player);
+        println!("\nrouting over {SWEEP_GAMES} seeded games as the {label}: {tally}");
+        if tally.bug > 0 {
+            failures.push(format!(
+                "{} routes failed as bugs as the {label}: {:?}",
+                tally.bug, tally.bugs
+            ));
+        }
     }
     let (forms, hits, misses, (lives, nodes)) = replay::nimber_stats();
     let rate = 100.0 * hits as f64 / (hits + misses).max(1) as f64;

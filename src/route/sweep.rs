@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 use super::{route, Unroutable};
 use crate::face::Move as FaceMove;
 use crate::types::{GameState, Move, Player};
-use crate::validation::validate_ai_move;
+use crate::validation::{validate_ai_move, validate_move};
 
 /// Routes a search move the way the AI does: the move itself, else the
 /// other members of its class, reporting the last failure.
@@ -129,13 +129,14 @@ impl std::fmt::Display for Forfeit {
     }
 }
 
-/// One random game on `nodes` nodes: each pick names a search move to try
-/// first, the rest follow in order until one draws. Every drawn move has to
-/// pass the AI validator and no route may fail as a bug; otherwise the
-/// game is forfeited with the position as a fixture and the reason.
-pub fn game(nodes: usize, picks: &[u32]) -> Result<Tally, Forfeit> {
+/// One random game on `nodes` nodes drawn as `player`: each pick names a
+/// search move to try first, the rest follow in order until one draws.
+/// Every drawn move has to pass that player's validator and no route may
+/// fail as a bug; otherwise the game is forfeited with the position as a
+/// fixture and the reason.
+pub fn game(nodes: usize, picks: &[u32], player: Player) -> Result<Tally, Forfeit> {
     let mut state = GameState::with_board_size(nodes, 1000);
-    state.current_player = Player::AI;
+    state.current_player = player;
     let mut tally = Tally::default();
     for &pick in picks {
         let moves = state.face.search_moves();
@@ -148,7 +149,11 @@ pub fn game(nodes: usize, picks: &[u32]) -> Result<Tally, Forfeit> {
             tally.tried += 1;
             match draws(&state, &moves[k]) {
                 Ok(mov) => {
-                    if let Err(e) = validate_ai_move(&state, &mov) {
+                    let checked = match player {
+                        Player::AI => validate_ai_move(&state, &mov),
+                        Player::Human => validate_move(&state, &mov),
+                    };
+                    if let Err(e) = checked {
                         let why = format!(
                             "a drawn move was rejected: {:?} in\n{}",
                             e.kind,
@@ -176,7 +181,7 @@ pub fn game(nodes: usize, picks: &[u32]) -> Result<Tally, Forfeit> {
             break;
         };
         state.apply_move(mov).unwrap();
-        state.current_player = Player::AI;
+        state.current_player = player;
     }
     Ok(tally)
 }
@@ -200,12 +205,12 @@ pub fn games(seed: u64, games: usize) -> Vec<(usize, Vec<u32>)> {
         .collect()
 }
 
-/// The seeded games tallied together, a forfeited game by the routes it
-/// tried plus one bug.
-pub fn sweep(seed: u64, count: usize) -> Tally {
+/// The seeded games drawn as `player` and tallied together, a forfeited
+/// game by the routes it tried plus one bug.
+pub fn sweep(seed: u64, count: usize, player: Player) -> Tally {
     let mut total = Tally::default();
     for (nodes, picks) in games(seed, count) {
-        match game(nodes, &picks) {
+        match game(nodes, &picks, player) {
             Ok(tally) => total.add(&tally),
             Err(forfeit) => {
                 total.add(&forfeit.tally);

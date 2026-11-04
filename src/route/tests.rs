@@ -274,6 +274,18 @@ static TALLY: std::sync::Mutex<sweep::Tally> = std::sync::Mutex::new(sweep::Tall
     bugs: std::collections::BTreeMap::new(),
 });
 
+/// The same over the human-rules games.
+static HUMAN_TALLY: std::sync::Mutex<sweep::Tally> = std::sync::Mutex::new(sweep::Tally {
+    tried: 0,
+    room: 0,
+    no_spot: 0,
+    no_leg: 0,
+    shape: std::collections::BTreeMap::new(),
+    topology: 0,
+    bug: 0,
+    bugs: std::collections::BTreeMap::new(),
+});
+
 /// Random games to play; an unoptimised build takes some twenty seconds
 /// over each. The games are the same on every run, so a result here is
 /// reproducible and the aggregate below is a fixed number.
@@ -299,11 +311,23 @@ proptest! {
     /// failing position prints as a bench fixture.
     #[test]
     fn no_listed_move_fails_as_a_bug(nodes in 4usize..=12, picks in prop::collection::vec(any::<u32>(), 36)) {
-        let tally = sweep::game(nodes, &picks);
+        let tally = sweep::game(nodes, &picks, Player::AI);
         prop_assert!(tally.is_ok(), "{}", tally.as_ref().unwrap_err());
         let mut total = TALLY.lock().unwrap();
         total.add(&tally.unwrap());
         eprintln!("{total}");
+        prop_assert_eq!(total.bug, 0);
+    }
+
+    /// The same games drawn at the human clearances, which routeMove and
+    /// applyFaceMove use for the player at the keyboard.
+    #[test]
+    fn no_listed_move_fails_as_a_bug_for_the_human(nodes in 4usize..=12, picks in prop::collection::vec(any::<u32>(), 36)) {
+        let tally = sweep::game(nodes, &picks, Player::Human);
+        prop_assert!(tally.is_ok(), "{}", tally.as_ref().unwrap_err());
+        let mut total = HUMAN_TALLY.lock().unwrap();
+        total.add(&tally.unwrap());
+        eprintln!("human {total}");
         prop_assert_eq!(total.bug, 0);
     }
 }

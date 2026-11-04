@@ -196,12 +196,12 @@ pub(super) fn search(
     Err(Unroutable::Room)
 }
 
-/// Whether any exit triangle is reachable from any entry triangle through
-/// the free triangles, parity aside.
+/// Whether an exit triangle can be reached from an entry triangle through
+/// the free triangles, parity aside, crossing at least one edge: a loop's
+/// exits are its entries, and a path has to go somewhere first.
 pub(super) fn reachable(arena: &Arena, entries: &[Entry], exits: &[Entry]) -> bool {
-    let goal: std::collections::HashSet<usize> =
-        exits.iter().flat_map(|e| e.tris.iter().copied()).collect();
-    let mut seen: std::collections::HashSet<usize> = HashSet::new();
+    let goal: HashSet<usize> = exits.iter().flat_map(|e| e.tris.iter().copied()).collect();
+    let mut seen: HashSet<usize> = HashSet::new();
     let mut stack: Vec<usize> = entries
         .iter()
         .flat_map(|e| e.tris.iter().copied())
@@ -210,12 +210,12 @@ pub(super) fn reachable(arena: &Arena, entries: &[Entry], exits: &[Entry]) -> bo
         if !seen.insert(t) {
             continue;
         }
-        if goal.contains(&t) {
-            return true;
-        }
         let verts = arena.ccw_vertices(t);
         for k in 0..3 {
             if let Some((next, _)) = arena.across(t, verts[k], verts[(k + 1) % 3]) {
+                if goal.contains(&next) {
+                    return true;
+                }
                 if !seen.contains(&next) {
                     stack.push(next);
                 }
