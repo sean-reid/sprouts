@@ -406,12 +406,13 @@ export async function plainWheel(page: Page, deltaY: number): Promise<number> {
 }
 
 // Installed before the page loads so a test can hold one request to the
-// worker back, so the worker answers a newer request first, or fail one
-// with an error reply the worker never saw.
+// worker back, so the worker answers a newer request first, fail one with
+// an error reply the worker never saw, or answer one with a given result.
 export function interceptWorkerMessages(): void {
   const hooks = window as unknown as {
     holdNext: typeof holdNext;
     failNext: typeof failNext;
+    answerNext: typeof answerNext;
     latestNodes?: BoardNode[];
     latestLines?: BoardLine[];
     latestCurve?: Cubic[];
@@ -422,8 +423,10 @@ export function interceptWorkerMessages(): void {
   const post = Worker.prototype.postMessage;
   let hold: { method: string; ms: number } | null = null;
   let fail: { method: string; error: string } | null = null;
+  let answer: { method: string; result: unknown } | null = null;
   hooks.holdNext = holdNext;
   hooks.failNext = failNext;
+  hooks.answerNext = answerNext;
   // Every reply that carries a board leaves its nodes on the window, so a
   // test reads node positions from the engine rather than the layout; a
   // fit reply leaves its curve.
@@ -463,11 +466,20 @@ export function interceptWorkerMessages(): void {
   function failNext(method: string, error: string): void {
     fail = { method, error };
   }
+  function answerNext(method: string, result: unknown): void {
+    answer = { method, result };
+  }
   Worker.prototype.postMessage = function (this: Worker, ...args: unknown[]) {
     const envelope = args[0] as { id?: number; method?: string } | undefined;
     if (fail && envelope?.method === fail.method) {
       const data = { id: envelope.id, ok: false, error: fail.error };
       fail = null;
+      setTimeout(() => this.dispatchEvent(new MessageEvent("message", { data })));
+      return;
+    }
+    if (answer && envelope?.method === answer.method) {
+      const data = { id: envelope.id, ok: true, result: answer.result };
+      answer = null;
       setTimeout(() => this.dispatchEvent(new MessageEvent("message", { data })));
       return;
     }
@@ -487,6 +499,17 @@ export function holdNext(page: Page, method: string, ms: number): Promise<void> 
       (window as unknown as { holdNext: (m: string, ms: number) => void }).holdNext(m, delay);
     },
     [method, ms] as const,
+  );
+}
+
+// Answers the next request for `method` with `result` in place of the
+// worker, so a test drives a reply the engine would not give on this board.
+export function answerNext(page: Page, method: string, result: unknown): Promise<void> {
+  return page.evaluate(
+    ([m, r]) => {
+      (window as unknown as { answerNext: (m: string, r: unknown) => void }).answerNext(m, r);
+    },
+    [method, result] as const,
   );
 }
 
