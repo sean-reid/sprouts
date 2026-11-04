@@ -5,7 +5,7 @@ import {
   type BrowserContextOptions,
   type Page,
 } from "@playwright/test";
-import { decodeRecord, hasStroke } from "../../web/history";
+import { decodeRecord, DRIFT_TOLERANCE, hasStroke } from "../../web/history";
 import type { Fixture } from "../../web/record";
 
 // Every step here replays moves through the engine, which on the 1000
@@ -141,10 +141,10 @@ test("jumping to a board where the AI is to move enters review and keeps the tai
   await expect(current(page)).toHaveText(/^2\. AI/);
 });
 
-// A link rounds the drawn geometry to its quantum and the visitor's board
-// settles from that, so a settled game comes back within a unit per node
-// rather than stroke for stroke.
-const SETTLED_REPLAY_UNITS = 1;
+// The exchange travels as topology, so the visitor's router redraws the
+// lines and the settle moves the nodes from there; the rehearsal admits a
+// routed node within DRIFT_TOLERANCE of the record and the board follows.
+const SETTLED_REPLAY_UNITS = DRIFT_TOLERANCE;
 
 test("a share link reopens the game in review and steps through it", async ({ page, browser }) => {
   await openBoard(page);

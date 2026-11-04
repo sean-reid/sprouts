@@ -562,14 +562,17 @@ pub fn rehearse(plan: Rehearsal) -> Result<Rehearsed, String> {
             LinkMove::Drawn { mov } => apply(&mut state, mov),
             LinkMove::Routed { face, at } => apply_face_move(&mut state, face, at),
         };
-        if matches!(outcome, Outcome::Rejected { .. }) {
-            return Ok(Rehearsed {
-                refused: Some(index),
-                nodes,
-            });
-        }
-        if routed {
-            nodes[index] = state.lines.last().map(|line| line.new_node_pos);
+        // The node as the move applied it, before the settle moved it, which
+        // is what the link recorded.
+        match outcome {
+            Outcome::Applied { mov, .. } if routed => nodes[index] = Some(mov.new_node_pos),
+            Outcome::Applied { .. } => {}
+            Outcome::Rejected { .. } => {
+                return Ok(Rehearsed {
+                    refused: Some(index),
+                    nodes,
+                })
+            }
         }
     }
     Ok(Rehearsed {
@@ -608,14 +611,28 @@ pub fn apply_face_move(state: &mut GameState, mov: FaceMove, at: Point) -> Outco
         .map_err(|why| illegal(state, &listed, why))
         .and_then(|()| route::route(state, &listed).map_err(|why| unroutable(&listed, why)))
         .and_then(|routed| {
-            let line = state.entering(types::Move::from_segments(
-                routed.from_node,
-                routed.to_node,
-                routed.polyline,
-                routed.segments,
-                at,
-                routed.player,
-            ));
+            // A settling game keeps a node that is already on its grid and
+            // on the curve, so a recorded node lands where it was recorded.
+            let line = if state.settle_version > 0 {
+                types::Move::as_given(
+                    routed.from_node,
+                    routed.to_node,
+                    routed.polyline,
+                    routed.segments,
+                    at,
+                    routed.player,
+                )
+            } else {
+                types::Move::from_segments(
+                    routed.from_node,
+                    routed.to_node,
+                    routed.polyline,
+                    routed.segments,
+                    at,
+                    routed.player,
+                )
+            };
+            let line = state.entering(line);
             topology(state, &line).map(|_| line)
         });
     match drawn {
@@ -1193,12 +1210,12 @@ mod tests {
             apply(&mut replayed, chord.clone()),
             Outcome::Applied { .. }
         ));
-        assert!(matches!(
-            apply_face_move(&mut replayed, face.clone(), reply.new_node_pos),
-            Outcome::Applied { .. }
-        ));
-        let placed = replayed.lines.last().unwrap().new_node_pos;
-        assert_eq!(rehearsed.nodes, vec![None, Some(placed)]);
+        let Outcome::Applied { mov: placed, .. } =
+            apply_face_move(&mut replayed, face.clone(), reply.new_node_pos)
+        else {
+            panic!("the reply was rejected");
+        };
+        assert_eq!(rehearsed.nodes, vec![None, Some(placed.new_node_pos)]);
         let wrong = FaceMove {
             at_a: Some(1),
             ..face.clone()
@@ -1964,6 +1981,50 @@ mod tests {
             .iter()
             .zip(&records)
             .all(|(a, b)| a.board == b.board && a.is_empty() == b.is_empty()));
+    }
+
+    /// A settled game's rehearsal reports each routed node as the move
+    /// applied it, not where the settle took it, so the drift the page
+    /// measures against the record is zero.
+    #[test]
+    fn a_rehearsal_reports_the_routed_node_as_applied_not_as_settled() {
+        let mut state = GameState::new(4);
+        let RouteReply::Routed { mov, .. } = route_move(&state, face_move(0, 1, vec![])) else {
+            panic!("the chord did not route");
+        };
+        let Outcome::Applied { mov: first, .. } = apply(&mut state, mov) else {
+            panic!("the chord was rejected");
+        };
+        state.current_player = Player::AI;
+        let reply = face_move(2, 3, vec![]);
+        let Outcome::Applied { mov: second, .. } =
+            apply_face_move(&mut state, reply.clone(), Point::new(500.0, 500.0))
+        else {
+            panic!("the reply was rejected");
+        };
+        let settled = state.lines[1].new_node_pos;
+        assert_ne!(
+            settled, second.new_node_pos,
+            "the settle left the node where it was"
+        );
+        let plan = Rehearsal {
+            router_version: ROUTER_VERSION,
+            settle_version: SETTLE_VERSION,
+            initial_nodes: 4,
+            board_size: 1000,
+            first_player: Player::Human,
+            nodes: None,
+            moves: vec![
+                LinkMove::Drawn { mov: first },
+                LinkMove::Routed {
+                    face: reply,
+                    at: second.new_node_pos,
+                },
+            ],
+        };
+        let rehearsed = rehearse(plan).unwrap();
+        assert_eq!(rehearsed.refused, None);
+        assert_eq!(rehearsed.nodes[1], Some(second.new_node_pos));
     }
 
     /// A record from a newer settle would replay through this one and show
