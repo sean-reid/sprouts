@@ -118,7 +118,7 @@ export async function expectNodeDrawnAt(page: Page, at: Client): Promise<void> {
 
 export const PLACING_HINT = /Drag the dot/;
 
-// Sets the starting node count and starts a game with it.
+// Types the starting node count and starts a game with it.
 export async function startGame(page: Page, count: number): Promise<void> {
   await page.locator("#nodeCount").fill(String(count));
   await page.locator("#startBtn").click();

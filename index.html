@@ -10,11 +10,21 @@
     <h1>SPROUTS</h1>
 
     <div class="toolbar">
-      <div class="controls">
-        <label class="node-count">
-          <span>Nodes</span>
-          <input id="nodeCount" type="number" inputmode="numeric" min="2" max="24" value="4" />
-        </label>
+      <div class="controls game">
+        <div class="node-count" role="group" aria-label="Nodes">
+          <span id="nodeCountLabel">Nodes</span>
+          <button id="fewerBtn" type="button" aria-label="Fewer nodes">&minus;</button>
+          <input
+            id="nodeCount"
+            type="number"
+            inputmode="numeric"
+            min="2"
+            max="24"
+            value="4"
+            aria-labelledby="nodeCountLabel"
+          />
+          <button id="moreBtn" type="button" aria-label="More nodes">+</button>
+        </div>
         <button id="startBtn">New Game</button>
         <button id="undoBtn" disabled>Undo</button>
       </div>

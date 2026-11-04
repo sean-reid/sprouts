@@ -8,8 +8,10 @@ import {
   interceptWorkerMessages,
   nodeOnScreen,
   openBoard,
+  playExchange,
   shot,
   startGame,
+  strokeCells,
 } from "./helpers";
 
 // One 800 ms search plus up to 800 ms of routing. The runner measured
@@ -84,12 +86,76 @@ test("the count is held to its range and comes back after a reload", async ({ pa
   await expectNodesDrawn(page, 5);
 });
 
-test("the node count input is a touch target", async ({ page }) => {
+test("plus on an untouched board re-lays it at once and arrows step the field", async ({
+  page,
+}) => {
+  const more = page.locator("#moreBtn");
+  await more.click();
+  await more.click();
+  await more.click();
+  await expect(page.locator("#nodeCount")).toHaveValue("7");
+  await expect(page.locator("#status")).toHaveText(`7 nodes. ${FRESH}`);
+  await expect(page.locator("#startBtn")).toHaveText("New Game");
+  await expectNodesDrawn(page, 7);
+  await shot(page, "stepper-7");
+
+  await page.locator("#nodeCount").focus();
+  await page.keyboard.press("ArrowDown");
+  await expect(page.locator("#nodeCount")).toHaveValue("6");
+  await expect(page.locator("#status")).toHaveText(`6 nodes. ${FRESH}`);
+  await expectNodesDrawn(page, 6);
+  await page.locator("#fewerBtn").click();
+  await expect(page.locator("#status")).toHaveText(`5 nodes. ${FRESH}`);
+  await expectNodesDrawn(page, 5);
+});
+
+test("once a move is played the count waits on the start button", async ({ page }) => {
+  await playExchange(page);
+  const before = await strokeCells(page);
+  const canvas = await page.locator("#canvas").boundingBox();
+  await page.locator("#moreBtn").click();
+  await expect(page.locator("#nodeCount")).toHaveValue("5");
+  await expect(page.locator("#status")).toHaveText("5 nodes");
+  await expect(page.locator("#startBtn")).toHaveText("New game, 5 nodes");
+  await expect(page.locator("#moveList li")).toHaveCount(2);
+  expect(await strokeCells(page)).toEqual(before);
+  expect(await page.locator("#canvas").boundingBox()).toEqual(canvas);
+  await shot(page, "stepper-pending");
+
+  await page.locator("#fewerBtn").click();
+  await expect(page.locator("#status")).toHaveText("4 nodes");
+  await expect(page.locator("#startBtn")).toHaveText("New Game");
+  await expect(page.locator("#moveList li")).toHaveCount(2);
+
+  await page.locator("#moreBtn").click();
+  await page.locator("#startBtn").click();
+  await expect(page.locator("#status")).toHaveText(FRESH);
+  await expect(page.locator("#startBtn")).toHaveText("New Game");
+  await expect(page.locator("#moveList li")).toHaveCount(0);
+  await expectNodesDrawn(page, 5);
+  expect(await page.locator("#canvas").boundingBox()).toEqual(canvas);
+});
+
+test("the stepper stops at 2 and 24", async ({ page }) => {
+  await page.locator("#nodeCount").fill("2");
+  await expect(page.locator("#fewerBtn")).toBeDisabled();
+  await expect(page.locator("#moreBtn")).toBeEnabled();
+  await expect(page.locator("#status")).toHaveText(`2 nodes. ${FRESH}`);
+  await expectNodesDrawn(page, 2);
+  await page.locator("#nodeCount").fill("24");
+  await expect(page.locator("#moreBtn")).toBeDisabled();
+  await expect(page.locator("#fewerBtn")).toBeEnabled();
+  await page.locator("#fewerBtn").click();
+  await expect(page.locator("#nodeCount")).toHaveValue("23");
+  await expect(page.locator("#moreBtn")).toBeEnabled();
+});
+
+test("the stepper and the start button are touch targets", async ({ page }) => {
   test.skip(test.info().project.name !== "mobile", "sized for the 375 wide layout");
-  const input = await page.locator("#nodeCount").boundingBox();
-  const button = await page.locator("#startBtn").boundingBox();
-  expect(input?.height).toBeGreaterThanOrEqual(44);
-  expect(input?.width).toBeGreaterThanOrEqual(44);
-  expect(button?.height).toBeGreaterThanOrEqual(44);
+  for (const id of ["#fewerBtn", "#nodeCount", "#moreBtn", "#startBtn"]) {
+    const box = await page.locator(id).boundingBox();
+    expect(box?.height, id).toBeGreaterThanOrEqual(44);
+    expect(box?.width, id).toBeGreaterThanOrEqual(44);
+  }
   await shot(page, "node-count-mobile");
 });

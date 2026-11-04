@@ -59,6 +59,7 @@ const DEFAULT_NODES = 4;
 // Screen pixels around the placement dot where a press takes hold of it.
 const DOT_GRAB_PX = 22;
 const PLACING_HINT = "Drag the dot to adjust it, or press anywhere else to place it";
+const DRAW_HINT = "Draw a line between two nodes";
 
 type StatusKind = "" | "win" | "lose";
 
@@ -72,6 +73,8 @@ const canvas = byId<HTMLCanvasElement>("canvas");
 const statusEl = byId<HTMLElement>("status");
 const undoBtn = byId<HTMLButtonElement>("undoBtn");
 const nodeCountEl = byId<HTMLInputElement>("nodeCount");
+const fewerBtn = byId<HTMLButtonElement>("fewerBtn");
+const moreBtn = byId<HTMLButtonElement>("moreBtn");
 const startBtn = byId<HTMLButtonElement>("startBtn");
 const turnEl = byId<HTMLElement>("turn");
 const turnText = byId<HTMLElement>("turnText");
@@ -889,25 +892,49 @@ function resetTable(): void {
   closeModal();
 }
 
-// A fresh game forgets the saved one and the link; the fallback after a
-// failed load keeps both so the next move, not the failure, replaces them.
+function clampCount(value: number): number {
+  const low = Number(nodeCountEl.min);
+  const high = Number(nodeCountEl.max);
+  if (!Number.isFinite(value)) return DEFAULT_NODES;
+  return Math.min(Math.max(Math.round(value), low), high);
+}
+
 // The input's value, rounded and held to its range, written back so the
 // field shows what the game got.
 function chosenNodeCount(): number {
-  const typed = Math.round(nodeCountEl.valueAsNumber);
-  const low = Number(nodeCountEl.min);
-  const high = Number(nodeCountEl.max);
-  const count = Number.isFinite(typed) ? Math.min(Math.max(typed, low), high) : DEFAULT_NODES;
+  const count = clampCount(nodeCountEl.valueAsNumber);
   showNodeCount(count);
   return count;
 }
 
+// The start button names the count only while it differs from the game
+// on the table.
 function showNodeCount(count: number): void {
   nodeCountEl.value = String(count);
+  fewerBtn.disabled = count <= Number(nodeCountEl.min);
+  moreBtn.disabled = count >= Number(nodeCountEl.max);
+  startBtn.textContent = count === timeline.initialNodes ? "New Game" : `New game, ${count} nodes`;
 }
 
-async function newGame(nodeCount: number, fresh = true): Promise<void> {
-  showNodeCount(nodeCount);
+// A board with nothing played on it re-lays at the new count; any other
+// board stays and the count waits on the start button.
+function setNodeCount(count: number): void {
+  showNodeCount(count);
+  if (busy()) return;
+  if (timeline.moves.length > 0 || state.reviewing) {
+    setStatus(`${count} nodes`);
+  } else if (count !== timeline.initialNodes) {
+    void newGame(count, true, `${count} nodes. ${DRAW_HINT}`);
+  }
+}
+
+function stepCount(delta: number): void {
+  setNodeCount(clampCount(nodeCountEl.valueAsNumber + delta));
+}
+
+// A fresh game forgets the saved one and the link; the fallback after a
+// failed load keeps both so the next move, not the failure, replaces them.
+async function newGame(nodeCount: number, fresh = true, hint = DRAW_HINT): Promise<void> {
   resetTable();
   shared = false;
   pinnedReview = false;
@@ -917,6 +944,7 @@ async function newGame(nodeCount: number, fresh = true): Promise<void> {
   }
   const epoch = gameEpoch;
   timeline = new History(nodeCount, BOARD_SIZE, firstPlayer);
+  showNodeCount(nodeCount);
   state.currentPlayer = firstPlayer;
   updateTurn();
   setBoardSize(timeline.boardSize);
@@ -929,7 +957,7 @@ async function newGame(nodeCount: number, fresh = true): Promise<void> {
     if (epoch !== gameEpoch) return;
     timeline.nodes = startingNodes(state.nodes, nodeCount);
     if (state.currentPlayer === "ai") startAITurn();
-    else setStatus("Draw a line between two nodes");
+    else setStatus(hint);
   } catch (error) {
     if (epoch === gameEpoch) setStatus("Failed to start game: " + describe(error), "lose");
   }
@@ -942,8 +970,8 @@ async function restore(record: GameRecord, fromLink: boolean): Promise<void> {
   const epoch = gameEpoch;
   shared = fromLink;
   pinnedReview = fromLink;
-  showNodeCount(record.initialNodes);
   timeline = History.from(record);
+  showNodeCount(timeline.initialNodes);
   if (fromLink) timeline.cursor = timeline.moves.length;
   const target = timeline.cursor;
   timeline.cursor = 0;
@@ -968,7 +996,7 @@ async function restore(record: GameRecord, fromLink: boolean): Promise<void> {
     return;
   }
   if (!state.reviewing && timeline.atStart && state.currentPlayer === "human") {
-    setStatus("Draw a line between two nodes");
+    setStatus(DRAW_HINT);
   } else {
     settleAfterSeek();
   }
@@ -1078,6 +1106,15 @@ function wireInput(): void {
   });
 
   startBtn.addEventListener("click", () => void newGame(chosenNodeCount()));
+  fewerBtn.addEventListener("click", () => stepCount(-1));
+  moreBtn.addEventListener("click", () => stepCount(1));
+  // A typed value counts once it is whole and in range; anything else
+  // waits for the field to settle and is held to the range then.
+  nodeCountEl.addEventListener("input", () => {
+    const typed = nodeCountEl.valueAsNumber;
+    if (Number.isInteger(typed) && typed === clampCount(typed)) setNodeCount(typed);
+  });
+  nodeCountEl.addEventListener("change", () => setNodeCount(chosenNodeCount()));
   nodeCountEl.addEventListener("keydown", (e) => {
     if (e.key === "Enter") void newGame(chosenNodeCount());
   });

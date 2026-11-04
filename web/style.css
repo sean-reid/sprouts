@@ -70,6 +70,19 @@ h1 {
   min-height: 44px;
 }
 
+/* The start label grows with the count, so it breaks inside the button
+   rather than adding a row above the board. */
+.controls.game {
+  flex-wrap: nowrap;
+}
+
+#startBtn {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 4px 10px;
+  line-height: 1.3;
+}
+
 .node-count {
   display: inline-flex;
   align-items: center;
@@ -81,10 +94,18 @@ h1 {
   color: #a0a0a0;
 }
 
+.node-count button {
+  min-width: 44px;
+  padding: 0;
+  font-size: 18px;
+  line-height: 1;
+}
+
 .node-count input {
-  width: 4.5em;
+  width: 44px;
   min-height: 44px;
-  padding: 0 8px;
+  padding: 0 4px;
+  appearance: textfield;
   background: #1a1a1a;
   border: 1px solid #2a2a2a;
   border-radius: 4px;
@@ -92,6 +113,25 @@ h1 {
   font-size: 14px;
   text-align: center;
   font-variant-numeric: tabular-nums;
+}
+
+/* The word does not fit the 375 wide row beside the stepper, New Game and
+   Undo; the group keeps its name for assistive tech. */
+@media (max-width: 767px) {
+  #nodeCountLabel {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+}
+
+.node-count input::-webkit-inner-spin-button,
+.node-count input::-webkit-outer-spin-button {
+  appearance: none;
+  margin: 0;
 }
 
 button {
