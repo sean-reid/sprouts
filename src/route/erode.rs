@@ -771,7 +771,6 @@ impl Arena {
 
     /// Whether the triangle holding `p` is free; a point on an edge or a
     /// vertex is free only if every triangle there is.
-    #[cfg(test)]
     pub(super) fn free_at(&self, p: Point) -> bool {
         let inner =
             |f: spade::handles::FaceHandle<'_, spade::handles::PossiblyOuterTag, _, _, _, _>| {

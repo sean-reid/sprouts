@@ -197,34 +197,45 @@ fn plan(
             );
         }
     }
-    let path = split_pinches(path, c / 4.0);
+    let path = split_pinches(path, c / 4.0, |q| arena.free_at(q));
     let path = uncross(untwist_legs(path)).ok_or(Unroutable::Shape("tangled"))?;
     Ok((arena, path))
 }
 
-/// Two legs of a path the funnel pulled through the same vertex are set a
-/// little apart there, each to its own left, so they leave the vertex on
-/// opposite sides and the relaxation can open them further instead of
-/// crossing them.
-fn split_pinches(mut path: Vec<Point>, by: f64) -> Vec<Point> {
+/// Two legs of a path the funnel pulled through the same vertex in
+/// opposite directions are set a little apart there, each to its own
+/// left where that is free, so they leave the vertex on opposite sides
+/// and the relaxation can open them further instead of crossing them. A
+/// leg whose left is a wall stays on the vertex, and legs through one
+/// vertex the same way are left as they are.
+fn split_pinches(mut path: Vec<Point>, by: f64, free: impl Fn(Point) -> bool) -> Vec<Point> {
     let n = path.len();
-    let left = |path: &[Point], k: usize| {
+    let heading = |path: &[Point], k: usize| {
         let (p, q) = (path[k - 1], path[k + 1]);
         let (dx, dy) = (q.x - p.x, q.y - p.y);
         let len = (dx * dx + dy * dy).sqrt();
-        if len < 1e-9 {
-            (0.0, 0.0)
-        } else {
-            (dy / len * by, -dx / len * by)
-        }
+        (len >= 1e-9).then(|| (dx / len, dy / len))
     };
-    for i in 1..n.saturating_sub(1) {
-        for j in i + 1..n - 1 {
-            if path[i].distance_to(&path[j]) < 1e-9 {
-                let (a, b) = (left(&path, i), left(&path, j));
-                path[i] = Point::new(path[i].x + a.0, path[i].y + a.1);
-                path[j] = Point::new(path[j].x + b.0, path[j].y + b.1);
-            }
+    let interior: Vec<usize> = (1..n.saturating_sub(1)).collect();
+    let mut moved: Vec<Option<Point>> = vec![None; n];
+    for &i in &interior {
+        let Some((dx, dy)) = heading(&path, i) else {
+            continue;
+        };
+        let pinched = interior.iter().any(|&j| {
+            j != i
+                && path[i].distance_to(&path[j]) < 1e-9
+                && heading(&path, j).is_some_and(|(ex, ey)| dx * ex + dy * ey < 0.0)
+        });
+        if !pinched {
+            continue;
+        }
+        let left = Point::new(path[i].x + dy * by, path[i].y - dx * by);
+        moved[i] = free(left).then_some(left);
+    }
+    for (i, at) in moved.into_iter().enumerate() {
+        if let Some(at) = at {
+            path[i] = at;
         }
     }
     path

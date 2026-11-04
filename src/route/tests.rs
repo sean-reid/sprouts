@@ -905,6 +905,62 @@ fn a_chord_between_ends_inside_each_others_guard_routes_round_a_detour() {
     );
 }
 
+/// Two legs through one vertex in opposite directions are set a quarter
+/// clearance apart, each to its own left; a vertex revisited the same way
+/// stays; a vertex three legs pinch at moves all three.
+#[test]
+fn split_pinches_parts_opposite_legs_and_leaves_parallel_ones() {
+    let v = p(10.0, 0.0);
+    let pinch = vec![p(0.0, 0.0), v, p(20.0, 5.0), p(20.0, -5.0), v, p(0.0, 0.0)];
+    let split = split_pinches(pinch.clone(), 2.0, |_| true);
+    assert_eq!(split[0], pinch[0]);
+    assert_eq!(split[5], pinch[5]);
+    assert!((split[1].distance_to(&v) - 2.0).abs() < 1e-9);
+    assert!((split[4].distance_to(&v) - 2.0).abs() < 1e-9);
+    assert!(split[1].y < 0.0 && split[4].y > 0.0, "{split:?}");
+
+    let same_way = vec![
+        p(-10.0, -10.0),
+        p(0.0, 0.0),
+        v,
+        p(20.0, 0.0),
+        p(20.0, 10.0),
+        p(0.0, 10.0),
+        p(0.0, 0.0),
+        v,
+        p(20.0, -10.0),
+    ];
+    assert_eq!(split_pinches(same_way.clone(), 2.0, |_| true), same_way);
+
+    let triple = vec![
+        p(-5.0, 0.0),
+        v,
+        p(20.0, 0.0),
+        v,
+        p(0.0, 0.0),
+        v,
+        p(20.0, 10.0),
+    ];
+    let split = split_pinches(triple, 2.0, |_| true);
+    for k in [1, 3, 5] {
+        assert!((split[k].distance_to(&v) - 2.0).abs() < 1e-9, "{split:?}");
+    }
+    assert!(split[1].y < 0.0 && split[3].y > 0.0 && split[5].y < 0.0);
+}
+
+/// A leg whose left is not free stays on the vertex while the other leg
+/// still parts from it, and legs with no free left both stay put.
+#[test]
+fn split_pinches_keeps_the_displaced_points_free() {
+    let v = p(10.0, 0.0);
+    let pinch = vec![p(0.0, 0.0), v, p(20.0, 5.0), p(20.0, -5.0), v, p(0.0, 0.0)];
+    let split = split_pinches(pinch.clone(), 2.0, |q| q.y >= 0.0);
+    assert_eq!(split[1], v, "{split:?}");
+    assert!((split[4].distance_to(&v) - 2.0).abs() < 1e-9 && split[4].y > 0.0);
+    let stuck = split_pinches(pinch.clone(), 2.0, |q| q.distance_to(&v) < 1.0);
+    assert_eq!(stuck, pinch);
+}
+
 /// Two lines leaving one node 11 degrees apart make a wedge whose offset
 /// curves meet at an exact mitre ten clearances out. Every point within
 /// the clearance of both walls is outside the eroded region, the mouth
