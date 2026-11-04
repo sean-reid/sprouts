@@ -125,6 +125,7 @@ h1 {
   min-height: 44px;
   padding: 0 4px;
   appearance: textfield;
+  -moz-appearance: textfield;
   background: #1a1a1a;
   border: 1px solid #2a2a2a;
   border-radius: 4px;
@@ -132,6 +133,12 @@ h1 {
   font-size: 14px;
   text-align: center;
   font-variant-numeric: tabular-nums;
+}
+
+.node-count input::-webkit-inner-spin-button,
+.node-count input::-webkit-outer-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
 }
 
 @media (max-width: 767px) {
