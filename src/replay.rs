@@ -242,27 +242,29 @@ fn validate_for(state: &GameState, mov: &Move) -> Result<(), Rejection> {
     protocol::check(state, mov)
 }
 
-/// The board after every recorded move, each checked as the page would.
-#[cfg(test)]
-pub(crate) fn play(fixture: &Fixture) -> GameState {
-    play_as(fixture, Player::Human)
-}
-
-/// `play` with `first` making the first move.
+/// The board after every recorded move, each checked as the page would,
+/// with `first` making the first move.
 #[cfg(test)]
 pub(crate) fn play_as(fixture: &Fixture, first: Player) -> GameState {
     let nodes = fixture
         .nodes
         .as_ref()
         .map(|nodes| nodes.iter().map(|p| Point::new(p[0], p[1])).collect());
-    let mut state =
-        protocol::start(fixture.initial_nodes, fixture.board_size, first, nodes).unwrap();
+    let mut state = protocol::start(
+        fixture.initial_nodes,
+        fixture.board_size,
+        first,
+        nodes,
+        fixture.settle_version,
+    )
+    .unwrap();
     for (index, recorded) in fixture.moves.iter().enumerate() {
-        let mov = recorded.to_move(state.current_player, state.board_size);
-        if let Err(e) = validate_for(&state, &mov) {
-            panic!("move {index} rejected: {}", e.message);
-        }
+        let mov = recorded
+            .enter(&state)
+            .and_then(|mov| validate_for(&state, &mov).map(|()| mov))
+            .unwrap_or_else(|e| panic!("move {index} rejected: {}", e.message));
         state.apply_move(mov).unwrap();
+        settle::settle(&mut state);
     }
     state
 }
