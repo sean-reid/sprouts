@@ -438,6 +438,11 @@ pub const ROUTER_VERSION: u8 = 4;
 /// with no settling, replayed with none, so its strokes still fit.
 pub const SETTLE_VERSION: u8 = 1;
 
+/// Changes whenever `move_list` orders a position's moves differently. A
+/// link that names moves by index carries it, so a page listing moves
+/// another way refuses the link instead of replaying other moves.
+pub const MOVE_LIST_VERSION: u8 = 1;
+
 /// A game with its real geometry, for working out which moves the router
 /// redraws. `known` holds the face move of a line already known to be
 /// router output, which is then taken as read.
@@ -528,6 +533,7 @@ pub fn route_hash(plan: RouteHashPlan) -> Result<String, String> {
 pub enum LinkMove {
     Drawn { mov: Move },
     Routed { face: FaceMove, at: Point },
+    Indexed { index: usize, along: u8 },
 }
 
 /// A game as a share link carries it, for replaying before it is shared.
@@ -537,6 +543,10 @@ pub struct Rehearsal {
     pub router_version: u8,
     #[serde(default)]
     pub settle_version: u8,
+    /// The move list order the link's indices count in; only checked
+    /// when a move travels as an index.
+    #[serde(default)]
+    pub list_version: u8,
     pub initial_nodes: usize,
     pub board_size: usize,
     pub first_player: Player,
@@ -573,12 +583,25 @@ pub fn rehearse(plan: Rehearsal) -> Result<Rehearsed, String> {
         plan.nodes,
         plan.settle_version,
     )?;
+    let indexed = plan
+        .moves
+        .iter()
+        .any(|mov| matches!(mov, LinkMove::Indexed { .. }));
+    if indexed && plan.list_version != MOVE_LIST_VERSION {
+        return Err(format!(
+            "the link counts moves in list version {}, this engine is {MOVE_LIST_VERSION}",
+            plan.list_version
+        ));
+    }
     let mut nodes = vec![None; plan.moves.len()];
     for (index, mov) in plan.moves.into_iter().enumerate() {
-        let routed = matches!(mov, LinkMove::Routed { .. });
+        let routed = !matches!(mov, LinkMove::Drawn { .. });
         let outcome = match mov {
             LinkMove::Drawn { mov } => apply(&mut state, mov),
             LinkMove::Routed { face, at } => apply_face_move(&mut state, face, at),
+            LinkMove::Indexed { index, along } => {
+                apply_indexed_move(&mut state, IndexedMove { index, along })
+            }
         };
         // The node as the move applied it, before the settle moved it, which
         // is what the link recorded.
@@ -631,13 +654,181 @@ pub(crate) fn redraws(state: &GameState, face: &face::Move, mov: &types::Move) -
 /// the point of the curve nearest `at`, and applies it as the player to
 /// move; the board then settles as it does for a drawn move.
 pub fn apply_face_move(state: &mut GameState, mov: FaceMove, at: Point) -> Outcome {
-    let listed: face::Move = mov.clone().into();
+    apply_listed(state, mov.into(), Spot::At(at))
+}
+
+/// A move as a share link names it: its index in `move_list` for the
+/// position, and where its node sits along the routed curve in 254ths of
+/// the length plus one, 0 leaving the node where the router puts it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Tsify)]
+#[serde(rename_all = "camelCase")]
+pub struct IndexedMove {
+    pub index: usize,
+    pub along: u8,
+}
+
+/// Every move of a game by index, in the order played.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Tsify)]
+pub struct Indexed {
+    pub moves: Vec<IndexedMove>,
+}
+
+/// Every legal move of the position in the order a share link's indices
+/// count: each representative of `FaceModel::search_moves` in its order,
+/// then the other members of its class as `ai::class_members_where`
+/// lists them, every move normalised as `moves_from` normalises it and
+/// listed once. `MOVE_LIST_VERSION` changes with this order.
+pub(crate) fn move_list(state: &GameState) -> Vec<ModelMove> {
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for listed in state.face.search_moves() {
+        let members = ai::class_members_where(state, &listed, usize::MAX, |_| true);
+        for mv in std::iter::once(listed).chain(members) {
+            let mv = normalised(&state.face, mv);
+            if seen.insert(mv.clone()) {
+                out.push(mv);
+            }
+        }
+    }
+    out
+}
+
+/// A chord between two different boundary pieces with its lower node
+/// first, `enclosed` sorted.
+fn normalised(face: &face::FaceModel, mut mv: ModelMove) -> ModelMove {
+    let split = face.component_of(mv.a, mv.at_a) == face.component_of(mv.b, mv.at_b);
+    if !split && mv.a > mv.b {
+        std::mem::swap(&mut mv.a, &mut mv.b);
+        std::mem::swap(&mut mv.at_a, &mut mv.at_b);
+    }
+    mv.enclosed.sort_unstable();
+    mv
+}
+
+/// Replays the real history as `classify` does and names each move by its
+/// index in the position's move list, with the human's node as its place
+/// along the curve and the AI's left to the router.
+pub fn index_moves(plan: Classification) -> Result<Indexed, String> {
+    let mut state = start(
+        plan.initial_nodes,
+        plan.board_size,
+        plan.first_player,
+        plan.nodes,
+        plan.settle_version,
+    )?;
+    let mut moves = Vec::with_capacity(plan.moves.len());
+    for (index, mov) in plan.moves.into_iter().enumerate() {
+        let mov = enter(mov, &state).map_err(|e| format!("move {index}: {}", e.message))?;
+        let face = topology(&state, &mov).map_err(|e| format!("move {index}: {}", e.message))?;
+        let face = normalised(&state.face, face);
+        // A bare node's loop reads as either of its sides; the list holds
+        // one of them.
+        let other = (face.a == face.b && face.at_a.is_none()).then(|| ModelMove {
+            enclosed: route::other_side(&state, &face),
+            ..face.clone()
+        });
+        let listed = move_list(&state)
+            .iter()
+            .position(|mv| *mv == face || other.as_ref() == Some(mv))
+            .ok_or_else(|| format!("move {index}: the position does not list {face:?}"))?;
+        let along = if state.current_player == Player::AI {
+            0
+        } else {
+            along_of(&mov.segments, mov.new_node_pos)
+        };
+        moves.push(IndexedMove {
+            index: listed,
+            along,
+        });
+        state
+            .apply_move(mov)
+            .map_err(|e| format!("move {index}: {}", e.message))?;
+        settle::settle(&mut state);
+    }
+    Ok(Indexed { moves })
+}
+
+/// Where a point sits along a curve, as a byte: 1 at the start, 255 at the
+/// end, measured on the flattening by sums and square roots only.
+fn along_of(segments: &[Cubic], at: Point) -> u8 {
+    let flat = curve::flatten(segments, curve::tolerance(1000));
+    let mut total = 0.0;
+    let mut before = 0.0;
+    let mut nearest = f64::INFINITY;
+    for pair in flat.windows(2) {
+        let (hit, off) = geometry::closest_point_on_segment(&pair[0], &pair[1], &at);
+        if off < nearest {
+            nearest = off;
+            before = total + pair[0].distance_to(&hit);
+        }
+        total += pair[0].distance_to(&pair[1]);
+    }
+    if total <= 0.0 {
+        return 1;
+    }
+    1 + ((before / total) * 254.0).round().clamp(0.0, 254.0) as u8
+}
+
+/// The point of the curve `along_of` named.
+fn point_along(segments: &[Cubic], along: u8) -> Point {
+    let flat = curve::flatten(segments, curve::tolerance(1000));
+    let total = geometry::polyline_length(&flat);
+    let mut wanted = total * f64::from(along.saturating_sub(1)) / 254.0;
+    for pair in flat.windows(2) {
+        let len = pair[0].distance_to(&pair[1]);
+        if wanted <= len && len > 0.0 {
+            let t = wanted / len;
+            return Point::new(
+                pair[0].x + (pair[1].x - pair[0].x) * t,
+                pair[0].y + (pair[1].y - pair[0].y) * t,
+            );
+        }
+        wanted -= len;
+    }
+    flat.last().copied().unwrap_or(Point::new(0.0, 0.0))
+}
+
+/// Draws the move a link named by index and applies it as the player to
+/// move; a link naming a move the position does not list is refused.
+pub fn apply_indexed_move(state: &mut GameState, mov: IndexedMove) -> Outcome {
+    let Some(listed) = move_list(state).into_iter().nth(mov.index) else {
+        return Outcome::Rejected {
+            rejection: Rejection::unroutable(
+                0,
+                "the link names a move this position does not list",
+            ),
+        };
+    };
+    let spot = if mov.along == 0 {
+        Spot::Router
+    } else {
+        Spot::Along(mov.along)
+    };
+    apply_listed(state, listed, spot)
+}
+
+/// Where a routed move's node goes.
+enum Spot {
+    /// Where the router put it.
+    Router,
+    /// The point of the curve nearest this.
+    At(Point),
+    /// The point `along_of` named.
+    Along(u8),
+}
+
+fn apply_listed(state: &mut GameState, listed: ModelMove, spot: Spot) -> Outcome {
     let drawn = state
         .face
         .check(&listed)
         .map_err(|why| illegal(state, &listed, why))
         .and_then(|()| route::route(state, &listed).map_err(|why| unroutable(&listed, why)))
         .and_then(|routed| {
+            let at = match spot {
+                Spot::Router => routed.new_node_pos,
+                Spot::At(at) => at,
+                Spot::Along(along) => point_along(&routed.segments, along),
+            };
             // A settling game keeps a node that is already on its grid and
             // on the curve, so a recorded node lands where it was recorded.
             let line = if state.settle_version > 0 {
@@ -1232,6 +1423,7 @@ mod tests {
         let plan = |face: FaceMove| Rehearsal {
             router_version: ROUTER_VERSION,
             settle_version: SETTLE_VERSION,
+            list_version: MOVE_LIST_VERSION,
             initial_nodes: 4,
             board_size: 1000,
             first_player: Player::Human,
@@ -2051,6 +2243,7 @@ mod tests {
         let plan = Rehearsal {
             router_version: ROUTER_VERSION,
             settle_version: SETTLE_VERSION,
+            list_version: MOVE_LIST_VERSION,
             initial_nodes: 4,
             board_size: 1000,
             first_player: Player::Human,
@@ -2100,6 +2293,7 @@ mod tests {
         let plan = Rehearsal {
             router_version: ROUTER_VERSION,
             settle_version: SETTLE_VERSION,
+            list_version: MOVE_LIST_VERSION,
             initial_nodes: 4,
             board_size: 1000,
             first_player: Player::Human,
@@ -2115,6 +2309,94 @@ mod tests {
         let rehearsed = rehearse(plan).unwrap();
         assert_eq!(rehearsed.refused, None);
         assert_eq!(rehearsed.nodes[1], Some(second.new_node_pos));
+    }
+
+    /// The index a link carries counts in this list, so its order and its
+    /// members hold for a position however the position was reached.
+    #[test]
+    fn the_move_list_is_the_same_however_the_position_is_reached() {
+        let mut state = GameState::new(6);
+        let RouteReply::Routed { mov, .. } = route_move(&state, face_move(0, 1, vec![])) else {
+            panic!("the chord did not route");
+        };
+        apply(&mut state, mov);
+        let listed = move_list(&state);
+        let distinct: std::collections::HashSet<_> = listed.iter().cloned().collect();
+        assert_eq!(distinct.len(), listed.len(), "a move is listed twice");
+        let mut again = state.clone();
+        let RouteReply::Routed { mov, .. } = route_move(&again, face_move(2, 3, vec![])) else {
+            panic!("the second chord did not route");
+        };
+        apply(&mut again, mov);
+        assert!(undo(&mut again));
+        assert_eq!(move_list(&again), listed);
+        for mv in &listed {
+            assert_eq!(state.face.check(mv), Ok(()), "{mv:?} is listed but illegal");
+        }
+    }
+
+    /// Sizes a link's indices have to cover on fresh boards, pinned because
+    /// MOVE_LIST_VERSION covers the list.
+    #[test]
+    fn the_move_list_of_a_fresh_board_has_the_pinned_size() {
+        let sizes: Vec<usize> = [2, 4, 9, 24]
+            .into_iter()
+            .map(|n| move_list(&GameState::new(n)).len())
+            .collect();
+        assert_eq!(sizes, vec![3, 19, 247, 4_799]);
+    }
+
+    #[test]
+    fn a_place_along_a_curve_comes_back_as_itself() {
+        let segments = vec![Cubic::line(
+            Point::new(100.0, 500.0),
+            Point::new(900.0, 500.0),
+        )];
+        assert_eq!(along_of(&segments, Point::new(100.0, 500.0)), 1);
+        assert_eq!(along_of(&segments, Point::new(900.0, 500.0)), 255);
+        let along = along_of(&segments, Point::new(300.0, 520.0));
+        let back = point_along(&segments, along);
+        assert!(
+            (back.x - 300.0).abs() <= 800.0 / 254.0 / 2.0 + 1e-9,
+            "{back:?}"
+        );
+        assert_eq!(back.y, 500.0);
+    }
+
+    /// A record named by indices replays to the same face moves, the
+    /// human's node near its place along the curve and the AI's where the
+    /// router puts it.
+    #[test]
+    fn indexed_moves_replay_to_the_recorded_face_moves() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("fixtures/saved/eight-moves-4n-1000.json");
+        let fixture = crate::replay::load(&path).unwrap();
+        let plan = Classification {
+            initial_nodes: fixture.initial_nodes,
+            board_size: fixture.board_size,
+            first_player: Player::Human,
+            nodes: None,
+            settle_version: fixture.settle_version,
+            moves: fixture.moves.iter().map(|m| m.wire()).collect(),
+            known: vec![None; fixture.moves.len()],
+        };
+        let indexed = index_moves(plan).unwrap().moves;
+        assert_eq!(indexed.len(), 8);
+        assert!(indexed.iter().step_by(2).all(|m| m.along > 0));
+        assert!(indexed.iter().skip(1).step_by(2).all(|m| m.along == 0));
+
+        let mut recorded = fixture.start();
+        let mut replayed = fixture.start();
+        for (m, mov) in fixture.moves.iter().zip(&indexed) {
+            let entered = m.enter(&recorded).unwrap();
+            let want = normalised(&recorded.face, topology(&recorded, &entered).unwrap());
+            let listed = move_list(&replayed)[mov.index].clone();
+            assert_eq!(listed, want);
+            let Outcome::Applied { .. } = apply_indexed_move(&mut replayed, *mov) else {
+                panic!("{mov:?} was refused");
+            };
+            apply(&mut recorded, m.wire());
+        }
     }
 
     /// A record from a newer settle would replay through this one and show
