@@ -748,6 +748,27 @@ impl Arena {
         Point::new((p.x + q.x + r.x) / 3.0, (p.y + q.y + r.y) / 3.0)
     }
 
+    /// Whether the triangle holding `p` is free; a point on an edge or a
+    /// vertex is free only if every triangle there is.
+    #[cfg(test)]
+    pub(super) fn free_at(&self, p: Point) -> bool {
+        let inner =
+            |f: spade::handles::FaceHandle<'_, spade::handles::PossiblyOuterTag, _, _, _, _>| {
+                f.as_inner().is_some_and(|f| self.free[f.fix().index()])
+            };
+        match self.cdt.locate(point2(p)) {
+            PositionInTriangulation::OnFace(f) => self.free[f.index()],
+            PositionInTriangulation::OnEdge(e) => {
+                let e = self.cdt.directed_edge(e);
+                inner(e.face()) && inner(e.rev().face())
+            }
+            PositionInTriangulation::OnVertex(v) => {
+                self.cdt.vertex(v).out_edges().all(|e| inner(e.face()))
+            }
+            _ => false,
+        }
+    }
+
     pub(super) fn walls(&self) -> &[(Point, Point)] {
         &self.walls.segments
     }

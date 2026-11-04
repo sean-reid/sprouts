@@ -852,3 +852,66 @@ fn the_sweep_fixture_replays_to_its_position() {
         assert_eq!(a.new_node_pos, b.new_node_pos, "line {}", a.id);
     }
 }
+
+/// Two lines leaving one node 11 degrees apart make a wedge whose offset
+/// curves meet at an exact mitre ten clearances out. Every point within
+/// the clearance of both walls is outside the eroded region, the mouth
+/// of the wedge is inside it, and the chords across the mouth draw.
+#[test]
+fn a_sharp_wedge_is_eroded_to_its_mitre_and_routes_across() {
+    let mut state = GameState::new(3);
+    let (a, b, c) = (p(200.0, 500.0), p(800.0, 440.0), p(800.0, 560.0));
+    for (node, at) in state.nodes.iter_mut().zip([a, b, c]) {
+        node.position = at;
+    }
+    state.current_player = Player::AI;
+    for (to, end) in [(1, b), (2, c)] {
+        let mid = p((a.x + end.x) / 2.0, (a.y + end.y) / 2.0);
+        state
+            .apply_move(Move::new(0, to, straight(a, end), mid, Player::AI, 1000))
+            .unwrap();
+        state.current_player = Player::AI;
+    }
+    let want = rules(&state);
+    let clearance = want.clearance + curve::tolerance(state.board_size);
+    let moves = listed(&state, 1, 2);
+    assert!(!moves.is_empty());
+    let face = state.face.corner_face(1, moves[0].at_a).unwrap();
+    let arena = erode::Arena::build(
+        &state,
+        face,
+        1,
+        2,
+        clearance,
+        want.node_clearance + curve::tolerance(state.board_size),
+        want.forgiven,
+    )
+    .unwrap();
+    let walls = [(a, b), (a, c)];
+    let within_both = |q: Point| {
+        walls
+            .iter()
+            .all(|(u, v)| crate::geometry::closest_point_on_segment(u, v, &q).1 < clearance)
+    };
+    let mut checked = 0;
+    for x in (200..800).step_by(2) {
+        for y in (440..=560).step_by(2) {
+            let q = p(x as f64, y as f64);
+            if within_both(q) {
+                assert!(
+                    !arena.free_at(q),
+                    "{q:?} is free within {clearance} of both walls"
+                );
+                checked += 1;
+            }
+        }
+    }
+    assert!(checked > 100, "{checked} points checked");
+    assert!(
+        arena.free_at(p(700.0, 500.0)),
+        "the mouth of the wedge is eroded away"
+    );
+    for mv in &moves {
+        route(&state, mv).unwrap_or_else(|e| panic!("{e:?}: {mv:?}"));
+    }
+}
