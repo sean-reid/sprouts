@@ -577,11 +577,13 @@ async function executeMove(): Promise<void> {
     return;
   }
 
-  recordMove(move, outcome, drawn);
+  recordMove(outcome, drawn);
   clearStroke();
   if (state.gameOver) showGameOver();
   else startAITurn();
 }
+
+type Applied = Extract<Outcome, { kind: "applied" }>;
 
 // The curve and node a move was drawn with, where the settle animation
 // starts from for the line the move added.
@@ -590,8 +592,10 @@ interface Drawn {
   newNodePos: Point;
 }
 
-function recordMove(move: Move, outcome: Applied, drawn?: Drawn, topology?: FaceMove): void {
-  timeline.push(move, topology, outcome.cutOff, drawn?.segments);
+// Records the move as the engine applied it, on its grid with the spline
+// it committed as, so a replay sends the engine its own input.
+function recordMove(outcome: Applied, drawn?: Drawn, topology?: FaceMove): void {
+  timeline.push(outcome.mov, topology, outcome.cutOff, outcome.segments);
   applySnapshot(outcome.snapshot, drawn);
   persist();
 }
@@ -600,7 +604,7 @@ function recordMove(move: Move, outcome: Applied, drawn?: Drawn, topology?: Face
 // an idle board or with a routed candidate up and nothing else pending.
 function canPlay(): boolean {
   const free = state.mode === "idle" || (state.mode === "placing" && state.routed);
-  const settled = !state.thinking && !submitting && !seeking;
+  const settled = !state.thinking && !submitting && !seeking && state.settling === null;
   return free && settled && !state.gameOver && !state.reviewing && state.currentPlayer === "human";
 }
 
@@ -672,8 +676,7 @@ function animateSettle(before: Geometry): void {
   const epoch = gameEpoch;
   const target = state.nodes;
   const started = performance.now();
-  // The board the frames ease from: the previous one, so strokes are held
-  // from the moment the snapshot lands rather than from the first frame.
+  // The board part way from the previous one to the settled one.
   const shown = (eased: number): Geometry => ({
     nodes: state.nodes.map((node) => {
       const was = nodes.get(node.id);
@@ -785,7 +788,7 @@ async function finishAIMove(move: Move, topology: FaceMove, epoch: number): Prom
   } else if (outcome.kind === "rejected") {
     setStatus("AI error: " + outcome.rejection.message, "lose");
   } else {
-    recordMove(move, outcome, drawn, topology);
+    recordMove(outcome, drawn, topology);
     if (state.gameOver) showGameOver();
     else setStatus("Your turn!");
   }

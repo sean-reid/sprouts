@@ -11,6 +11,17 @@ pub const BOARD_SIZE: usize = 1000;
 
 // All spatial constants are tuned for a 1000px board.
 // Use scale(board_size) to adapt them to smaller boards (e.g. 500px mobile).
+/// The grid every coordinate a settled game stores sits on: one unit of
+/// the 1000 board, the link quantum, so a link carries it exactly.
+pub fn grid(board_size: usize) -> f64 {
+    scale(board_size)
+}
+
+/// `p` rounded to the grid.
+pub fn on_grid(p: Point, grid: f64) -> Point {
+    Point::new((p.x / grid).round() * grid, (p.y / grid).round() * grid)
+}
+
 pub fn scale(board_size: usize) -> f64 {
     board_size as f64 / BOARD_SIZE as f64
 }
@@ -160,15 +171,7 @@ impl Move {
         board_size: usize,
     ) -> Self {
         let segments = curve::fit(&polyline, curve::tolerance(board_size));
-        let new_node_pos = on_curve(&segments, new_node_pos);
-        Self {
-            from_node,
-            to_node,
-            polyline,
-            segments,
-            new_node_pos,
-            player,
-        }
+        Self::from_segments(from_node, to_node, polyline, segments, new_node_pos, player)
     }
 
     /// A move whose spline is already fit, with its node on that curve.
@@ -189,6 +192,53 @@ impl Move {
             new_node_pos,
             player,
         }
+    }
+
+    /// A move taken as given, node included; `on_grid` then decides whether
+    /// the node stays.
+    pub fn as_given(
+        from_node: usize,
+        to_node: usize,
+        polyline: Vec<Point>,
+        segments: Vec<Cubic>,
+        new_node_pos: Point,
+        player: Player,
+    ) -> Self {
+        Self {
+            from_node,
+            to_node,
+            polyline,
+            segments,
+            new_node_pos,
+            player,
+        }
+    }
+
+    /// The move with every coordinate on the grid. A node already on the
+    /// grid and within a grid cell of the rounded curve stays put, so a move
+    /// the engine applied comes back as itself; any other node is put on
+    /// the rounded curve and then on the grid.
+    pub fn on_grid(mut self, grid: f64) -> Self {
+        for p in &mut self.polyline {
+            *p = on_grid(*p, grid);
+        }
+        for c in &mut self.segments {
+            *c = Cubic {
+                p0: on_grid(c.p0, grid),
+                p1: on_grid(c.p1, grid),
+                p2: on_grid(c.p2, grid),
+                p3: on_grid(c.p3, grid),
+            };
+        }
+        let node = self.new_node_pos;
+        let kept = on_grid(node, grid) == node
+            && curve::nearest(&self.segments, &node)
+                .is_some_and(|hit| hit.distance <= grid * std::f64::consts::FRAC_1_SQRT_2);
+        if !kept {
+            let near = curve::nearest(&self.segments, &node).map_or(node, |hit| hit.point);
+            self.new_node_pos = on_grid(near, grid);
+        }
+        self
     }
 
     pub fn flatten(&self, tolerance: f64) -> Vec<Point> {
@@ -225,13 +275,30 @@ impl GameState {
         Self::with_nodes(opening_layout(initial_nodes, board_size), board_size)
     }
 
-    /// A fresh game whose starting nodes sit at `positions`.
+    /// A fresh game whose starting nodes sit at `positions`, settling at
+    /// the current version.
     pub fn with_nodes(positions: Vec<Point>, board_size: usize) -> Self {
+        Self::with_nodes_at(positions, board_size, crate::protocol::SETTLE_VERSION)
+    }
+
+    /// A fresh game at `settle_version`; a settling game keeps its
+    /// starting nodes on the grid.
+    pub fn with_nodes_at(positions: Vec<Point>, board_size: usize, settle_version: u8) -> Self {
         let initial_nodes = positions.len();
+        let g = grid(board_size);
         let nodes = positions
             .into_iter()
             .enumerate()
-            .map(|(i, position)| Node::new(i, position))
+            .map(|(i, position)| {
+                Node::new(
+                    i,
+                    if settle_version > 0 {
+                        on_grid(position, g)
+                    } else {
+                        position
+                    },
+                )
+            })
             .collect();
         Self {
             nodes,
@@ -244,7 +311,7 @@ impl GameState {
             initial_node_count: initial_nodes,
             board_size,
             settles: Vec::new(),
-            settle_version: crate::protocol::SETTLE_VERSION,
+            settle_version,
         }
     }
 
@@ -464,7 +531,7 @@ mod tests {
         let gs = GameState::with_board_size(2, 500);
         assert_eq!(gs.board_size, 500);
         for (node, expected) in gs.nodes.iter().zip(opening_layout(2, 500)) {
-            assert_eq!(node.position, expected);
+            assert_eq!(node.position, on_grid(expected, grid(500)));
             assert!(node.position.x > 0.0 && node.position.x < 500.0);
             assert!(node.position.y > 0.0 && node.position.y < 500.0);
         }

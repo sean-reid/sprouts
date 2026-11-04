@@ -142,9 +142,9 @@ test("jumping to a board where the AI is to move enters review and keeps the tai
 });
 
 // A link rounds the drawn geometry to its quantum and the visitor's board
-// settles from that, so a settled game comes back within this many world
-// units per node rather than stroke for stroke.
-const SETTLED_REPLAY_UNITS = 20;
+// settles from that, so a settled game comes back within a unit per node
+// rather than stroke for stroke.
+const SETTLED_REPLAY_UNITS = 1;
 
 test("a share link reopens the game in review and steps through it", async ({ page, browser }) => {
   await openBoard(page);

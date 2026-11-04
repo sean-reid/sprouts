@@ -5,5 +5,5 @@
   "search": 1000,
   "validation": 1,
   "settle": 80,
-  "settle_game": 1800
+  "settle_game": 800
 }

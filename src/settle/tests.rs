@@ -1,6 +1,7 @@
 use super::*;
 use crate::protocol::{self, SETTLE_VERSION};
 use crate::replay;
+use crate::types::grid;
 use crate::types::Player;
 use proptest::prelude::*;
 use std::path::Path;
@@ -135,8 +136,13 @@ fn every_fixture_position_settles_without_changing_the_model_or_losing_clearance
     }
 }
 
+/// A board settles once per move and undo restores it, so a second settle
+/// never runs in play; when it does it may still move the board, since
+/// the grid keeps the relaxation from a fixed point, but it never lowers
+/// the least clearance ratio or changes the model.
 #[test]
-fn settling_twice_moves_nothing_beyond_the_fit_tolerance() {
+fn settling_again_never_lowers_the_least_clearance() {
+    let mut drift: f64 = 0.0;
     for fixture in fixtures() {
         let mut drawn = fixture.start();
         for recorded in &fixture.moves {
@@ -145,15 +151,19 @@ fn settling_twice_moves_nothing_beyond_the_fit_tolerance() {
             let once = settled_copy(&drawn);
             let mut twice = once.clone();
             settle(&mut twice);
-            let moved = drift(&once, &twice);
+            let (before, _) = least_clearance(&once);
+            let (after, _) = least_clearance(&twice);
             assert!(
-                moved <= curve::tolerance(drawn.board_size),
-                "second settle moved {moved:.3} after {} moves of a {} node game",
+                after + 1e-9 >= before,
+                "a second settle lowered the least ratio from {before:.3} to {after:.3} after {} moves of a {} node game",
                 once.lines.len(),
                 fixture.initial_nodes
             );
+            assert!(same_face_model(&twice));
+            drift = drift.max(self::drift(&once, &twice));
         }
     }
+    println!("a second settle moved at most {drift:.1} units");
 }
 
 /// A recording made with no settling replays with none: the board after
@@ -174,6 +184,7 @@ fn a_version_0_record_replays_as_drawn() {
                     .map(|p| Point::new(p[0], p[1]))
                     .collect(),
                 new_node_pos: Point::new(recorded.new_node[0], recorded.new_node[1]),
+                segments: None,
             };
             assert!(matches!(
                 protocol::apply(&mut through, wire),
@@ -234,6 +245,7 @@ fn random_move(state: &GameState, pick: (usize, usize, f64, f64)) -> Option<prot
         to_node: b,
         polyline,
         new_node_pos: new_node,
+        segments: None,
     };
     let mov = crate::types::Move::new(
         a,
@@ -248,7 +260,8 @@ fn random_move(state: &GameState, pick: (usize, usize, f64, f64)) -> Option<prot
 }
 
 /// A random game played through the protocol, settling after each move,
-/// with the moves as sent.
+/// with the moves as the engine applied them, which is what a record and
+/// a link carry.
 fn play_random(
     nodes: usize,
     picks: &[(usize, usize, f64, f64)],
@@ -260,12 +273,12 @@ fn play_random(
         if state.face.is_game_over() {
             break;
         }
+        // The check ran on the stroke as drawn; the engine rounds it to the
+        // grid first, which can refuse a marginal one.
         if let Some(mov) = random_move(&state, *pick) {
-            assert!(matches!(
-                protocol::apply(&mut state, mov.clone()),
-                protocol::Outcome::Applied { .. }
-            ));
-            played.push(mov);
+            if let protocol::Outcome::Applied { mov, .. } = protocol::apply(&mut state, mov) {
+                played.push(mov);
+            }
         }
     }
     (state, played)
@@ -362,7 +375,7 @@ fn a_line_hugging_a_node_is_pushed_off_it() {
     let on_curve = curve::nearest(&line.segments, &state.nodes[4].position)
         .unwrap()
         .distance;
-    assert!(on_curve < 1e-6);
+    assert!(on_curve <= grid(1000) * 2f64.sqrt() / 2.0, "{on_curve}");
     assert!(same_face_model(&state));
 }
 
@@ -522,4 +535,110 @@ fn undo_restores_the_board_the_next_move_was_drawn_on() {
         }
         assert_eq!(bits(&state), finished);
     }
+}
+
+/// A 64-bit fold of every coordinate on the board.
+fn hash(state: &GameState) -> u64 {
+    bits(state).iter().fold(0xcbf29ce484222325u64, |h, b| {
+        (h ^ b).wrapping_mul(0x100000001b3)
+    })
+}
+
+/// The settled board of the seeded 7-node random game, bit for bit. A
+/// change here means version 1 settles differently: bump SETTLE_VERSION
+/// in src/protocol.rs and record the new value.
+const VERSION_1_GOLDEN: u64 = 0xa032cb53618d8318;
+
+#[test]
+fn version_1_settles_the_seeded_game_to_the_golden_board() {
+    let (state, moves) = play_random(7, &seeded_picks(7, 40));
+    assert!(moves.len() >= 6, "{} moves", moves.len());
+    assert_eq!(state.settle_version, SETTLE_VERSION);
+    assert_eq!(hash(&state), VERSION_1_GOLDEN, "{:#x}", hash(&state));
+}
+
+/// A link rounds every point to a whole unit. The moves a settled game
+/// applied already sit on that grid, so the rounding changes nothing and
+/// the visitor's board is the sharer's, bit for bit.
+#[test]
+fn moves_rounded_to_the_link_quantum_replay_a_settled_game() {
+    for (played, moves) in settled_games() {
+        let mut state = GameState::with_board_size(played.initial_node_count, played.board_size);
+        state.current_player = Player::Human;
+        let round = |p: &Point| Point::new(p.x.round(), p.y.round());
+        for mov in &moves {
+            let rounded = protocol::Move {
+                from_node: mov.from_node,
+                to_node: mov.to_node,
+                polyline: mov.polyline.iter().map(round).collect(),
+                new_node_pos: round(&mov.new_node_pos),
+                segments: mov.segments.as_ref().map(|segments| {
+                    segments
+                        .iter()
+                        .map(|c| Cubic {
+                            p0: round(&c.p0),
+                            p1: round(&c.p1),
+                            p2: round(&c.p2),
+                            p3: round(&c.p3),
+                        })
+                        .collect()
+                }),
+            };
+            assert_eq!(&rounded, mov, "an applied move is not on the grid");
+            let outcome = protocol::apply(&mut state, rounded);
+            assert!(
+                matches!(outcome, protocol::Outcome::Applied { .. }),
+                "{} nodes, move {}: {outcome:?}",
+                played.initial_node_count,
+                state.lines.len()
+            );
+        }
+        assert_eq!(bits(&state), bits(&played));
+    }
+}
+
+/// The settled board after each move of the seeded 9-node random game at
+/// version 1, as recorded on macOS. A mismatch on another platform names
+/// the first move that settles differently there; a mismatch after a
+/// change to the settle means version 1 output changed, so bump
+/// SETTLE_VERSION and record the new values.
+const VERSION_1_SEEDED_GAME: &[u64] = &[
+    0x7bb01be736536569,
+    0x7a06061ba002b013,
+    0xa9fe3221b9b96035,
+    0x475be4ad2b1b4a3e,
+    0xa19c5ada51285ec,
+    0x98127e76221c6345,
+    0x3d62a2f5e2c6e0bc,
+    0x56516138c9de2925,
+    0x759c44b36b8bcc5a,
+];
+
+#[test]
+fn version_1_settles_the_seeded_game_the_same_on_every_platform() {
+    let picks = seeded_picks(9, 40);
+    let mut state = GameState::with_board_size(9, 1000);
+    state.current_player = Player::Human;
+    let mut hashes = Vec::new();
+    for pick in &picks {
+        if state.face.is_game_over() {
+            break;
+        }
+        if let Some(mov) = random_move(&state, *pick) {
+            if let protocol::Outcome::Applied { .. } = protocol::apply(&mut state, mov) {
+                hashes.push(hash(&state));
+            }
+        }
+    }
+    let printed: Vec<String> = hashes.iter().map(|h| format!("{h:#x}")).collect();
+    let first = hashes
+        .iter()
+        .zip(VERSION_1_SEEDED_GAME)
+        .position(|(got, want)| got != want);
+    assert_eq!(
+        hashes.as_slice(),
+        VERSION_1_SEEDED_GAME,
+        "first differing move {first:?}; got {}",
+        printed.join(" ")
+    );
 }

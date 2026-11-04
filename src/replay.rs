@@ -3,6 +3,7 @@
 use crate::ai;
 #[cfg(feature = "bench")]
 pub use crate::ai::nimber_stats;
+use crate::curve::Cubic;
 use crate::protocol;
 #[cfg(feature = "bench")]
 pub use crate::route::sweep::{sweep, Tally};
@@ -61,30 +62,41 @@ pub struct FixtureMove {
     pub to: usize,
     pub polyline: Vec<[f64; 2]>,
     pub new_node: [f64; 2],
+    /// The spline the move committed as; a record made under a settle
+    /// carries it so replay applies the move exactly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub segments: Option<Vec<Cubic>>,
 }
 
 impl FixtureMove {
-    fn from_move(mov: &Move) -> Self {
+    pub(crate) fn from_move(mov: &Move) -> Self {
         Self {
             from: mov.from_node,
             to: mov.to_node,
             polyline: mov.polyline.iter().map(|p| [p.x, p.y]).collect(),
             new_node: [mov.new_node_pos.x, mov.new_node_pos.y],
+            segments: Some(mov.segments.clone()),
         }
     }
 
     fn to_move(&self, player: Player, board_size: usize) -> Move {
-        Move::new(
-            self.from,
-            self.to,
-            self.polyline
-                .iter()
-                .map(|p| Point::new(p[0], p[1]))
-                .collect(),
-            Point::new(self.new_node[0], self.new_node[1]),
-            player,
-            board_size,
-        )
+        let polyline = self
+            .polyline
+            .iter()
+            .map(|p| Point::new(p[0], p[1]))
+            .collect();
+        let new_node = Point::new(self.new_node[0], self.new_node[1]);
+        match &self.segments {
+            Some(segments) => Move::from_segments(
+                self.from,
+                self.to,
+                polyline,
+                segments.clone(),
+                new_node,
+                player,
+            ),
+            None => Move::new(self.from, self.to, polyline, new_node, player, board_size),
+        }
     }
 }
 
@@ -683,6 +695,7 @@ mod tests {
                 to: 1,
                 polyline: vec![[310.0, 250.0], [280.0, 280.0], [250.0, 310.0]],
                 new_node: [280.0, 280.0],
+                segments: None,
             }],
         };
         let json = serde_json::to_string(&fixture).unwrap();

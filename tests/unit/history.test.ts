@@ -145,7 +145,7 @@ describe("the share link codec", () => {
     expect(decoded.polyline.at(-1)).toEqual([700, 500]);
   });
 
-  it("keeps a sparse polyline as a stroke when its cubics encode longer", () => {
+  it("keeps a sparse polyline as a stroke when its cubics encode longer, unsettled", () => {
     const polyline = [at(100, 100), at(200, 150), at(300, 100), at(400, 150), at(500, 100)];
     const segments: Cubic[] = [];
     for (let i = 0; i + 1 < polyline.length; i++) {
@@ -160,7 +160,9 @@ describe("the share link codec", () => {
       newNodePos: at(300, 100),
       segments,
     };
-    const payload = encodeRecord(game(move));
+    const history = new History(4, 1000, "human", 0);
+    history.push(move);
+    const payload = encodeRecord(history);
     expect(bytesOf(payload)[SHAPE_OFFSET]).toBe(SHAPE_STROKE);
     expect(only(decodeRecord(payload)).polyline).toEqual(polyline.map((p) => [p.x, p.y]));
   });

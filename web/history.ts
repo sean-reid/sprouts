@@ -192,11 +192,9 @@ export class History {
     this.moves.length = this.cursor;
   }
 
-  // Takes the spline the engine holds for each move up to the cursor; the
-  // board settles after every move and undo, so the spline a move showed
-  // last time may not be the one it shows now.
-  // Under a settle the engine's lines are not the moves as drawn, so only
-  // an unsettled game takes its splines from them.
+  // Takes the spline the engine holds for each move up to the cursor. Under
+  // a settle the engine's lines are not the moves as drawn, so only an
+  // unsettled game takes its splines from them.
   adopt(lines: Line[]): void {
     if (this.settleVersion !== 0) return;
     lines.forEach((line, i) => {
@@ -292,6 +290,7 @@ export function toMove(move: RecordedMove): Move {
     toNode: move.toNode,
     polyline: move.polyline.map((p) => ({ x: p.x, y: p.y })),
     newNodePos: { x: move.newNodePos.x, y: move.newNodePos.y },
+    ...(move.segments ? { segments: move.segments } : {}),
   };
 }
 
@@ -305,6 +304,7 @@ function toRecordMove(move: RecordedMove): FixtureMove {
     polyline: move.polyline.map((p): [number, number] => [p.x, p.y]),
     newNode: [move.newNodePos.x, move.newNodePos.y],
     ...(move.cutOff !== undefined ? { cutOff: move.cutOff } : {}),
+    ...(move.segments ? { segments: move.segments } : {}),
   };
 }
 
@@ -316,6 +316,7 @@ function fromRecordMove(move: RecordMove): RecordedMove {
       polyline: move.polyline.map(([x, y]) => ({ x, y })),
       newNodePos: { x: move.newNode[0], y: move.newNode[1] },
       ...(move.cutOff !== undefined ? { cutOff: move.cutOff } : {}),
+      ...(move.segments ? { segments: move.segments } : {}),
     };
   }
   return {
@@ -415,7 +416,26 @@ function isRecordMove(value: unknown, nodes: number, halfEdges: number): value i
     Array.isArray(m.polyline) &&
     m.polyline.length >= 2 &&
     m.polyline.every(isPair) &&
-    isPair(m.newNode)
+    isPair(m.newNode) &&
+    (m.segments === undefined || isSegments(m.segments))
+  );
+}
+
+function isSegments(value: unknown): value is Cubic[] {
+  const isPoint = (p: unknown): boolean =>
+    typeof p === "object" &&
+    p !== null &&
+    Number.isFinite((p as { x: unknown }).x) &&
+    Number.isFinite((p as { y: unknown }).y);
+  return (
+    Array.isArray(value) &&
+    value.length > 0 &&
+    value.every(
+      (c: unknown) =>
+        typeof c === "object" &&
+        c !== null &&
+        ["p0", "p1", "p2", "p3"].every((k) => isPoint((c as Record<string, unknown>)[k])),
+    )
   );
 }
 
@@ -483,10 +503,16 @@ export function encodeRecord(history: History): string {
     const point = deltaWriter(out, quantum);
     for (const [x, y] of layout) point({ x, y });
   }
+  // A settled game stores its splines on the link grid, so the cubics are
+  // exact and the thinned stroke, which is not, stays out of its links
+  // unless a move has nothing else.
+  const exact = history.settleVersion !== 0;
   for (const move of history.moves) {
     out.varint(move.fromNode);
     out.varint(move.toNode);
-    const shapes = [encodeFace(move, scale), encodeCubics(move, scale), encodeStroke(move, scale)];
+    const face = encodeFace(move, scale);
+    const cubics = encodeCubics(move, scale);
+    const shapes = [face, cubics, exact && (face || cubics) ? null : encodeStroke(move, scale)];
     const shortest = shapes.reduce((best, shape) =>
       shape && (!best || shape.length < best.length) ? shape : best,
     );
@@ -628,8 +654,9 @@ function readCurveMove(reader: ByteReader, boardSize: number, faces: boolean): R
   const scale = scaleOf(boardSize);
   const point = deltaReader(reader, LINK_QUANTUM * scale);
   let polyline: Point[];
+  let segments: Cubic[] | undefined;
   if (shape === SHAPE_CUBICS) {
-    const segments: Cubic[] = [];
+    segments = [];
     let p0 = point();
     for (let i = 0; i < count; i++) {
       const cubic = { p0, p1: point(), p2: point(), p3: point() };
@@ -644,7 +671,12 @@ function readCurveMove(reader: ByteReader, boardSize: number, faces: boolean): R
   } else {
     return null;
   }
-  return toRecordMove({ fromNode: from, toNode: to, polyline, newNodePos: point() });
+  const newNodePos = point();
+  return toRecordMove(
+    segments
+      ? { fromNode: from, toNode: to, polyline, newNodePos, segments }
+      : { fromNode: from, toNode: to, polyline, newNodePos },
+  );
 }
 
 function readStrokeMove(reader: ByteReader): RecordMove | null {

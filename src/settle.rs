@@ -16,19 +16,23 @@ use crate::embedding;
 use crate::face::Move as FaceMove;
 use crate::geometry::{closest_point_on_segment, segment_intersection, segments_intersect};
 use crate::types::{
-    ai_node_clearance, node_disc, scale, GameState, Line, Move, Point, MIN_NODE_SPACING,
-    MIN_PATH_CLEARANCE,
+    ai_node_clearance, grid, node_disc, on_grid, scale, GameState, Line, Move, Point,
+    MIN_NODE_SPACING, MIN_PATH_CLEARANCE,
 };
 
 /// Rounds per settle at most; a round that moves nothing ends it early.
 pub const ROUNDS: usize = 64;
+/// Pair distances measured plus lines carried, summed over the rounds,
+/// at which a settle stops whatever the board: 2.0 M is about 330 ms
+/// natively and binds only on the 24-node game.
+pub const WORK_CAP: usize = 2_000_000;
 /// Share of a shortfall each side of a pair closes per round.
 const STEP: f64 = 1.0;
 /// Pairs this far above the least ratio are still pushed, so the board
 /// evens out around its tightest spot rather than at it alone.
 const HEADROOM: f64 = 1.0;
-/// Longest move of one point in one round, in node spacings, at the
-/// first round and at most.
+/// Longest move of one point in one round, in node spacings: where the
+/// stride starts, and the most it grows to.
 const STRIDE_START: f64 = 1.0;
 pub const STRIDE_MAX: f64 = 2.0;
 /// Growth of the stride after a round that stands.
@@ -45,13 +49,13 @@ const SELF_GAP: f64 = 3.0;
 /// under this share of their distance along it; a straight or gently
 /// curved line has no hairpin.
 const FOLD: f64 = 0.5;
-/// A round that moves nothing farther than this, or a stride shorter
-/// than this, ends the settle.
-const CONVERGED: f64 = 1e-2;
 const EPS: f64 = 1e-9;
 const NEAREST_STEPS: usize = 64;
 const NEAREST_REFINE: usize = 40;
-const SMOOTH_JOIN: f64 = 1e-6;
+/// Sine of the angle under which a join between two cubics counts as
+/// smooth; wide enough that rounding the handles to the grid keeps a join
+/// smooth from one settle to the next.
+const SMOOTH_JOIN: f64 = 0.05;
 
 /// Distances the board is relaxed toward, in board units.
 struct Targets {
@@ -123,6 +127,8 @@ struct Survey {
     least: f64,
     at: Tightest,
     energy: f64,
+    /// Pair distances measured.
+    tests: usize,
 }
 
 /// Displacements gathered over one round: a sum per node, a weighted sum
@@ -182,19 +188,25 @@ impl Chain {
             smooth: Vec::new(),
             samples: Vec::new(),
         };
-        let (seg, t) = chain.locate(&line.new_node_pos);
-        chain.seg = seg;
-        chain.t = t;
-        chain.smooth = (1..line.segments.len())
+        chain.read(&line.new_node_pos, targets);
+        Some(chain)
+    }
+
+    /// Reads the node's place on the chain and which joins are smooth
+    /// from the control points as they are, and resamples.
+    fn read(&mut self, node: &Point, targets: &Targets) {
+        let (seg, t) = self.locate(node);
+        self.seg = seg;
+        self.t = t;
+        self.smooth = (1..self.segments())
             .map(|j| {
-                let a = sub(chain.pts[3 * j], chain.pts[3 * j - 1]);
-                let b = sub(chain.pts[3 * j + 1], chain.pts[3 * j]);
+                let a = sub(self.pts[3 * j], self.pts[3 * j - 1]);
+                let b = sub(self.pts[3 * j + 1], self.pts[3 * j]);
                 let (la, lb) = (norm(a), norm(b));
                 la > 0.0 && lb > 0.0 && (a.x * b.y - a.y * b.x).abs() / (la * lb) < SMOOTH_JOIN
             })
             .collect();
-        chain.resample(targets);
-        Some(chain)
+        self.resample(targets);
     }
 
     fn segments(&self) -> usize {
@@ -395,7 +407,9 @@ impl Layout {
     fn survey(&self, targets: &Targets, level: f64, mut push: Option<&mut Push>) -> Survey {
         let mut least = (f64::INFINITY, Tightest::Nothing);
         let mut energy = 0.0;
+        let mut tests = 0;
         let mut short = |d: f64, target: f64, at: Tightest| -> Option<f64> {
+            tests += 1;
             let ratio = d / target;
             if ratio < least.0 {
                 least = (ratio, at);
@@ -545,6 +559,7 @@ impl Layout {
             least: least.0,
             at: least.1,
             energy,
+            tests,
         }
     }
 
@@ -663,6 +678,36 @@ impl Layout {
             }
         }
         longest
+    }
+
+    /// Rounds every free point and made node to the grid; the end nodes
+    /// already sit on it. Each made node keeps its place along its curve,
+    /// so a step too short to change a cell changes nothing.
+    fn quantise(&mut self, grid: f64, targets: &Targets) {
+        for p in &mut self.nodes {
+            *p = on_grid(*p, grid);
+        }
+        for chain in &mut self.lines {
+            for p in &mut chain.pts {
+                *p = on_grid(*p, grid);
+            }
+            chain.resample(targets);
+        }
+    }
+
+    /// The longest distance any node or control point sits from where it
+    /// is in `other`.
+    fn farthest_from(&self, other: &Layout) -> f64 {
+        let mut worst: f64 = 0.0;
+        for (a, b) in self.nodes.iter().zip(&other.nodes) {
+            worst = worst.max(a.distance_to(b));
+        }
+        for (a, b) in self.lines.iter().zip(&other.lines) {
+            for (p, q) in a.pts.iter().zip(&b.pts) {
+                worst = worst.max(p.distance_to(q));
+            }
+        }
+        worst
     }
 
     /// Carries each line along with its end nodes, the control points
@@ -814,32 +859,58 @@ fn relax(state: &mut GameState) -> Undo {
     let mut crossings = layout.crossings(tolerance);
     let unit = MIN_NODE_SPACING * scale(state.board_size);
     let mut stride = STRIDE_START * unit;
-    // A collapsed stride restarts after progress, since a short accepted
-    // step leaves it too small to try the long ones.
+    // A collapsed stride restarts after the least ratio rose, since a short
+    // accepted step leaves it too small to try the long ones; a stride
+    // under half a cell moves nothing, so it ends the cycle, and a step of
+    // one cell that only evens the board shrinks the stride rather than
+    // growing it, or the settle would crawl a cell a round.
+    let cell = grid(state.board_size);
+    let floor = cell / 2.0;
     let mut progressed = false;
+    let mut work = 0usize;
     for _ in 0..ROUNDS {
+        if work >= WORK_CAP {
+            break;
+        }
         let level = least + HEADROOM;
         let mut push = Push::empty(&layout);
         let now = layout.survey(&targets, level, Some(&mut push));
         let mut next = layout.clone();
-        let longest = next.apply(&push, stride);
+        next.apply(&push, stride);
         next.rebuild(&targets, &origin);
+        next.quantise(grid(state.board_size), &targets);
+        // A step that rounds away to nothing counts as refused, and shorter
+        // ones would round away too, so the stride collapses at once.
+        let moved = next.farthest_from(&layout);
         let after = next.survey(&targets, level, None);
+        work += now.tests + after.tests + state.lines.len();
         let roomier = after.least > least + EPS;
         let evener = after.least + EPS >= least && after.energy <= now.energy + EPS;
         let crossed = next.crossings(tolerance);
-        if (roomier || evener) && crossed <= crossings && next.holds(state, &original) {
+        if moved > 0.0
+            && (roomier || evener)
+            && crossed <= crossings
+            && next.holds(state, &original)
+        {
             layout = next;
             least = after.least;
             crossings = crossed;
-            if longest < CONVERGED {
-                break;
+            progressed |= roomier;
+            stride = if roomier || moved > 1.5 * cell {
+                (stride * STRIDE_GROW).min(STRIDE_MAX * unit)
+            } else {
+                stride / 2.0
+            };
+            if stride < floor {
+                if !progressed {
+                    break;
+                }
+                progressed = false;
+                stride = STRIDE_START * unit;
             }
-            progressed = true;
-            stride = (stride * STRIDE_GROW).min(STRIDE_MAX * unit);
         } else {
-            stride /= 2.0;
-            if stride < CONVERGED {
+            stride = if moved > 0.0 { stride / 2.0 } else { 0.0 };
+            if stride < floor {
                 if !progressed {
                     break;
                 }

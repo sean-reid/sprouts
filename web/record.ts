@@ -1,3 +1,4 @@
+import type { Cubic } from "../pkg/sprouts";
 import type { GameRecord } from "./history";
 import type { Node } from "./state";
 
@@ -8,6 +9,9 @@ export interface FixtureMove {
   newNode: [number, number];
   // Nodes the move cut off, as the engine reported; absent when unknown.
   cutOff?: number;
+  // The spline the move committed as; a settled game carries it so a
+  // replay applies the move exactly.
+  segments?: Cubic[];
 }
 
 export interface Fixture {

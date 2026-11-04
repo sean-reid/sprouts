@@ -8,7 +8,7 @@ use crate::face::{self, IllegalMove, Move as ModelMove};
 use crate::geometry;
 use crate::route::{self, Unroutable};
 use crate::settle;
-use crate::types::{self, scale, GameState, Line, Node, Player, Point, MIN_NODE_SPACING};
+use crate::types::{self, grid, scale, GameState, Line, Node, Player, Point, MIN_NODE_SPACING};
 use crate::validation::{self, Rejection};
 
 /// A move as proposed to the engine. The mover is whoever is to play, so a
@@ -20,18 +20,47 @@ pub struct Move {
     pub to_node: usize,
     pub polyline: Vec<Point>,
     pub new_node_pos: Point,
+    /// The spline the move committed as, applied as it is when present so
+    /// a replay does not depend on refitting the stroke.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[tsify(optional)]
+    pub segments: Option<Vec<Cubic>>,
 }
 
 impl Move {
-    fn by(self, player: Player, board_size: usize) -> types::Move {
-        types::Move::new(
-            self.from_node,
-            self.to_node,
-            self.polyline,
-            self.new_node_pos,
-            player,
-            board_size,
-        )
+    /// The move as the engine applies it for `state`: a settling game takes
+    /// the spline as given and puts the move on the grid; an unsettled one
+    /// fits the stroke, as every game did before splines travelled.
+    fn by(self, state: &GameState) -> types::Move {
+        let player = state.current_player;
+        let mov = match self.segments {
+            Some(segments) if state.settle_version > 0 => types::Move::as_given(
+                self.from_node,
+                self.to_node,
+                self.polyline,
+                segments,
+                self.new_node_pos,
+                player,
+            ),
+            _ => types::Move::new(
+                self.from_node,
+                self.to_node,
+                self.polyline,
+                self.new_node_pos,
+                player,
+                state.board_size,
+            ),
+        };
+        gridded(mov, state)
+    }
+}
+
+/// The move on the grid when the game settles, as drawn otherwise.
+fn gridded(mov: types::Move, state: &GameState) -> types::Move {
+    if state.settle_version == 0 {
+        mov
+    } else {
+        mov.on_grid(grid(state.board_size))
     }
 }
 
@@ -42,6 +71,7 @@ impl From<types::Move> for Move {
             to_node: mov.to_node,
             polyline: mov.polyline,
             new_node_pos: mov.new_node_pos,
+            segments: Some(mov.segments),
         }
     }
 }
@@ -245,17 +275,22 @@ pub fn start(
     settle_version: u8,
 ) -> Result<GameState, String> {
     let mut state = match nodes {
-        Some(nodes) if nodes.len() == initial_nodes => GameState::with_nodes(nodes, board_size),
+        Some(nodes) if nodes.len() == initial_nodes => {
+            GameState::with_nodes_at(nodes, board_size, settle_version)
+        }
         Some(nodes) => {
             return Err(format!(
                 "{} starting positions for {initial_nodes} nodes",
                 nodes.len()
             ))
         }
-        None => GameState::with_board_size(initial_nodes, board_size),
+        None => GameState::with_nodes_at(
+            types::opening_layout(initial_nodes, board_size),
+            board_size,
+            settle_version,
+        ),
     };
     state.current_player = first_player;
-    state.settle_version = settle_version;
     Ok(state)
 }
 
@@ -290,7 +325,7 @@ fn topology(state: &GameState, mov: &types::Move) -> Result<face::Move, Rejectio
 /// The move goes in and the board settles around it, so the snapshot
 /// carries the relaxed geometry.
 pub fn apply(state: &mut GameState, mov: Move) -> Outcome {
-    let mov = mov.by(state.current_player, state.board_size);
+    let mov = mov.by(state);
     match topology(state, &mov) {
         Ok(_) => commit(state, mov),
         Err(rejection) => Outcome::Rejected { rejection },
@@ -422,7 +457,7 @@ pub fn classify(plan: Classification) -> Result<Classified, String> {
     )?;
     let mut out = Vec::with_capacity(plan.moves.len());
     for (index, (mov, known)) in plan.moves.into_iter().zip(plan.known).enumerate() {
-        let mov = mov.by(state.current_player, state.board_size);
+        let mov = mov.by(&state);
         let face = topology(&state, &mov).map_err(|e| format!("move {index}: {}", e.message))?;
         out.push(known.or_else(|| redraws(&state, &face, &mov).then(|| face.into())));
         state
@@ -564,13 +599,16 @@ pub fn apply_face_move(state: &mut GameState, mov: FaceMove, at: Point) -> Outco
         .map_err(|why| illegal(state, &listed, why))
         .and_then(|()| route::route(state, &listed).map_err(|why| unroutable(&listed, why)))
         .and_then(|routed| {
-            let line = types::Move::from_segments(
-                routed.from_node,
-                routed.to_node,
-                routed.polyline,
-                routed.segments,
-                at,
-                routed.player,
+            let line = gridded(
+                types::Move::from_segments(
+                    routed.from_node,
+                    routed.to_node,
+                    routed.polyline,
+                    routed.segments,
+                    at,
+                    routed.player,
+                ),
+                state,
             );
             topology(state, &line).map(|_| line)
         });
@@ -780,6 +818,20 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    /// `stored` is `drawn` with every control point rounded to the grid.
+    fn assert_on_grid_of(stored: &[Cubic], drawn: &[Cubic], board: usize) {
+        assert_eq!(stored.len(), drawn.len());
+        let half = grid(board) / 2.0 + 1e-9;
+        for (s, d) in stored.iter().zip(drawn) {
+            for (p, q) in [(s.p0, d.p0), (s.p1, d.p1), (s.p2, d.p2), (s.p3, d.p3)] {
+                assert!(
+                    (p.x - q.x).abs() <= half && (p.y - q.y).abs() <= half,
+                    "{p:?} is not {q:?} on the grid"
+                );
+            }
+        }
+    }
+
     fn straight(a: Point, b: Point, steps: usize) -> Vec<Point> {
         (0..=steps)
             .map(|i| {
@@ -796,6 +848,7 @@ mod tests {
             to_node: 1,
             polyline: vec![Point::new(1.0, 2.0), Point::new(3.0, 4.0)],
             new_node_pos: Point::new(2.0, 3.0),
+            segments: None,
         };
         let wire = serde_json::to_value(&mov).unwrap();
         assert_eq!(
@@ -846,6 +899,7 @@ mod tests {
                 to_node: 0,
                 polyline: ring,
                 new_node_pos: far,
+                segments: None,
             },
         ) else {
             panic!("the loop was rejected");
@@ -867,6 +921,7 @@ mod tests {
                 to_node: 1,
                 polyline: over.clone(),
                 new_node_pos: over[1],
+                segments: None,
             },
         );
         let Outcome::Applied { snapshot: snap, .. } = outcome else {
@@ -886,6 +941,7 @@ mod tests {
             to_node: 0,
             polyline: vec![a, a],
             new_node_pos: a,
+            segments: None,
         };
         let wire = serde_json::to_value(apply(&mut state, mov)).unwrap();
         assert_eq!(wire["kind"], json!("rejected"));
@@ -901,15 +957,20 @@ mod tests {
     #[test]
     fn start_takes_recorded_positions_and_refuses_a_count_mismatch() {
         let given = vec![Point::new(100.0, 100.0), Point::new(400.0, 100.0)];
-        let placed = start(2, 500, Player::AI, Some(given.clone()), SETTLE_VERSION).unwrap();
+        let placed = start(2, 500, Player::AI, Some(given.clone()), 0).unwrap();
         assert_eq!(placed.nodes[1].position, given[1]);
         assert_eq!(placed.current_player, Player::AI);
         let refused = start(3, 500, Player::Human, Some(given), SETTLE_VERSION)
             .err()
             .expect("a count mismatch is refused");
         assert!(refused.contains("2 starting positions for 3 nodes"));
-        let laid_out = start(3, 500, Player::Human, None, SETTLE_VERSION).unwrap();
+        let laid_out = start(3, 500, Player::Human, None, 0).unwrap();
         assert_eq!(laid_out.nodes[0].position, types::opening_layout(3, 500)[0]);
+        let gridded = start(3, 500, Player::Human, None, SETTLE_VERSION).unwrap();
+        assert_eq!(
+            gridded.nodes[0].position,
+            types::on_grid(types::opening_layout(3, 500)[0], grid(500))
+        );
     }
 
     #[test]
@@ -982,6 +1043,7 @@ mod tests {
             from_node: 0,
             to_node: 1,
             new_node_pos: path[20],
+            segments: None,
             polyline: path,
         };
         assert!(matches!(
@@ -1065,6 +1127,7 @@ mod tests {
             from_node: 0,
             to_node: 1,
             new_node_pos: polyline[5],
+            segments: None,
             polyline,
         };
         assert!(matches!(
@@ -1194,6 +1257,7 @@ mod tests {
                 to_node: 1,
                 polyline,
                 new_node_pos,
+                segments: None,
             },
         ) else {
             panic!("the opening chord was rejected");
@@ -1223,6 +1287,7 @@ mod tests {
             to_node: 1,
             polyline,
             new_node_pos,
+            segments: None,
         };
         match apply(&mut state, mov) {
             Outcome::Applied { snapshot, .. } => {
@@ -1247,6 +1312,7 @@ mod tests {
             to_node: 1,
             polyline,
             new_node_pos,
+            segments: None,
         };
         let wire = serde_json::to_value(apply(&mut state, mov)).unwrap();
         assert_eq!(wire["kind"], json!("applied"));
@@ -1353,13 +1419,14 @@ mod tests {
             to_node: 1,
             polyline: path,
             new_node_pos: placed.position,
+            segments: None,
         };
         let Outcome::Applied { .. } = apply(&mut state, mov) else {
             panic!("wavy chord rejected");
         };
         let committed = state.move_history.last().unwrap();
-        assert_eq!(committed.segments, shown);
-        assert_eq!(committed.new_node_pos, placed.position);
+        assert_on_grid_of(&committed.segments, &shown, 1000);
+        assert!(committed.new_node_pos.distance_to(&placed.position) <= grid(1000));
         let line = &state.lines[0];
         assert_eq!(line.flat, line.flatten(curve::tolerance(state.board_size)));
     }
@@ -1376,6 +1443,7 @@ mod tests {
             to_node: 1,
             polyline,
             new_node_pos,
+            segments: None,
         };
         assert!(matches!(
             apply(&mut state, opening),
@@ -1387,7 +1455,11 @@ mod tests {
         let Outcome::Applied { .. } = apply(&mut state, mov) else {
             panic!("the AI's own move was rejected");
         };
-        assert_eq!(state.move_history.last().unwrap().segments, segments);
+        assert_on_grid_of(
+            &state.move_history.last().unwrap().segments,
+            &segments,
+            1000,
+        );
     }
 
     #[test]
@@ -1400,6 +1472,7 @@ mod tests {
             to_node: 1,
             polyline: path,
             new_node_pos,
+            segments: None,
         };
         let wire = serde_json::to_value(apply(&mut state, mov)).unwrap();
         let line = &wire["snapshot"]["lines"][0];
@@ -1427,6 +1500,7 @@ mod tests {
             to_node: 1,
             polyline: path,
             new_node_pos,
+            segments: None,
         };
         let text = serde_json::to_string(&mov).unwrap();
         let back: Move = serde_json::from_str(&text).unwrap();
@@ -1464,6 +1538,7 @@ mod tests {
                 to_node: to,
                 polyline,
                 new_node_pos,
+                segments: None,
             }
         };
         let fixture = serde_json::to_string(&Recorded {
@@ -1721,7 +1796,7 @@ mod tests {
             let RouteReply::Routed { mov, segments } = reply else {
                 panic!("{listed:?} did not route: {reply:?}");
             };
-            let read = embedding::embed(&state, &mov.clone().by(Player::Human, 1000)).unwrap();
+            let read = embedding::embed(&state, &mov.clone().by(&state)).unwrap();
             assert_eq!(
                 (read.a, read.at_a, read.b, read.at_b),
                 (listed.a, None, listed.b, None)
@@ -1737,7 +1812,7 @@ mod tests {
             let Outcome::Applied { .. } = apply(&mut played, mov) else {
                 panic!("the routed move for {listed:?} was rejected");
             };
-            assert_eq!(played.move_history[0].segments, segments);
+            assert_on_grid_of(&played.move_history[0].segments, &segments, 1000);
         }
         let wire = serde_json::to_value(route_move(&state, face_move(0, 1, vec![]))).unwrap();
         assert_eq!(wire["kind"], json!("routed"));

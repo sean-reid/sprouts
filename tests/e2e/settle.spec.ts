@@ -56,6 +56,8 @@ function armSettleProbe(page: Page, nodes: number): Promise<void> {
           requestAnimationFrame(sample);
           return;
         }
+        // The next board, the AI's reply, starts its own animation.
+        if ((hooks.latestNodes?.length ?? 0) > nodes) return;
         const target = document.querySelector('[data-node="3"]');
         if (target) {
           const rect = target.getBoundingClientRect();
