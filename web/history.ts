@@ -731,16 +731,17 @@ export interface LinkEngine {
   rehearse(plan: Rehearsal): Promise<Rehearsed>;
 }
 
-// The game as the link will carry it, worked out on a copy: the engine
-// says which drawn moves the router redraws, then the link is replayed as
-// decoded and any topology move the replay refuses, or lands its node more
-// than DRIFT_TOLERANCE from the recorded one, both nodes rounded as a link
-// carries them, goes as geometry until the whole link applies and every
-// routed node holds. A refused drawn move is
-// blamed on the latest topology move before it, whose redraw shifted the
-// board under it; when none precedes it the index comes back so the sharer
-// can be told. A history the engine refuses to classify, as one left with
-// moves past a stopped restore, keeps the face moves the AI reported.
+// The game as the link will carry it, worked out on a copy: the
+// engine says which drawn moves the router redraws, then the link
+// is replayed as decoded and any topology move the replay refuses,
+// or lands its node more than DRIFT_TOLERANCE from the recorded
+// one, both nodes rounded as a link carries them, goes as geometry
+// until the whole link applies and every routed node holds. A
+// refused drawn move is blamed on the latest topology move before
+// it, whose redraw shifted the board under it; when none precedes
+// it the index comes back so the sharer can be told. A history the
+// engine refuses to classify, as one left with moves past a
+// stopped restore, keeps the face moves the AI reported.
 export async function prepareLink(
   source: History,
   engine: LinkEngine,
