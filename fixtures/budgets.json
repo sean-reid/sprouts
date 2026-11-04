@@ -1,7 +1,7 @@
 {
   "face_update": 1,
   "enumeration": 1,
-  "routing": 500,
+  "routing": 400,
   "search": 1000,
   "validation": 1
 }
