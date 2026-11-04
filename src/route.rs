@@ -144,7 +144,9 @@ fn plan(
         .face
         .corner_face(mv.a, mv.at_a)
         .map_err(|_| Unroutable::Bug("corner"))?;
-    let arena = erode::Arena::build(state, face, mv.a, mv.b, c, want.node_clearance)?;
+    // The fit may move the curve a tolerance off the path at a disc too.
+    let disc = want.node_clearance + curve::tolerance(state.board_size);
+    let arena = erode::Arena::build(state, face, mv.a, mv.b, c, disc)?;
     let (pa, pb) = (state.nodes[mv.a].position, state.nodes[mv.b].position);
     let entries = arena.entries(state, mv.a, mv.at_a, c, pb);
     let exits = arena.entries(state, mv.b, mv.at_b, c, pa);
@@ -438,7 +440,8 @@ fn place_node(
                     .all(|n| n.position.distance_to(q) >= apart)
         })
     };
-    spot(spacing.max(2.0 * node_disc(state.board_size))).or_else(|| spot(spacing))
+    // The validator's test is a strict less-than on a spot snapped twice.
+    spot(spacing.max(2.0 * node_disc(state.board_size))).or_else(|| spot(spacing + 1e-6))
 }
 
 /// The pieces a bare node's loop would enclose from its other side.

@@ -617,16 +617,27 @@ impl Arena {
                     }
                 }
             }
-            let probe = self.centroid(t);
-            let clear = self.walls.distance(probe, c) >= c - 1e-7
-                && self
-                    .nodes
-                    .iter()
-                    .all(|n| n.distance_to(&probe) >= self.node_clearance - 1e-7)
-                && self
-                    .ends
-                    .iter()
-                    .all(|e| e.distance_to(&probe) >= self.end_clearance - 1e-7);
+            // A region's vertices sit on the clearance curves, a jitter off
+            // them; a vertex further inside marks a cell the curves missed.
+            let clear_at = |p: Point, slack: f64| {
+                self.walls.distance(p, c) >= c - slack
+                    && self
+                        .nodes
+                        .iter()
+                        .all(|n| n.distance_to(&p) >= self.node_clearance - slack)
+                    && self
+                        .ends
+                        .iter()
+                        .all(|e| e.distance_to(&p) >= self.end_clearance - slack)
+            };
+            let clear = clear_at(self.centroid(t), 1e-7)
+                && region.iter().all(|&f| {
+                    self.cdt
+                        .face(f)
+                        .positions()
+                        .into_iter()
+                        .all(|p| clear_at(point(p), 2.0 * JITTER))
+                });
             if clear {
                 for f in region {
                     free[f.index()] = true;
