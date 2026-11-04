@@ -10,6 +10,7 @@
 
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap, HashSet};
+use std::hash::{BuildHasherDefault, Hasher};
 
 use spade::handles::FixedVertexHandle;
 
@@ -47,6 +48,38 @@ struct Key {
     /// Whether the path has been outside the exit's guard.
     out: bool,
 }
+
+/// A multiply and fold over the words of a key: the search looks its
+/// states up by the hundred thousand, and keys are a few small integers
+/// from a trusted source.
+#[derive(Default)]
+struct FoldHasher(u64);
+
+impl Hasher for FoldHasher {
+    fn finish(&self) -> u64 {
+        self.0 ^ (self.0 >> 29)
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            self.write_u64(u64::from(b));
+        }
+    }
+
+    fn write_u64(&mut self, v: u64) {
+        self.0 = (self.0.rotate_left(23) ^ v).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    }
+
+    fn write_usize(&mut self, v: usize) {
+        self.write_u64(v as u64);
+    }
+
+    fn write_u8(&mut self, v: u8) {
+        self.write_u64(u64::from(v));
+    }
+}
+
+type Fold = BuildHasherDefault<FoldHasher>;
 
 #[derive(Clone, Copy)]
 struct Item {
@@ -124,10 +157,10 @@ pub(super) fn search(
     want: Want,
     is_loop: bool,
 ) -> Result<Corridor, Unroutable> {
-    let goal: HashSet<usize> = exit.tris.iter().copied().collect();
+    let goal: HashSet<usize, Fold> = exit.tris.iter().copied().collect();
     let mut heap = BinaryHeap::new();
-    let mut best: HashMap<Key, f64> = HashMap::new();
-    let mut parent: HashMap<Key, (Key, (Point, Point))> = HashMap::new();
+    let mut best: HashMap<Key, f64, Fold> = HashMap::default();
+    let mut parent: HashMap<Key, (Key, (Point, Point)), Fold> = HashMap::default();
     for &t in &entry.tris {
         let key = Key {
             tri: t,
@@ -150,6 +183,8 @@ pub(super) fn search(
         // A loop has to have gone somewhere before it returns.
         let open = !is_loop || parent.contains_key(&key);
         if goal.contains(&key.tri) && open && accepts(want, key.mask, cuts.all) {
+            #[cfg(test)]
+            super::stats::with(|s| s.states_ok_max = s.states_ok_max.max(best.len()));
             let mut portals = Vec::new();
             let mut cur = key;
             while let Some((prev, portal)) = parent.get(&cur) {
@@ -207,8 +242,8 @@ pub(super) fn search(
 /// least one edge: a loop's exit is its entry, and a path has to go
 /// somewhere first.
 pub(super) fn reachable(arena: &Arena, entry: &Entry, exit: &Entry, is_loop: bool) -> bool {
-    let goal: HashSet<usize> = exit.tris.iter().copied().collect();
-    let mut seen: HashSet<(usize, bool)> = HashSet::new();
+    let goal: HashSet<usize, Fold> = exit.tris.iter().copied().collect();
+    let mut seen: HashSet<(usize, bool), Fold> = HashSet::default();
     let mut stack: Vec<(usize, bool)> = entry
         .tris
         .iter()

@@ -9,12 +9,15 @@
 //! optional relaxation moves it off the walls where the room allows, and
 //! the spline is fit and read back through the embedding.
 
+use std::collections::{BTreeMap, BTreeSet};
+use std::rc::Rc;
+
 use crate::ai::rank_node_placements;
 use crate::curve;
 use crate::embedding;
 #[cfg(any(test, feature = "hash"))]
 use crate::exact::Fnv;
-use crate::face::{Component, Move as FaceMove, NodeId};
+use crate::face::{Component, FaceId, HalfEdgeId, Move as FaceMove, NodeId};
 use crate::geometry::resample_polyline;
 use crate::types::{
     ai_node_clearance, node_disc, scale, GameState, Move, Player, Point, AI_INTERSECTION_TOLERANCE,
@@ -31,6 +34,37 @@ mod small_loop;
 pub mod sweep;
 #[cfg(test)]
 mod tests;
+
+/// Counts of the router's work since the last `take`, for the probes.
+#[cfg(test)]
+pub(crate) mod stats {
+    use std::cell::RefCell;
+
+    #[derive(Debug, Default, Clone)]
+    pub struct Stats {
+        pub attempts: usize,
+        pub arenas: usize,
+        pub arena_ms: f64,
+        /// Most states a corridor search that found its path held.
+        pub states_ok_max: usize,
+        /// Each parity search: bits to flip, bits in play, and whether it
+        /// found its corridor.
+        pub parity: Vec<(u32, u32, bool)>,
+        pub refused: super::sweep::Tally,
+    }
+
+    thread_local! {
+        static STATS: RefCell<Stats> = RefCell::new(Stats::default());
+    }
+
+    pub fn with(f: impl FnOnce(&mut Stats)) {
+        STATS.with(|s| f(&mut s.borrow_mut()));
+    }
+
+    pub fn take() -> Stats {
+        STATS.with(|s| std::mem::take(&mut *s.borrow_mut()))
+    }
+}
 
 /// Why a legal move could not be drawn.
 #[derive(Debug, Clone, PartialEq)]
@@ -98,44 +132,127 @@ fn rules(state: &GameState) -> Rules {
 /// The curve for `mv`, drawn to the clearances of the player to move,
 /// validated as that player and read back as `mv`.
 pub fn route(state: &GameState, mv: &FaceMove) -> Result<Move, Unroutable> {
-    let want = rules(state);
-    let drawn = route_at(state, mv, &want);
-    // The disc clearance is what the AI aims for; a line that cannot have
-    // it is still legal at the clearance a human line gets.
-    let worth_retrying = matches!(
-        drawn,
-        Err(Unroutable::Room | Unroutable::NoSpot | Unroutable::Shape(_))
-    );
-    if !worth_retrying || want.node_clearance <= want.fallback {
-        return drawn;
-    }
-    route_cheap(state, mv)
+    Router::new().route(state, mv)
 }
 
-/// `route` at the clearance a human line gets, one attempt.
-pub fn route_cheap(state: &GameState, mv: &FaceMove) -> Result<Move, Unroutable> {
-    let want = rules(state);
-    route_at(
-        state,
-        mv,
-        &Rules {
-            node_clearance: want.fallback,
-            ..want
-        },
-    )
+/// An eroded face by face, end pair and node clearance.
+type ArenaKey = (FaceId, NodeId, NodeId, u64);
+/// A chord's corners and node clearance.
+type CornerKey = (
+    FaceId,
+    NodeId,
+    Option<HalfEdgeId>,
+    NodeId,
+    Option<HalfEdgeId>,
+    u64,
+);
+
+/// Work shared by every route of one position: an eroded face depends on
+/// the face, the move's end nodes and the clearances, not on which pieces
+/// the move encloses, and a chord's ends being disconnected in it refuses
+/// every chord between the same corners.
+#[derive(Default)]
+pub struct Router {
+    arenas: BTreeMap<ArenaKey, Result<Rc<erode::Arena>, Unroutable>>,
+    no_room: BTreeSet<CornerKey>,
 }
 
-fn route_at(state: &GameState, mv: &FaceMove, want: &Rules) -> Result<Move, Unroutable> {
-    if mv.a == mv.b && mv.enclosed.is_empty() {
-        return small_loop::route(state, mv, want.clearance, want.node_clearance);
+impl Router {
+    pub fn new() -> Self {
+        Self::default()
     }
-    let (arena, path) = plan(state, mv, want)?;
-    // The relaxed path is the one wanted; the taut path already keeps
-    // every clearance when the relaxation ends up somewhere it cannot be
-    // used.
-    match relax(state, mv, want, &arena, &path) {
-        Some(relaxed) => finish(state, mv, relaxed).or_else(|_| finish(state, mv, path)),
-        None => finish(state, mv, path),
+
+    /// The curve for `mv`, drawn to the clearances of the player to move,
+    /// validated as that player and read back as `mv`.
+    pub fn route(&mut self, state: &GameState, mv: &FaceMove) -> Result<Move, Unroutable> {
+        let want = rules(state);
+        let drawn = self.route_at(state, mv, &want);
+        // The disc clearance is what the AI aims for; a line that cannot
+        // have it is still legal at the clearance a human line gets.
+        let worth_retrying = matches!(
+            drawn,
+            Err(Unroutable::Room | Unroutable::NoSpot | Unroutable::Shape(_))
+        );
+        if !worth_retrying || want.node_clearance <= want.fallback {
+            return drawn;
+        }
+        self.route_cheap(state, mv)
+    }
+
+    /// `route` at the clearance a human line gets, one attempt.
+    pub fn route_cheap(&mut self, state: &GameState, mv: &FaceMove) -> Result<Move, Unroutable> {
+        let want = rules(state);
+        self.route_at(
+            state,
+            mv,
+            &Rules {
+                node_clearance: want.fallback,
+                ..want
+            },
+        )
+    }
+
+    fn route_at(
+        &mut self,
+        state: &GameState,
+        mv: &FaceMove,
+        want: &Rules,
+    ) -> Result<Move, Unroutable> {
+        let drawn = self.route_at_once(state, mv, want);
+        #[cfg(test)]
+        stats::with(|s| {
+            s.attempts += 1;
+            if let Err(why) = &drawn {
+                s.refused.count(why);
+            }
+        });
+        drawn
+    }
+
+    fn route_at_once(
+        &mut self,
+        state: &GameState,
+        mv: &FaceMove,
+        want: &Rules,
+    ) -> Result<Move, Unroutable> {
+        if mv.a == mv.b && mv.enclosed.is_empty() {
+            return small_loop::route(state, mv, want.clearance, want.node_clearance);
+        }
+        let (arena, path) = plan(self, state, mv, want)?;
+        // The relaxed path is the one wanted; the taut path already keeps
+        // every clearance when the relaxation ends up somewhere it cannot
+        // be used.
+        match relax(state, mv, want, &arena, &path) {
+            Some(relaxed) => finish(state, mv, relaxed).or_else(|_| finish(state, mv, path)),
+            None => finish(state, mv, path),
+        }
+    }
+
+    /// `face` eroded for a move between `mv`'s ends, built once.
+    fn arena(
+        &mut self,
+        state: &GameState,
+        face: FaceId,
+        mv: &FaceMove,
+        want: &Rules,
+    ) -> Result<Rc<erode::Arena>, Unroutable> {
+        let disc = disc_of(state, want);
+        let key = (face, mv.a, mv.b, disc.to_bits());
+        if let Some(hit) = self.arenas.get(&key) {
+            return hit.clone();
+        }
+        #[cfg(test)]
+        let started = std::time::Instant::now();
+        let c = eroded_by(state, want);
+        let built =
+            erode::Arena::build(state, face, mv.a, mv.b, c, disc, want.forgiven).map(Rc::new);
+        #[cfg(test)]
+        stats::with(|s| {
+            s.arenas += 1;
+            s.arena_ms += started.elapsed().as_secs_f64() * 1000.0;
+        });
+        self.arenas.insert(key, built.clone());
+        built
     }
 }
 
@@ -146,14 +263,21 @@ fn eroded_by(state: &GameState, want: &Rules) -> f64 {
     want.clearance + curve::tolerance(state.board_size)
 }
 
+/// The disc cut out round every other node: the fit may move the curve a
+/// tolerance off the path at a disc too.
+fn disc_of(state: &GameState, want: &Rules) -> f64 {
+    want.node_clearance + curve::tolerance(state.board_size)
+}
+
 /// The taut path for `mv` through the eroded face, in the homotopy class
 /// the move names, with its pinches parted and its crossings undone.
 fn plan(
+    router: &mut Router,
     state: &GameState,
     mv: &FaceMove,
     want: &Rules,
-) -> Result<(erode::Arena, Vec<Point>), Unroutable> {
-    let (arena, path) = taut_path(state, mv, want)?;
+) -> Result<(Rc<erode::Arena>, Vec<Point>), Unroutable> {
+    let (arena, path) = taut_path(router, state, mv, want)?;
     let path = split_pinches(path, eroded_by(state, want) / 4.0, |q| arena.free_at(q));
     let path = settle(path)?;
     Ok((arena, path))
@@ -167,38 +291,62 @@ fn settle(path: Vec<Point>) -> Result<Vec<Point>, Unroutable> {
 
 /// The taut path for `mv` through the eroded face as the funnel leaves it.
 fn taut_path(
+    router: &mut Router,
     state: &GameState,
     mv: &FaceMove,
     want: &Rules,
-) -> Result<(erode::Arena, Vec<Point>), Unroutable> {
-    let c = eroded_by(state, want);
+) -> Result<(Rc<erode::Arena>, Vec<Point>), Unroutable> {
     let face = state
         .face
         .corner_face(mv.a, mv.at_a)
         .map_err(|_| Unroutable::Bug("corner"))?;
-    // The fit may move the curve a tolerance off the path at a disc too.
-    let disc = want.node_clearance + curve::tolerance(state.board_size);
-    let arena = erode::Arena::build(state, face, mv.a, mv.b, c, disc, want.forgiven)?;
-    let entry = arena.entries(state, mv.a, mv.at_a)?;
-    let exit = arena.entries(state, mv.b, mv.at_b)?;
+    let corners = (
+        face,
+        mv.a,
+        mv.at_a,
+        mv.b,
+        mv.at_b,
+        disc_of(state, want).to_bits(),
+    );
+    if router.no_room.contains(&corners) {
+        return Err(Unroutable::Room);
+    }
+    let arena = router.arena(state, face, mv, want)?;
+    let is_loop = mv.a == mv.b;
+    // A corner with no free triangle refuses every move from it, and a
+    // chord's Room means the free triangles disconnect its ends, which
+    // refuses every chord between those corners. A loop's Room means no
+    // closed walk from the node crosses a cut, which only the parity
+    // search decides.
+    let mut refuse_corners = |why: Unroutable| {
+        if why == Unroutable::Room {
+            router.no_room.insert(corners);
+        }
+        why
+    };
+    let entry = arena
+        .entries(state, mv.a, mv.at_a)
+        .map_err(&mut refuse_corners)?;
+    let exit = arena
+        .entries(state, mv.b, mv.at_b)
+        .map_err(&mut refuse_corners)?;
     let blocked = corridor::blocked(&arena, &entry, &exit);
     let cuts = arena.cuts(state, mv, face, &blocked)?;
     let own = state
         .face
         .component_of(mv.a, mv.at_a)
         .map_err(|_| Unroutable::Bug("corner"))?;
-    let is_loop = mv.a == mv.b;
     let first = corridor::search(&arena, &cuts, &entry, &exit, corridor::Want::Any, is_loop);
-    // A chord's Room means the free triangles disconnect its ends, so a
-    // path the search missed is a bug. A loop's Room means no closed walk
-    // from the node crosses a cut, which only the parity search decides.
-    if !is_loop
-        && matches!(first, Err(Unroutable::Room))
-        && corridor::reachable(&arena, &entry, &exit, is_loop)
-    {
-        return Err(Unroutable::Bug("room with a path"));
-    }
-    let first = first?;
+    let first = match first {
+        Err(Unroutable::Room) if !is_loop => {
+            // A path the search missed is a bug.
+            if corridor::reachable(&arena, &entry, &exit, is_loop) {
+                return Err(Unroutable::Bug("room with a path"));
+            }
+            return Err(refuse_corners(Unroutable::Room));
+        }
+        other => other?,
+    };
     let mut path = arena.tighten(&cuts, &corridor::draw(&first, &entry, &exit), &entry, &exit);
     if cuts.all != 0 {
         let wrong = wrong_sides(state, mv, own, &cuts, &path);
@@ -206,7 +354,13 @@ fn taut_path(
             // Flipping every bit at once is the same move drawn round the
             // other side of its own piece, and a bare node has no sides.
             let want = corridor::Want::Parity(first.parity ^ wrong);
-            let second = corridor::search(&arena, &cuts, &entry, &exit, want, is_loop)?;
+            let second = corridor::search(&arena, &cuts, &entry, &exit, want, is_loop);
+            #[cfg(test)]
+            stats::with(|s| {
+                s.parity
+                    .push((wrong.count_ones(), cuts.all.count_ones(), second.is_ok()))
+            });
+            let second = second?;
             path = arena.tighten(
                 &cuts,
                 &corridor::draw(&second, &entry, &exit),

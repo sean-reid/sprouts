@@ -6,6 +6,9 @@ use crate::nimber::Nimbers;
 use crate::route;
 use crate::types::{GameState, Move, Player};
 
+#[cfg(test)]
+mod tests;
+
 /// The AI's answer to a position.
 #[derive(Debug, Clone)]
 pub enum Reply {
@@ -21,6 +24,9 @@ pub enum Reply {
 const CLASS_TRIES: usize = 6;
 /// Wall clock for drawing, after the search has had its own.
 const ROUTE_BUDGET_MS: f64 = 800.0;
+/// Wall clock after which the rest of the ranking goes untried and the
+/// position is given up as Undrawn.
+const DRAW_LIMIT_MS: f64 = 10_000.0;
 
 /// Lists the search moves, ranks them once on the model, and draws the
 /// best one that routes, walking the ranking on failure.
@@ -55,21 +61,35 @@ pub(crate) fn rank(state: &GameState, candidates: &[FaceMove]) -> Vec<usize> {
 
 /// Routes the candidates in ranked order until one draws, trying the other
 /// members of a move's class before moving down the ranking. Once
-/// `ROUTE_BUDGET_MS` has passed, every remaining candidate still gets one
-/// attempt at the cheap clearance, so Undrawn means every listed move was
-/// tried. Returns the drawn move and the number of ranked moves passed
-/// over.
+/// `ROUTE_BUDGET_MS` has passed, each remaining candidate gets one attempt
+/// at the cheap clearance, until `DRAW_LIMIT_MS` has passed and the rest
+/// go untried. Returns the drawn move and the number of ranked moves
+/// passed over.
 pub(crate) fn draw(
     state: &GameState,
     candidates: &[FaceMove],
     order: &[usize],
 ) -> (Option<Move>, usize) {
-    let mut clock = WallClock::start();
+    draw_within(state, candidates, order, WallClock::start())
+}
+
+/// `draw` on the given clock.
+pub(crate) fn draw_within(
+    state: &GameState,
+    candidates: &[FaceMove],
+    order: &[usize],
+    mut clock: impl Clock,
+) -> (Option<Move>, usize) {
+    let mut router = route::Router::new();
     let mut failures = 0;
     for &idx in order {
         let listed = &candidates[idx];
-        if clock.elapsed_ms() > ROUTE_BUDGET_MS {
-            if let Ok(mov) = route::route_cheap(state, listed) {
+        let elapsed = clock.elapsed_ms();
+        if elapsed > DRAW_LIMIT_MS {
+            break;
+        }
+        if elapsed > ROUTE_BUDGET_MS {
+            if let Ok(mov) = router.route_cheap(state, listed) {
                 return (Some(mov), failures);
             }
             failures += 1;
@@ -77,7 +97,7 @@ pub(crate) fn draw(
         }
         let tries = std::iter::once(listed.clone()).chain(class_members(state, listed));
         for attempt in tries {
-            if let Ok(mov) = route::route(state, &attempt) {
+            if let Ok(mov) = router.route(state, &attempt) {
                 return (Some(mov), failures);
             }
             if clock.elapsed_ms() > ROUTE_BUDGET_MS {
