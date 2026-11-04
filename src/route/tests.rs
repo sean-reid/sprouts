@@ -673,6 +673,10 @@ struct Drift {
     refused: Option<usize>,
     node: f64,
     board: f64,
+    /// The first move an index link's replay refuses, and the bytes the
+    /// link's moves take.
+    index_refused: Option<usize>,
+    index_bytes: usize,
 }
 
 /// Replays a shared game the way a visitor's engine replays its link and
@@ -724,6 +728,7 @@ fn rehearse_shared_game(game: &SharedGame) -> Drift {
     let rehearsed = protocol::rehearse(protocol::Rehearsal {
         router_version: protocol::ROUTER_VERSION,
         settle_version: fixture.settle_version,
+        list_version: protocol::MOVE_LIST_VERSION,
         initial_nodes: fixture.initial_nodes,
         board_size: fixture.board_size,
         first_player: Player::Human,
@@ -734,9 +739,66 @@ fn rehearse_shared_game(game: &SharedGame) -> Drift {
         moves,
     })
     .unwrap();
+    let indexed = protocol::index_moves(protocol::Classification {
+        initial_nodes: fixture.initial_nodes,
+        board_size: fixture.board_size,
+        first_player: Player::Human,
+        nodes: None,
+        settle_version: fixture.settle_version,
+        moves: fixture.moves.iter().map(|m| m.wire()).collect(),
+        known: vec![None; fixture.moves.len()],
+    })
+    .unwrap_or_else(|why| panic!("indexing: {why}"));
+    let by_index = protocol::rehearse(protocol::Rehearsal {
+        router_version: protocol::ROUTER_VERSION,
+        settle_version: fixture.settle_version,
+        list_version: protocol::MOVE_LIST_VERSION,
+        initial_nodes: fixture.initial_nodes,
+        board_size: fixture.board_size,
+        first_player: Player::Human,
+        nodes: None,
+        moves: indexed
+            .moves
+            .iter()
+            .map(|m| protocol::LinkMove::Indexed {
+                index: m.index,
+                along: m.along,
+            })
+            .collect(),
+    })
+    .unwrap();
+    if by_index.refused.is_some() {
+        let mut state = protocol::start(
+            fixture.initial_nodes,
+            fixture.board_size,
+            Player::Human,
+            None,
+            fixture.settle_version,
+        )
+        .unwrap();
+        for (i, m) in indexed.moves.iter().enumerate() {
+            if let protocol::Outcome::Rejected { rejection } =
+                protocol::apply_indexed_move(&mut state, *m)
+            {
+                eprintln!(
+                    "  index replay refused move {i} ({m:?}): {}",
+                    rejection.message
+                );
+                break;
+            }
+        }
+    }
+    let varint =
+        |v: usize| 1 + (usize::BITS - v.max(1).leading_zeros()).saturating_sub(1) as usize / 7;
     let mut drift = Drift {
         topology: game.topology.iter().flatten().count(),
         refused: rehearsed.refused,
+        index_refused: by_index.refused,
+        index_bytes: indexed
+            .moves
+            .iter()
+            .map(|m| varint(m.index * 2) + usize::from(m.along > 0))
+            .sum(),
         ..Drift::default()
     };
     for (m, node) in fixture.moves.iter().zip(&rehearsed.nodes) {
@@ -792,7 +854,7 @@ fn a_shared_game_replays_to_the_same_board() {
 #[test]
 #[ignore]
 fn measure_shared_game_drift() {
-    eprintln!("pick nodes moves topology refused node_drift board_drift");
+    eprintln!("pick nodes moves topology refused node_drift board_drift index_refused index_bytes");
     for pick in 0..21 {
         let game = match shared_game_at(pick) {
             Ok(game) => game,
@@ -803,22 +865,27 @@ fn measure_shared_game_drift() {
         };
         let drift = rehearse_shared_game(&game);
         eprintln!(
-            "{pick} {} {} {} {} {:.3} {:.3}",
+            "{pick} {} {} {} {} {:.3} {:.3} {} {}",
             game.fixture.initial_nodes,
             game.fixture.moves.len(),
             drift.topology,
             drift.refused.map_or("none".to_string(), |i| i.to_string()),
             drift.node,
-            drift.board
+            drift.board,
+            drift
+                .index_refused
+                .map_or("none".to_string(), |i| i.to_string()),
+            drift.index_bytes
         );
     }
 }
 
-/// Rewrites the two shared-game fixtures that tests/e2e/replay-links.spec.ts
-/// carries as topology, for when the router's output changes:
+/// Rewrites the three shared-game fixtures tests/e2e/replay-links.spec.ts
+/// shares, for when the router's output changes:
 /// `cargo test --release record_shared_games -- --ignored`. The pick,
-/// from SPROUTS_PICK_4 and SPROUTS_PICK_9 when set, is which chord the
-/// human opens with. The record is deterministic.
+/// from SPROUTS_PICK_4, SPROUTS_PICK_9 and SPROUTS_PICK_12 when set, is
+/// which chord the human opens with. The record is deterministic while
+/// the AI's draw stays inside its routing budget.
 #[test]
 #[ignore]
 fn record_shared_games() {
@@ -840,6 +907,12 @@ fn record_shared_games() {
         10,
         pick("SPROUTS_PICK_9", 36),
         &dir.join("ten-moves-9n-1000.json"),
+    );
+    record_shared_game(
+        12,
+        30,
+        pick("SPROUTS_PICK_12", 0),
+        &dir.join("thirty-moves-12n-1000.json"),
     );
 }
 
