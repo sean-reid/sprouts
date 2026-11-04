@@ -1,8 +1,19 @@
 use super::*;
+use crate::protocol::{self, SETTLE_VERSION};
 use crate::replay;
 use crate::types::Player;
 use proptest::prelude::*;
 use std::path::Path;
+
+/// The recorded games were played with no settling, so their strokes are
+/// applied as drawn and the settle is measured on a copy of each
+/// position at the current version.
+fn settled_copy(state: &GameState) -> GameState {
+    let mut copy = state.clone();
+    copy.settle_version = SETTLE_VERSION;
+    settle(&mut copy);
+    copy
+}
 
 fn fixtures() -> Vec<replay::Fixture> {
     fixtures_under("fixtures/games")
@@ -70,34 +81,29 @@ fn same_face_model(state: &GameState) -> bool {
 }
 
 #[test]
-fn every_fixture_settles_without_changing_the_model_or_losing_clearance() {
+fn every_fixture_position_settles_without_changing_the_model_or_losing_clearance() {
     for fixture in fixtures() {
-        let mut state = fixture.start();
+        let mut drawn = fixture.start();
+        assert_eq!(drawn.settle_version, 0);
+        let mut worst_after = f64::INFINITY;
         for (index, recorded) in fixture.moves.iter().enumerate() {
-            let mov = crate::types::Move::new(
-                recorded.from,
-                recorded.to,
-                recorded
-                    .polyline
-                    .iter()
-                    .map(|p| Point::new(p[0], p[1]))
-                    .collect(),
-                Point::new(recorded.new_node[0], recorded.new_node[1]),
-                state.current_player,
-                state.board_size,
-            );
-            crate::protocol::check(&state, &mov)
+            let mov = fixture_move(&drawn, recorded);
+            protocol::check(&drawn, &mov)
                 .unwrap_or_else(|e| panic!("move {index} rejected: {}", e.message));
-            state.apply_move(mov).unwrap();
-            let (before, _) = least_clearance(&state);
-            let drawn = state.clone();
-            settle(&mut state);
-            let (after, _) = least_clearance(&state);
+            drawn.apply_move(mov).unwrap();
+            let (before, _) = least_clearance(&drawn);
+            let state = settled_copy(&drawn);
+            let (after, at) = least_clearance(&state);
             assert!(
                 after + 1e-9 >= before,
                 "move {index}: least clearance fell from {before:.3} to {after:.3}"
             );
             assert!(same_face_model(&state), "move {index} changed the model");
+            worst_after = worst_after.min(after);
+            println!(
+                "{} nodes, board {}, move {index}: least ratio {before:.2} -> {after:.2} at {at:?}",
+                fixture.initial_nodes, fixture.board_size
+            );
             for (line, was) in state.lines.iter().zip(&drawn.lines) {
                 assert_eq!(line.flat, line.flatten(curve::tolerance(state.board_size)));
                 let node = state.find_node(state.initial_node_count + line.id).unwrap();
@@ -122,33 +128,26 @@ fn every_fixture_settles_without_changing_the_model_or_losing_clearance() {
                 );
             }
         }
+        println!(
+            "{} nodes, board {}: least ratio after settling over the game {worst_after:.2}",
+            fixture.initial_nodes, fixture.board_size
+        );
     }
 }
 
 #[test]
 fn settling_twice_moves_nothing_beyond_the_fit_tolerance() {
     for fixture in fixtures() {
-        let mut state = fixture.start();
+        let mut drawn = fixture.start();
         for recorded in &fixture.moves {
-            let mov = crate::types::Move::new(
-                recorded.from,
-                recorded.to,
-                recorded
-                    .polyline
-                    .iter()
-                    .map(|p| Point::new(p[0], p[1]))
-                    .collect(),
-                Point::new(recorded.new_node[0], recorded.new_node[1]),
-                state.current_player,
-                state.board_size,
-            );
-            state.apply_move(mov).unwrap();
-            settle(&mut state);
-            let once = state.clone();
-            settle(&mut state);
-            let moved = drift(&once, &state);
+            let mov = fixture_move(&drawn, recorded);
+            drawn.apply_move(mov).unwrap();
+            let once = settled_copy(&drawn);
+            let mut twice = once.clone();
+            settle(&mut twice);
+            let moved = drift(&once, &twice);
             assert!(
-                moved <= curve::tolerance(state.board_size),
+                moved <= curve::tolerance(drawn.board_size),
                 "second settle moved {moved:.3} after {} moves of a {} node game",
                 once.lines.len(),
                 fixture.initial_nodes
@@ -157,9 +156,43 @@ fn settling_twice_moves_nothing_beyond_the_fit_tolerance() {
     }
 }
 
+/// A recording made with no settling replays with none: the board after
+/// every move is the one the strokes alone give, and every settle record
+/// is empty.
+#[test]
+fn a_version_0_record_replays_as_drawn() {
+    for fixture in fixtures() {
+        let mut through = fixture.start();
+        let mut plain = fixture.start();
+        for recorded in &fixture.moves {
+            let wire = protocol::Move {
+                from_node: recorded.from,
+                to_node: recorded.to,
+                polyline: recorded
+                    .polyline
+                    .iter()
+                    .map(|p| Point::new(p[0], p[1]))
+                    .collect(),
+                new_node_pos: Point::new(recorded.new_node[0], recorded.new_node[1]),
+            };
+            assert!(matches!(
+                protocol::apply(&mut through, wire),
+                protocol::Outcome::Applied { .. }
+            ));
+            plain.apply_move(fixture_move(&plain, recorded)).unwrap();
+            assert_eq!(bits(&through), bits(&plain));
+        }
+        assert_eq!(through.settles.len(), fixture.moves.len());
+        assert!(through
+            .settles
+            .iter()
+            .all(|s| s.nodes.is_empty() && s.lines.is_empty()));
+    }
+}
+
 /// A chord bent through a control point, or a loop round a node, from
-/// the indices a random game picks.
-fn random_move(state: &GameState, pick: (usize, usize, f64, f64)) -> Option<crate::types::Move> {
+/// the indices a random game picks, as the page would send it.
+fn random_move(state: &GameState, pick: (usize, usize, f64, f64)) -> Option<protocol::Move> {
     let n = state.nodes.len();
     let (a, b, bend, side) = (pick.0 % n, pick.1 % n, pick.2, pick.3);
     let from = state.nodes[a].position;
@@ -196,30 +229,43 @@ fn random_move(state: &GameState, pick: (usize, usize, f64, f64)) -> Option<crat
             .collect()
     };
     let new_node = polyline[20];
+    let wire = protocol::Move {
+        from_node: a,
+        to_node: b,
+        polyline,
+        new_node_pos: new_node,
+    };
     let mov = crate::types::Move::new(
         a,
         b,
-        polyline,
+        wire.polyline.clone(),
         new_node,
         state.current_player,
         state.board_size,
     );
-    crate::protocol::check(state, &mov).ok()?;
-    Some(mov)
+    protocol::check(state, &mov).ok()?;
+    Some(wire)
 }
 
-fn play_random(nodes: usize, picks: &[(usize, usize, f64, f64)]) -> (GameState, usize) {
+/// A random game played through the protocol, settling after each move,
+/// with the moves as sent.
+fn play_random(
+    nodes: usize,
+    picks: &[(usize, usize, f64, f64)],
+) -> (GameState, Vec<protocol::Move>) {
     let mut state = GameState::with_board_size(nodes, 1000);
     state.current_player = Player::Human;
-    let mut played = 0;
+    let mut played = Vec::new();
     for pick in picks {
         if state.face.is_game_over() {
             break;
         }
         if let Some(mov) = random_move(&state, *pick) {
-            state.apply_move(mov).unwrap();
-            settle(&mut state);
-            played += 1;
+            assert!(matches!(
+                protocol::apply(&mut state, mov.clone()),
+                protocol::Outcome::Applied { .. }
+            ));
+            played.push(mov);
         }
     }
     (state, played)
@@ -235,19 +281,22 @@ proptest! {
     ) {
         let (first, played) = play_random(nodes, &picks);
         let (second, again) = play_random(nodes, &picks);
-        prop_assert!(played > 0);
-        prop_assert_eq!(played, again);
+        prop_assert!(!played.is_empty());
+        prop_assert_eq!(played.len(), again.len());
         prop_assert_eq!(bits(&first), bits(&second));
         prop_assert!(same_face_model(&first));
     }
 }
 
+/// A fresh board has no move to settle around; the first chord, clear as
+/// it is, still opens the board up around it.
 #[test]
-fn a_fresh_board_and_a_clear_chord_are_left_alone() {
+fn a_fresh_board_is_left_alone_and_a_clear_chord_still_opens_the_board() {
     let mut state = GameState::new(4);
     let before = bits(&state);
     settle(&mut state);
     assert_eq!(bits(&state), before);
+    assert!(state.settles.pop().is_some());
     let a = state.nodes[0].position;
     let b = state.nodes[1].position;
     let polyline: Vec<Point> = (0..=10)
@@ -267,10 +316,12 @@ fn a_fresh_board_and_a_clear_chord_are_left_alone() {
             1000,
         ))
         .unwrap();
-    let before = bits(&state);
+    let (before, _) = least_clearance(&state);
     settle(&mut state);
-    assert_eq!(bits(&state), before);
-    assert_eq!(state.lines[0].polyline, polyline);
+    let (after, _) = least_clearance(&state);
+    assert!(after > before + 0.5, "{before:.3} -> {after:.3}");
+    assert!(same_face_model(&state));
+    assert_eq!(state.lines[0].polyline, state.lines[0].flat);
 }
 
 /// A chord drawn a human clearance past a node: the node and the line
@@ -313,13 +364,6 @@ fn a_line_hugging_a_node_is_pushed_off_it() {
         .distance;
     assert!(on_curve < 1e-6);
     assert!(same_face_model(&state));
-    let shift = MAX_SHIFT * MIN_NODE_SPACING;
-    assert!(
-        state.nodes[2]
-            .position
-            .distance_to(&Point::new(500.0, 512.0))
-            <= shift
-    );
 }
 
 fn fixture_move(state: &GameState, recorded: &replay::FixtureMove) -> crate::types::Move {
@@ -337,29 +381,35 @@ fn fixture_move(state: &GameState, recorded: &replay::FixtureMove) -> crate::typ
     )
 }
 
-/// No node or control point moves more than MAX_SHIFT node spacings in
-/// one settle; the drift over a whole game is printed for the record.
+/// No node or control point moves farther in one settle than the rounds
+/// at their longest stride allow, and nothing leaves the board; the
+/// largest move and the drift over a whole game are printed for the
+/// record.
 #[test]
-fn nothing_moves_more_than_the_shift_in_one_settle() {
+fn nothing_moves_more_than_the_rounds_allow_or_leaves_the_board() {
     for fixture in all_fixtures() {
-        let mut state = fixture.start();
-        let bound = MAX_SHIFT * MIN_NODE_SPACING * scale(state.board_size);
+        let mut drawn = fixture.start();
+        let board = drawn.board_size as f64;
+        let bound = ROUNDS as f64 * STRIDE_MAX * MIN_NODE_SPACING * scale(drawn.board_size);
         let mut drift: f64 = 0.0;
+        let mut largest: f64 = 0.0;
         let mut first_seen: Vec<Point> = Vec::new();
         for recorded in &fixture.moves {
-            let mov = fixture_move(&state, recorded);
-            state.apply_move(mov).unwrap();
-            let before: Vec<Point> = state.nodes.iter().map(|n| n.position).collect();
+            let mov = fixture_move(&drawn, recorded);
+            drawn.apply_move(mov).unwrap();
+            let before: Vec<Point> = drawn.nodes.iter().map(|n| n.position).collect();
             let controls: Vec<Vec<Cubic>> =
-                state.lines.iter().map(|l| l.segments.clone()).collect();
+                drawn.lines.iter().map(|l| l.segments.clone()).collect();
             if first_seen.len() < before.len() {
                 first_seen.extend_from_slice(&before[first_seen.len()..]);
             }
-            settle(&mut state);
+            let state = settled_copy(&drawn);
+            let inside = |p: &Point| p.x >= 0.0 && p.y >= 0.0 && p.x <= board && p.y <= board;
             for (line, was) in state.lines.iter().zip(&controls) {
                 for (c, w) in line.segments.iter().zip(was) {
                     for (p, q) in [(c.p0, w.p0), (c.p1, w.p1), (c.p2, w.p2), (c.p3, w.p3)] {
                         let moved = p.distance_to(&q);
+                        largest = largest.max(moved);
                         assert!(
                             moved <= bound + 1e-6,
                             "{} nodes: a control point of line {} moved {moved:.2} in one settle",
@@ -368,12 +418,25 @@ fn nothing_moves_more_than_the_shift_in_one_settle() {
                         );
                     }
                 }
+                assert!(
+                    line.flat.iter().all(inside),
+                    "{} nodes: line {} left the board",
+                    fixture.initial_nodes,
+                    line.id
+                );
             }
             for (node, was) in state.nodes.iter().zip(&before) {
                 let moved = node.position.distance_to(was);
+                largest = largest.max(moved);
                 assert!(
                     moved <= bound + 1e-6,
                     "{} nodes: node {} moved {moved:.2} in one settle",
+                    fixture.initial_nodes,
+                    node.id
+                );
+                assert!(
+                    inside(&node.position),
+                    "{} nodes: node {} left the board",
                     fixture.initial_nodes,
                     node.id
                 );
@@ -381,7 +444,7 @@ fn nothing_moves_more_than_the_shift_in_one_settle() {
             }
         }
         println!(
-            "{} nodes, board {}: a node drifted at most {drift:.1} units over {} moves",
+            "{} nodes, board {}: largest move in one settle {largest:.1}, a node drifted at most {drift:.1} units over {} moves",
             fixture.initial_nodes,
             fixture.board_size,
             fixture.moves.len()
@@ -389,37 +452,73 @@ fn nothing_moves_more_than_the_shift_in_one_settle() {
     }
 }
 
+/// Picks for a random game from a small multiplicative generator, so the
+/// games are fixed across runs.
+fn seeded_picks(seed: u64, count: usize) -> Vec<(usize, usize, f64, f64)> {
+    let mut x = seed
+        .wrapping_mul(6364136223846793005)
+        .wrapping_add(1442695040888963407);
+    let mut next = || {
+        x = x
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        (x >> 11) as f64 / (1u64 << 53) as f64
+    };
+    (0..count)
+        .map(|_| {
+            let a = (next() * 64.0) as usize;
+            let b = (next() * 64.0) as usize;
+            (a, b, next(), next())
+        })
+        .collect()
+}
+
+/// Games played with the settle, as the page plays them, at 3 to 9 nodes,
+/// with the moves as sent.
+fn settled_games() -> Vec<(GameState, Vec<protocol::Move>)> {
+    (3..=9)
+        .map(|nodes| play_random(nodes, &seeded_picks(nodes as u64, 40)))
+        .filter(|(_, moves)| !moves.is_empty())
+        .collect()
+}
+
 /// Undo puts back the geometry the undone move was drawn on, so the
-/// stroke that followed re-applies as it did.
+/// stroke that followed re-applies as it did, and the moves as drawn
+/// replay through the protocol to the same settled board.
 #[test]
 fn undo_restores_the_board_the_next_move_was_drawn_on() {
-    for fixture in all_fixtures() {
-        let mut state = fixture.start();
+    let games = settled_games();
+    assert!(games.len() >= 5);
+    for (played, moves) in games {
+        let mut state = GameState::with_board_size(played.initial_node_count, played.board_size);
+        state.current_player = Player::Human;
         let mut boards = vec![bits(&state)];
-        for recorded in &fixture.moves {
-            let mov = fixture_move(&state, recorded);
-            state.apply_move(mov).unwrap();
-            settle(&mut state);
+        for mov in &moves {
+            assert!(matches!(
+                protocol::apply(&mut state, mov.clone()),
+                protocol::Outcome::Applied { .. }
+            ));
             boards.push(bits(&state));
         }
-        assert_eq!(state.settles.len(), fixture.moves.len());
+        assert_eq!(bits(&state), bits(&played));
+        assert_eq!(state.settles.len(), moves.len());
         let finished = boards.last().unwrap().clone();
-        while crate::protocol::undo(&mut state) {
+        while protocol::undo(&mut state) {
             boards.pop();
             assert_eq!(
                 bits(&state),
                 *boards.last().unwrap(),
                 "{} nodes: undo to {} moves left a different board",
-                fixture.initial_nodes,
+                played.initial_node_count,
                 state.lines.len()
             );
         }
         assert!(state.settles.is_empty());
-        for recorded in &fixture.moves {
-            let mov = fixture_move(&state, recorded);
-            crate::protocol::check(&state, &mov).unwrap();
-            state.apply_move(mov).unwrap();
-            settle(&mut state);
+        for mov in &moves {
+            assert!(matches!(
+                protocol::apply(&mut state, mov.clone()),
+                protocol::Outcome::Applied { .. }
+            ));
         }
         assert_eq!(bits(&state), finished);
     }

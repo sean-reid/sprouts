@@ -79,10 +79,9 @@ export function nodeAt(frame: Frame, t: Transform, index: number, count = 4): Cl
   return toClient(frame, t, nodeWorld(index, count, frame.board));
 }
 
-// A node moves at most one node spacing per settle (MAX_SHIFT in
-// src/settle.rs) and an exchange settles twice: that in CSS px at the
-// widest layout, plus a pixel.
-export const SETTLE_SHIFT_PX = 2 * 20 * 0.74 + 1;
+// How far the dot a move was committed with may sit from the pointer that
+// dropped it, in CSS px: the dot snaps to the curve.
+const DROP_PX = 10;
 
 interface BoardNode {
   id: number;
@@ -139,15 +138,18 @@ export async function expectNodeDrawnAt(page: Page, at: Client): Promise<void> {
   await expect.poll(() => nodeSamplesAround(page, at)).toBeGreaterThanOrEqual(6);
 }
 
-// The node `id` sits within the settle bound of where the move put it and
-// is drawn there.
+// The record keeps node `id` where the move dropped it, at `at`, and the
+// board draws it where the settle put it.
 export async function expectNodeDrawnNear(page: Page, at: Client, id: number): Promise<void> {
+  const record = await savedRecord(page);
+  const frame = await frameOf(page);
+  const made = record.moves[id - (record.nodes?.length ?? 0)];
+  expect(made).toBeDefined();
+  const dropped = toClient(frame, fit(frame), { x: made!.newNode[0], y: made!.newNode[1] });
+  expect(Math.hypot(dropped.x - at.x, dropped.y - at.y)).toBeLessThanOrEqual(DROP_PX);
   const settled = (await boardNodes(page)).get(id);
   expect(settled).toBeDefined();
-  const frame = await frameOf(page);
-  const on = toClient(frame, fit(frame), settled!);
-  expect(Math.hypot(on.x - at.x, on.y - at.y)).toBeLessThanOrEqual(SETTLE_SHIFT_PX);
-  await expectNodeDrawnAt(page, on);
+  await expectNodeDrawnAt(page, toClient(frame, fit(frame), settled!));
 }
 
 export const PLACING_HINT = /Drag the dot/;

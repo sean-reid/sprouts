@@ -1,12 +1,15 @@
-//! Relaxes the drawn geometry after each move so a crowded board keeps room
-//! to draw: nodes apart, lines off nodes and off each other, everything in
-//! from the edge, with the face model held fixed.
+//! Relaxes the drawn geometry after each move so the board is as roomy as
+//! its topology allows: nodes apart, lines off nodes and off each other,
+//! everything in from the edge, with the face model held fixed.
 //!
-//! Every node position and cubic control point is pushed by its shortfalls
-//! for a fixed number of rounds. A round stands only when every line still
-//! embeds to the move the model holds, no crossing appears and the least
-//! clearance on the board does not fall. The new node of a line stays at a
-//! fixed parameter of its curve, so moving the curve moves the node.
+//! Each pair on the board has a clearance ratio, its distance over the
+//! clearance the rules ask of it. Every round pushes apart the pairs whose
+//! ratio sits within HEADROOM of the least one, by a stride that grows
+//! while rounds stand and halves when one is refused. A round stands when
+//! the least ratio rises, or holds while the pairs near it even out, and
+//! every line still embeds to the move the model holds with no new
+//! crossing. The new node of a line stays at a fixed parameter of its
+//! curve, so moving the curve moves the node.
 
 use crate::curve::{self, Cubic};
 use crate::embedding;
@@ -17,13 +20,19 @@ use crate::types::{
     MIN_PATH_CLEARANCE,
 };
 
-const ROUNDS: usize = 24;
+/// Rounds per settle at most; a round that moves nothing ends it early.
+pub const ROUNDS: usize = 64;
 /// Share of a shortfall each side of a pair closes per round.
-const STEP: f64 = 0.5;
-/// Longest move of one point in one round, in line clearances.
-const STRIDE: f64 = 0.5;
-/// Farthest any point moves in one settle, in node spacings.
-const MAX_SHIFT: f64 = 1.0;
+const STEP: f64 = 1.0;
+/// Pairs this far above the least ratio are still pushed, so the board
+/// evens out around its tightest spot rather than at it alone.
+const HEADROOM: f64 = 1.0;
+/// Longest move of one point in one round, in node spacings, at the
+/// first round and at most.
+const STRIDE_START: f64 = 1.0;
+pub const STRIDE_MAX: f64 = 2.0;
+/// Growth of the stride after a round that stands.
+const STRIDE_GROW: f64 = 1.5;
 /// Curve samples this far apart, in line clearances.
 const SAMPLE: f64 = 1.0;
 /// Within this many line clearances of a node two lines meet there may
@@ -32,8 +41,14 @@ const SHARED: f64 = 3.0;
 /// Two samples of one line closer than this along it, in line clearances,
 /// are neighbours rather than a hairpin.
 const SELF_GAP: f64 = 3.0;
-/// A round that moves nothing farther than this ends the settle.
-const CONVERGED: f64 = 1e-3;
+/// Two samples of one line count as a hairpin only when their distance is
+/// under this share of their distance along it; a straight or gently
+/// curved line has no hairpin.
+const FOLD: f64 = 0.5;
+/// A round that moves nothing farther than this, or a stride shorter
+/// than this, ends the settle.
+const CONVERGED: f64 = 1e-2;
+const EPS: f64 = 1e-9;
 const NEAREST_STEPS: usize = 64;
 const NEAREST_REFINE: usize = 40;
 const SMOOTH_JOIN: f64 = 1e-6;
@@ -102,12 +117,12 @@ pub enum Tightest {
     LineEdge(usize),
 }
 
-/// What one pass over the board measured: the least clearance as a share
-/// of its target, the pair that set it, and every pair short of target.
+/// What one pass over the board measured: the least clearance ratio, the
+/// pair that set it, and the squared shortfalls below the level surveyed.
 struct Survey {
     least: f64,
     at: Tightest,
-    short: Vec<Tightest>,
+    energy: f64,
 }
 
 /// Displacements gathered over one round: a sum per node, a weighted sum
@@ -115,6 +130,19 @@ struct Survey {
 struct Push {
     nodes: Vec<Point>,
     ctrl: Vec<Vec<(f64, f64, f64)>>,
+}
+
+impl Push {
+    fn empty(layout: &Layout) -> Self {
+        Self {
+            nodes: vec![Point::new(0.0, 0.0); layout.nodes.len()],
+            ctrl: layout
+                .lines
+                .iter()
+                .map(|c| vec![(0.0, 0.0, 0.0); c.pts.len()])
+                .collect(),
+        }
+    }
 }
 
 fn sub(a: Point, b: Point) -> Point {
@@ -361,18 +389,22 @@ impl Layout {
         ids.iter().any(|&v| self.nodes[v].distance_to(p) < radius)
     }
 
-    /// Measures every pair on the board, gathering the pushes to close the
-    /// shortfalls when asked.
-    fn survey(&self, targets: &Targets, mut push: Option<&mut Push>) -> Survey {
+    /// Measures every pair on the board against `level` times its
+    /// clearance, gathering the pushes to close the shortfalls when asked;
+    /// an infinite level measures every pair and skips none.
+    fn survey(&self, targets: &Targets, level: f64, mut push: Option<&mut Push>) -> Survey {
         let mut least = (f64::INFINITY, Tightest::Nothing);
-        let mut shorts = Vec::new();
+        let mut energy = 0.0;
         let mut short = |d: f64, target: f64, at: Tightest| -> Option<f64> {
-            if d / target < least.0 {
-                least = (d / target, at);
+            let ratio = d / target;
+            if ratio < least.0 {
+                least = (ratio, at);
             }
-            if d < target {
-                shorts.push(at);
-                Some(STEP * (target - d) / 2.0)
+            if ratio < level {
+                if level.is_finite() {
+                    energy += (level - ratio) * (level - ratio);
+                }
+                Some(STEP * (level * target - d) / 2.0)
             } else {
                 None
             }
@@ -411,9 +443,9 @@ impl Layout {
             }
         }
 
-        // Samples and nodes outside a line's box, grown by the target, are
-        // clear of it without a distance test; the work per round is then
-        // bounded by the pairs that can be short.
+        // Samples and nodes outside a line's box, grown by the level's
+        // clearance, are clear of it without a distance test; the work per
+        // round is then bounded by the pairs that can be short.
         let boxes: Vec<(Point, Point)> = self.lines.iter().map(Chain::bounds).collect();
         let outside = |p: &Point, (lo, hi): (Point, Point), gap: f64| {
             p.x < lo.x - gap || p.x > hi.x + gap || p.y < lo.y - gap || p.y > hi.y + gap
@@ -424,7 +456,7 @@ impl Layout {
                     continue;
                 }
                 let p = self.nodes[i];
-                if outside(&p, boxes[k], targets.line_node) {
+                if outside(&p, boxes[k], level * targets.line_node) {
                     continue;
                 }
                 let (q, d, seg, t) = chain.nearest(&p);
@@ -455,13 +487,17 @@ impl Layout {
                     continue;
                 }
                 for w in chain.samples[i + 1..].windows(2) {
-                    if w[0].arc - s.arc < gap {
+                    let arc = w[0].arc - s.arc;
+                    if arc < gap {
                         continue;
                     }
                     if chain.from == chain.to && self.near_any(&w[0].at, &own, reach) {
                         continue;
                     }
                     let (q, d) = closest_point_on_segment(&w[0].at, &w[1].at, &s.at);
+                    if d >= FOLD * arc {
+                        continue;
+                    }
                     if let (Some(f), Some(push)) = (
                         short(d, targets.line, Tightest::Hairpin(k)),
                         push.as_deref_mut(),
@@ -477,13 +513,13 @@ impl Layout {
         let reach = SHARED * targets.line;
         for k in 0..self.lines.len() {
             for l in k + 1..self.lines.len() {
-                if boxes_apart(boxes[k], boxes[l], targets.line) {
+                if boxes_apart(boxes[k], boxes[l], level * targets.line) {
                     continue;
                 }
                 let shared = self.shared(k, l);
                 for (a, b) in [(k, l), (l, k)] {
                     for s in &self.lines[a].samples {
-                        if outside(&s.at, boxes[b], targets.line)
+                        if outside(&s.at, boxes[b], level * targets.line)
                             || self.near_any(&s.at, &shared, reach)
                         {
                             continue;
@@ -505,12 +541,10 @@ impl Layout {
             }
         }
         drop(short);
-        shorts.sort_unstable();
-        shorts.dedup();
         Survey {
             least: least.0,
             at: least.1,
-            short: shorts,
+            energy,
         }
     }
 
@@ -601,56 +635,55 @@ impl Layout {
         true
     }
 
-    /// Moves the free points by the gathered pushes, capped per round and
-    /// against where the settle began; returns the longest move made.
-    fn apply(&mut self, push: &Push, origin: &Layout, stride: f64, shift: f64) -> f64 {
+    /// Moves the free points by the gathered pushes, each capped at the
+    /// stride; returns the longest move made.
+    fn apply(&mut self, push: &Push, stride: f64) -> f64 {
         let mut longest: f64 = 0.0;
-        let mut place = |p: &mut Point, from: Point, delta: Point| {
+        let mut place = |p: &mut Point, delta: Point| {
             let len = norm(delta);
             let delta = if len > stride {
                 mul(delta, stride / len)
             } else {
                 delta
             };
-            let next = within(add(*p, delta), from, shift);
-            longest = longest.max(next.distance_to(p));
-            *p = next;
+            longest = longest.max(norm(delta));
+            *p = add(*p, delta);
         };
         for i in 0..self.initial {
-            place(&mut self.nodes[i], origin.nodes[i], push.nodes[i]);
+            place(&mut self.nodes[i], push.nodes[i]);
         }
         for (k, chain) in self.lines.iter_mut().enumerate() {
             let last = chain.pts.len() - 1;
             for idx in 1..last {
                 let (fx, fy, w) = push.ctrl[k][idx];
-                let delta = mul(Point::new(fx, fy), 1.0 / w.max(1.0));
-                place(&mut chain.pts[idx], origin.lines[k].pts[idx], delta);
+                place(
+                    &mut chain.pts[idx],
+                    mul(Point::new(fx, fy), 1.0 / w.max(1.0)),
+                );
             }
         }
         longest
     }
 
-    /// Carries each line's ends along with its nodes, keeps smooth joins
-    /// smooth and puts every made node back on its curve, in move order so
-    /// a line always ends on a node already placed. A line that has not
-    /// moved keeps its node where the move put it. The control points
-    /// carried along stay within `shift` of where the settle began.
-    fn rebuild(&mut self, targets: &Targets, origin: &Layout, shift: f64) {
+    /// Carries each line along with its end nodes, the control points
+    /// sharing the two ends' moves by their place along the chain, keeps
+    /// smooth joins smooth and puts every made node back on its curve, in
+    /// move order so a line always ends on a node already placed. A line
+    /// that has not moved keeps its node where the move put it.
+    fn rebuild(&mut self, targets: &Targets, origin: &Layout) {
         for k in 0..self.lines.len() {
             let (from, to) = (self.nodes[self.lines[k].from], self.nodes[self.lines[k].to]);
             let id = self.mid(k);
             let chain = &mut self.lines[k];
             let last = chain.pts.len() - 1;
             let d0 = sub(from, chain.pts[0]);
-            chain.pts[0] = from;
-            chain.pts[1] = within(add(chain.pts[1], d0), origin.lines[k].pts[1], shift);
             let dn = sub(to, chain.pts[last]);
+            for (i, p) in chain.pts.iter_mut().enumerate() {
+                let u = i as f64 / last as f64;
+                *p = add(*p, add(mul(d0, 1.0 - u), mul(dn, u)));
+            }
+            chain.pts[0] = from;
             chain.pts[last] = to;
-            chain.pts[last - 1] = within(
-                add(chain.pts[last - 1], dn),
-                origin.lines[k].pts[last - 1],
-                shift,
-            );
             for j in 1..chain.segments() {
                 if !chain.smooth[j - 1] {
                     continue;
@@ -664,16 +697,8 @@ impl Layout {
                     continue;
                 }
                 let dir = mul(dir, 1.0 / len);
-                chain.pts[3 * j - 1] = within(
-                    sub(joint, mul(dir, joint.distance_to(&a))),
-                    origin.lines[k].pts[3 * j - 1],
-                    shift,
-                );
-                chain.pts[3 * j + 1] = within(
-                    add(joint, mul(dir, joint.distance_to(&b))),
-                    origin.lines[k].pts[3 * j + 1],
-                    shift,
-                );
+                chain.pts[3 * j - 1] = sub(joint, mul(dir, joint.distance_to(&a)));
+                chain.pts[3 * j + 1] = add(joint, mul(dir, joint.distance_to(&b)));
             }
             let mid = if chain.pts == origin.lines[k].pts {
                 origin.nodes[id]
@@ -683,18 +708,6 @@ impl Layout {
             chain.resample(targets);
             self.nodes[id] = mid;
         }
-    }
-}
-
-/// `p`, pulled back onto the circle of radius `shift` about `from` when
-/// it lies outside it.
-fn within(p: Point, from: Point, shift: f64) -> Point {
-    let off = sub(p, from);
-    let far = norm(off);
-    if far > shift {
-        add(from, mul(off, shift / far))
-    } else {
-        p
     }
 }
 
@@ -725,7 +738,7 @@ fn journal(state: &GameState) -> Vec<FaceMove> {
 pub fn least_clearance(state: &GameState) -> (f64, Tightest) {
     let targets = Targets::for_board(state.board_size);
     Layout::from_state(state, &targets).map_or((f64::INFINITY, Tightest::Nothing), |layout| {
-        let survey = layout.survey(&targets, None);
+        let survey = layout.survey(&targets, f64::INFINITY, None);
         (survey.least, survey.at)
     })
 }
@@ -794,51 +807,46 @@ fn relax(state: &mut GameState) -> Undo {
     }
     let tolerance = curve::tolerance(state.board_size);
     let mut layout = origin.clone();
-    let Survey {
-        mut least,
-        mut short,
-        ..
-    } = layout.survey(&targets, None);
-    if least >= 1.0 {
+    let mut least = layout.survey(&targets, f64::INFINITY, None).least;
+    if !least.is_finite() {
         return undo;
     }
     let mut crossings = layout.crossings(tolerance);
-    let mut stride = STRIDE * targets.line;
-    let shift = MAX_SHIFT * MIN_NODE_SPACING * scale(state.board_size);
+    let unit = MIN_NODE_SPACING * scale(state.board_size);
+    let mut stride = STRIDE_START * unit;
+    // A stride that collapses after progress starts again from the top,
+    // since a short accepted step leaves it too small to try the long
+    // ones; a collapse with no progress since the last start ends the
+    // settle.
+    let mut progressed = false;
     for _ in 0..ROUNDS {
-        let mut push = Push {
-            nodes: vec![Point::new(0.0, 0.0); layout.nodes.len()],
-            ctrl: layout
-                .lines
-                .iter()
-                .map(|c| vec![(0.0, 0.0, 0.0); c.pts.len()])
-                .collect(),
-        };
-        layout.survey(&targets, Some(&mut push));
+        let level = least + HEADROOM;
+        let mut push = Push::empty(&layout);
+        let now = layout.survey(&targets, level, Some(&mut push));
         let mut next = layout.clone();
-        let longest = next.apply(&push, &origin, stride, shift);
-        next.rebuild(&targets, &origin, shift);
-        let after = next.survey(&targets, None);
+        let longest = next.apply(&push, stride);
+        next.rebuild(&targets, &origin);
+        let after = next.survey(&targets, level, None);
+        let roomier = after.least > least + EPS;
+        let evener = after.least + EPS >= least && after.energy <= now.energy + EPS;
         let crossed = next.crossings(tolerance);
-        // A pair at target stays at target: a round may close shortfalls
-        // but not open one.
-        let no_new_short = after.short.iter().all(|pair| short.contains(pair));
-        if after.least + 1e-9 >= least
-            && no_new_short
-            && crossed <= crossings
-            && next.holds(state, &original)
-        {
+        if (roomier || evener) && crossed <= crossings && next.holds(state, &original) {
             layout = next;
             least = after.least;
-            short = after.short;
             crossings = crossed;
             if longest < CONVERGED {
                 break;
             }
+            progressed = true;
+            stride = (stride * STRIDE_GROW).min(STRIDE_MAX * unit);
         } else {
             stride /= 2.0;
             if stride < CONVERGED {
-                break;
+                if !progressed {
+                    break;
+                }
+                progressed = false;
+                stride = STRIDE_START * unit;
             }
         }
     }
