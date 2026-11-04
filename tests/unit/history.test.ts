@@ -51,10 +51,10 @@ const VERSION_3_PAYLOAD =
 // A version 4 link of two moves: a stroke from 0 to 1, then a loop on 2
 // carried as its face move, leaving spoke 3 and enclosing nodes 0 and 4,
 // with its node at (620, 500).
-const VERSION_4_PAYLOAD = "BAIABADoAwIAAgAAAQAC2AToB6AGAI8DAAICAgQEAgAE2AnoBw";
+const VERSION_4_PAYLOAD = "BAMABADoAwIAAgAAAQAC2AToB6AGAI8DAAICAgQEAgAE2AnoBw";
 // The same two moves as a version 5 link, with settle version 0 after the
 // router byte.
-const VERSION_5_PAYLOAD = "BQIAAAQA6AMCAAIAAAEAAtgE6AegBgCPAwACAgIEBAIABNgJ6Ac";
+const VERSION_5_PAYLOAD = "BQMAAAQA6AMCAAIAAAEAAtgE6AegBgCPAwACAgIEBAIABNgJ6Ac";
 const LOOP_FACE: FaceMove = { a: 2, atA: 3, b: 2, atB: 3, enclosed: [0, 4] };
 
 function bytesOf(payload: string): Uint8Array {
