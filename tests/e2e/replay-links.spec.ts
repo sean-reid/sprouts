@@ -172,9 +172,11 @@ for (const [file, budget, form, topologyMoves] of routed) {
       // visitor's link is the sharer's.
       expect(again.payload).toBe(payload);
       await visitor.close();
-      // The sharer opening their own link lands on the live game, since
-      // the saved record indexes to the link's moves.
-      await page.goto(url);
+      // The share put the link in the address bar; a reload with it lands
+      // on the live game, since the saved record indexes to the link's
+      // moves.
+      expect(page.url()).toBe(url);
+      await page.reload();
       await expect(page.locator("#status")).toHaveText("Your turn!", { timeout: 240_000 });
       expect(page.url()).not.toContain("#");
       await expect(entries(page)).toHaveCount(total);

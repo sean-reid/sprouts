@@ -747,55 +747,52 @@ fn rehearse_shared_game(game: &SharedGame) -> Drift {
         settle_version: fixture.settle_version,
         moves: fixture.moves.iter().map(|m| m.wire()).collect(),
         known: vec![None; fixture.moves.len()],
-    })
-    .unwrap_or_else(|why| panic!("indexing: {why}"));
-    let by_index = protocol::rehearse(protocol::Rehearsal {
-        router_version: protocol::ROUTER_VERSION,
-        settle_version: fixture.settle_version,
-        list_version: protocol::MOVE_LIST_VERSION,
-        initial_nodes: fixture.initial_nodes,
-        board_size: fixture.board_size,
-        first_player: Player::Human,
-        nodes: None,
-        moves: indexed
-            .moves
-            .iter()
-            .map(|m| protocol::LinkMove::Indexed {
-                index: m.index,
-                along: m.along,
+    });
+    // Indexing fails at the move the regenerated board refuses or lists
+    // differently, "move N: ...".
+    let (indexed, index_refused) = match indexed {
+        Ok(indexed) => {
+            let by_index = protocol::rehearse(protocol::Rehearsal {
+                router_version: protocol::ROUTER_VERSION,
+                settle_version: fixture.settle_version,
+                list_version: protocol::MOVE_LIST_VERSION,
+                initial_nodes: fixture.initial_nodes,
+                board_size: fixture.board_size,
+                first_player: Player::Human,
+                nodes: None,
+                moves: indexed
+                    .moves
+                    .iter()
+                    .map(|m| protocol::LinkMove::Indexed {
+                        index: m.index,
+                        along: m.along,
+                    })
+                    .collect(),
             })
-            .collect(),
-    })
-    .unwrap();
-    if by_index.refused.is_some() {
-        let mut state = protocol::start(
-            fixture.initial_nodes,
-            fixture.board_size,
-            Player::Human,
-            None,
-            fixture.settle_version,
-        )
-        .unwrap();
-        for (i, m) in indexed.moves.iter().enumerate() {
-            if let protocol::Outcome::Rejected { rejection } =
-                protocol::apply_indexed_move(&mut state, *m)
-            {
-                eprintln!(
-                    "  index replay refused move {i} ({m:?}): {}",
-                    rejection.message
-                );
-                break;
-            }
+            .unwrap();
+            assert_eq!(
+                by_index.refused, None,
+                "indexing passed but the replay refused"
+            );
+            (indexed.moves, None)
         }
-    }
+        Err(why) => {
+            eprintln!("  indexing: {why}");
+            let at = why
+                .strip_prefix("move ")
+                .and_then(|rest| rest.split(':').next())
+                .and_then(|n| n.parse().ok())
+                .unwrap_or_else(|| panic!("indexing: {why}"));
+            (Vec::new(), Some(at))
+        }
+    };
     let varint =
         |v: usize| 1 + (usize::BITS - v.max(1).leading_zeros()).saturating_sub(1) as usize / 7;
     let mut drift = Drift {
         topology: game.topology.iter().flatten().count(),
         refused: rehearsed.refused,
-        index_refused: by_index.refused,
+        index_refused,
         index_bytes: indexed
-            .moves
             .iter()
             .map(|m| varint(m.index * 2) + usize::from(m.along > 0))
             .sum(),
