@@ -1,19 +1,16 @@
 import { expect, test, type Page } from "@playwright/test";
-import type { Cubic } from "../../pkg/sprouts";
-import { decodeRecord, hasStroke, LINK_QUANTUM, STROKE_TOLERANCE } from "../../web/history";
+import { hasStroke, LINK_QUANTUM, type RecordMove } from "../../web/history";
 import {
   clickAway,
   findDot,
   fit,
   frameOf,
-  HASH_PREFIX,
   holdNext,
   interceptWorkerMessages,
   latestCurve,
   nodeWorld,
   openBoard,
   PLACING_HINT,
-  share,
   shot,
   toClient,
   wheelZoomTo,
@@ -114,25 +111,8 @@ test("a click that lands before the fit returns still places the node", async ({
   await expect(page.locator("#undoBtn")).toBeEnabled({ timeout: 60_000 });
 });
 
-// Distance from a point to a chain of cubics, sampled.
-function offCurve(p: { x: number; y: number }, curve: Cubic[]): number {
-  let best = Infinity;
-  for (const c of curve) {
-    for (let i = 0; i <= 64; i++) {
-      const t = i / 64;
-      const u = 1 - t;
-      const x =
-        u * u * u * c.p0.x + 3 * u * u * t * c.p1.x + 3 * u * t * t * c.p2.x + t * t * t * c.p3.x;
-      const y =
-        u * u * u * c.p0.y + 3 * u * u * t * c.p1.y + 3 * u * t * t * c.p2.y + t * t * t * c.p3.y;
-      best = Math.min(best, Math.hypot(p.x - x, p.y - y));
-    }
-  }
-  return best;
-}
-
 // The board settles once the move is in, so the committed line moves; the
-// curve the page showed locked is the one the game records and shares.
+// curve the page showed locked is the one the game records.
 test("the locked curve is the curve the move is recorded with, at fit zoom and at 4x", async ({
   page,
 }) => {
@@ -159,12 +139,21 @@ test("the locked curve is the curve the move is recorded with, at fit zoom and a
   await expect(page.locator("#status")).toHaveText("Your turn!", { timeout: 60_000 });
   await shot(page, "curve-committed-4x");
 
-  const { url } = await share(page, "curve-link-chars");
-  const linked = decodeRecord(url.slice(url.indexOf(HASH_PREFIX) + HASH_PREFIX.length));
-  const first = linked?.moves[0];
-  if (!first || !hasStroke(first)) throw new Error("the first move did not decode as geometry");
-  const slack = STROKE_TOLERANCE + LINK_QUANTUM;
-  for (const [x, y] of first.polyline) {
-    expect(offCurve({ x, y }, shown)).toBeLessThanOrEqual(slack);
+  // The record keeps the committed spline, which is the locked curve put
+  // on the unit grid.
+  const saved = await page.evaluate(
+    () => JSON.parse(localStorage.getItem("sprouts.game") ?? "null") as unknown,
+  );
+  const first = (saved as { moves: RecordMove[] } | null)?.moves[0];
+  if (!first || !hasStroke(first) || !first.segments) {
+    throw new Error("the first move was not saved with its spline");
   }
+  expect(first.segments).toHaveLength(shown.length);
+  const half = LINK_QUANTUM / 2 + 1e-9;
+  first.segments.forEach((c, i) => {
+    for (const k of ["p0", "p1", "p2", "p3"] as const) {
+      expect(Math.abs(c[k].x - shown[i]![k].x)).toBeLessThanOrEqual(half);
+      expect(Math.abs(c[k].y - shown[i]![k].y)).toBeLessThanOrEqual(half);
+    }
+  });
 });
