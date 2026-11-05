@@ -21,7 +21,7 @@ pub const VERSION_1_GOLDEN: u64 = 0xd77fd8c18d5f65f0;
 /// src/protocol.rs, keep this version's settle for its records, and
 /// record the new value under the new name.
 #[cfg(test)]
-pub const VERSION_2_GOLDEN: u64 = 0x137fff0f11fe5435;
+pub const VERSION_2_GOLDEN: u64 = 0x743f166a8e90075d;
 
 /// The settled board after each move of the seeded 9-node game under
 /// version 1, recorded on macOS. A mismatch names the first move another
@@ -47,11 +47,11 @@ pub const VERSION_2_SEEDED_GAME: &[u64] = &[
     0x611d4db5d89dd035,
     0x6261118092e6dcde,
     0x8f113bc531349297,
-    0xfa061dda0d14287e,
-    0x4a5b42ff59118015,
-    0x035b5e369557e961,
-    0xe855b1d6029d60ec,
-    0xffb560ce87f04434,
+    0xaa4214946ea76a11,
+    0xff07eba13dd0bbd2,
+    0x999ff7acc122dfaf,
+    0x86ac3c630da9a16c,
+    0x8b35768b288cf498,
 ];
 
 /// Picks for a random game from a small multiplicative generator, so the

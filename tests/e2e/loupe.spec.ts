@@ -1,5 +1,7 @@
+import { readFileSync } from "node:fs";
 import { expect, test, type Page } from "@playwright/test";
 import { LOUPE_FOLLOW } from "../../web/loupe";
+import type { Fixture } from "../../web/record";
 import {
   alongLine,
   boardNodes,
@@ -9,6 +11,7 @@ import {
   nodeOnScreen,
   openBoard,
   playExchange,
+  recordNodesOnScreen,
   ringPixels,
   shot,
   startGame,
@@ -368,21 +371,43 @@ test("a stroke from a node with a line opens no lens until the finger is clear o
   await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
 });
 
+// A recorded game replayed as drawn, so its geometry does not depend on
+// the settle: node 5 sits 151 units from the top, within the lens's lift
+// and radius of the top edge at every viewport.
+const TOP_NODE_GAME = "fixtures/games/false-game-over-4n-1000.json";
+
 test("the lens slides beside the finger across the top edge without a jump", async ({ page }) => {
   test.skip(!test.info().project.use.hasTouch, "touch only");
+  // The board after the eighth move, with the human to move and the stroke
+  // free to start.
+  const fixture = JSON.parse(readFileSync(TOP_NODE_GAME, "utf8")) as Fixture;
+  const record = { firstPlayer: "human", cursor: 8, ...fixture, moves: fixture.moves.slice(0, 8) };
+  await page.addInitScript((s) => localStorage.setItem("sprouts.game", s), JSON.stringify(record));
+  await page.goto("/");
+  await expect(page.locator("#moveList li")).toHaveCount(8, { timeout: 60_000 });
+  await expect(page.locator("#status")).toHaveText("Your turn!", { timeout: 60_000 });
+  await nextFrame(page);
   const frame = await frameOf(page);
-  // The highest node on the settled board sits within the lens's lift and
-  // radius of the top edge at the fitted view, so a stroke that climbs past
-  // it crosses the zone where the lens leaves its spot above the finger.
-  const nodes = await boardNodes(page);
-  const highest = [...nodes.entries()].reduce((best, entry) =>
-    entry[1].y < best[1].y ? entry : best,
-  );
-  const top = await nodeOnScreen(page, highest[0], nodes.size);
+  // A stroke that climbs past the highest node crosses the zone where the
+  // lens leaves its spot above the finger.
+  const onScreen = await recordNodesOnScreen(page, record);
+  const highest = onScreen.reduce((best, at, id) => (at.y < onScreen[best]!.y ? id : best), 0);
+  const top = onScreen[highest]!;
+  expect(top.y - frame.top).toBeLessThan(LIFT + RADIUS);
   await expectNodeDrawnAt(page, top);
   const cdp = await page.context().newCDPSession(page);
 
-  const start = await nodeOnScreen(page, highest[0] === 0 ? 3 : 0, nodes.size);
+  // The lowest node with a line left starts the stroke, clear of the climb.
+  const live = (
+    await page
+      .locator("#nodeTargets button")
+      .evaluateAll((buttons) => buttons.map((b) => b.getAttribute("aria-label") ?? ""))
+  )
+    .map((name) => Number(/Node (\d+)/.exec(name)?.[1]))
+    .filter(Number.isFinite);
+  expect(live.length).toBeGreaterThan(0);
+  const lowest = live.reduce((best, id) => (onScreen[id]!.y > onScreen[best]!.y ? id : best));
+  const start = onScreen[lowest]!;
   const below = { x: top.x, y: Math.min(top.y + 40, frame.top + frame.height - 20) };
   await cdp.send("Input.dispatchTouchEvent", {
     type: "touchStart",
@@ -444,13 +469,16 @@ test("the lens keeps its lift and stays on the canvas along the whole top edge",
   await page.mouse.click(frame.left + frame.width / 2, frame.top + frame.height - 20);
   await expect(page.locator("#status")).toHaveText("Your turn!", { timeout: 60_000 });
 
-  // The run of that line within 70 px of the top, resampled every 8 px,
-  // traced 12 px below it from left to right.
-  const run: Client[] = [];
-  for (let i = 0; i <= 300; i++) {
-    const { at } = await alongLine(page, 0, i / 300);
-    if (at.y - frame.top < 70) run.push({ x: at.x, y: at.y + 12 });
-  }
+  // The run of that line within 30 px of its highest point, wherever the
+  // settle left it, resampled every 8 px, traced 12 px below it from left
+  // to right.
+  const samples: Client[] = [];
+  for (let i = 0; i <= 300; i++) samples.push((await alongLine(page, 0, i / 300)).at);
+  const highest = Math.min(...samples.map((p) => p.y));
+  expect(highest - frame.top).toBeLessThan(LIFT + RADIUS - 30);
+  const run: Client[] = samples
+    .filter((p) => p.y < highest + 30)
+    .map((p) => ({ x: p.x, y: p.y + 12 }));
   run.sort((p, q) => p.x - q.x);
   const path: Client[] = [run[0]!];
   for (const p of run) {

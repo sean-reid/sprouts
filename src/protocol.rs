@@ -2359,10 +2359,11 @@ mod tests {
 
     /// A settled game's rehearsal reports each routed node as the move
     /// applied it, not where the settle took it, so the drift the page
-    /// measures against the record is zero.
+    /// measures against the record is zero. Settle version 1 moves the
+    /// reply's node on this board, which the check needs.
     #[test]
     fn a_rehearsal_reports_the_routed_node_as_applied_not_as_settled() {
-        let mut state = GameState::new(4);
+        let mut state = GameState::with_nodes_at(types::opening_layout(4, 1000), 1000, 1);
         let RouteReply::Routed { mov, .. } = route_move(&state, face_move(0, 1, vec![])) else {
             panic!("the chord did not route");
         };
@@ -2383,7 +2384,7 @@ mod tests {
         );
         let plan = Rehearsal {
             router_version: ROUTER_VERSION,
-            settle_version: SETTLE_VERSION,
+            settle_version: 1,
             list_version: MOVE_LIST_VERSION,
             initial_nodes: 4,
             board_size: 1000,

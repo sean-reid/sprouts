@@ -17,8 +17,10 @@
 //! pairs still free, so the rest of the board spreads round a crowded
 //! corner. Version 2 also measures shape: the radius a line bends at
 //! against half the line clearance, and the angle between two spokes at a
-//! node against 10 degrees, so a kink straightens and spokes fan out the
-//! way a short distance opens.
+//! node against 10 degrees. Shape comes second: a kink or a closed pair
+//! of spokes is pushed up to its target and no further, never sets the
+//! band the distance pairs spread in, and once at its target it may not
+//! drop back below it.
 
 use crate::curve::{self, Cubic};
 use crate::embedding;
@@ -207,6 +209,9 @@ struct Survey {
     broken: bool,
     /// The least ratio over the frozen pairs.
     held: f64,
+    /// The least shape ratio, counted up to 1: a kink or a closed spoke
+    /// pair that a round may not make worse.
+    shape: f64,
 }
 
 /// Displacements gathered over one round: a sum per node, a weighted sum
@@ -400,15 +405,15 @@ impl Chain {
         (j, (lo + hi) / 2.0)
     }
 
-    fn resample(&mut self, targets: &Targets) {
-        let spacing = SAMPLE * targets.line;
+    /// Samples `spacing` apart along the chain, at most `most` per cubic.
+    fn sampled(&self, spacing: f64, most: usize) -> Vec<Sample> {
         let mut samples = Vec::new();
         let mut arc = 0.0;
         for j in 0..self.segments() {
             let c = self.cubic(j);
             let length =
                 c.p0.distance_to(&c.p1) + c.p1.distance_to(&c.p2) + c.p2.distance_to(&c.p3);
-            let steps = ((length / spacing).ceil() as usize).clamp(2, 64);
+            let steps = ((length / spacing).ceil() as usize).clamp(2, most);
             for i in 0..=steps {
                 if j > 0 && i == 0 {
                     continue;
@@ -422,7 +427,12 @@ impl Chain {
                 samples.push(Sample { at, seg: j, t, arc });
             }
         }
-        self.samples = samples;
+        samples
+    }
+
+    fn resample(&mut self, targets: &Targets) {
+        let spacing = SAMPLE * targets.line;
+        self.samples = self.sampled(spacing, 64);
         self.blocks.clear();
         if self.pruned {
             for block in self.samples.windows(2).collect::<Vec<_>>().chunks(BLOCK) {
@@ -611,6 +621,7 @@ impl Layout {
         let mut tests = 0;
         let mut broken = false;
         let mut held = f64::INFINITY;
+        let mut shape = f64::INFINITY;
         let mut short = |d: f64, at: Tightest| -> Option<f64> {
             tests += 1;
             let target = targets.of(at);
@@ -618,6 +629,10 @@ impl Layout {
             if let Some(collect) = collect.as_deref_mut() {
                 let slot = collect.entry(at).or_insert(f64::INFINITY);
                 *slot = slot.min(ratio);
+            }
+            if matches!(at, Tightest::Bend(_) | Tightest::Spokes(..)) {
+                shape = shape.min(ratio.min(1.0));
+                return (ratio < 1.0).then(|| STEP * (target - d) / 2.0);
             }
             if let Some((_, floor)) = frozen.iter().find(|(pair, _)| *pair == at) {
                 broken |= ratio < floor - EPS;
@@ -747,9 +762,34 @@ impl Layout {
                         continue;
                     }
                     let radius = a * b * c / twice;
-                    if let (Some(f), Some(push)) =
+                    let (Some(f), Some(push)) =
                         (short(radius, Tightest::Bend(k)), push.as_deref_mut())
-                    {
+                    else {
+                        continue;
+                    };
+                    // A corner at a join is its two handles out of line: each
+                    // turns toward the line through the joint that smooths it.
+                    // Elsewhere the middle sample moves toward the chord.
+                    let join = w[1].t == 1.0 && w[1].seg + 1 < chain.segments();
+                    if join {
+                        let j = 3 * (w[1].seg + 1);
+                        let (ha, joint, hb) = (chain.pts[j - 1], chain.pts[j], chain.pts[j + 1]);
+                        let dir = sub(hb, ha);
+                        let len = norm(dir);
+                        if len < EPS {
+                            continue;
+                        }
+                        let dir = mul(dir, 1.0 / len);
+                        let to_a = sub(joint, mul(dir, joint.distance_to(&ha)));
+                        let to_b = add(joint, mul(dir, joint.distance_to(&hb)));
+                        for (idx, from, to) in [(j - 1, ha, to_a), (j + 1, hb, to_b)] {
+                            let step = away(from, to, f);
+                            let slot = &mut push.ctrl[k][idx];
+                            slot.0 += step.x;
+                            slot.1 += step.y;
+                            slot.2 += 1.0;
+                        }
+                    } else {
                         let mid = mul(add(p0, p2), 0.5);
                         self.push_curve(push, k, w[1].seg, w[1].t, away(p1, mid, f));
                     }
@@ -829,6 +869,7 @@ impl Layout {
             tests,
             broken,
             held,
+            shape,
         }
     }
 
@@ -1117,15 +1158,18 @@ pub enum Stop {
 
 /// What one settle did: rounds run, pair tests spent, why it ended and
 /// the least ratio it left.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct Report {
     pub rounds: usize,
     pub work: usize,
     pub stop: Stop,
     pub least: f64,
     pub at: Tightest,
-    /// Pairs frozen at the ratio they reached.
-    pub frozen: usize,
+    /// Pairs frozen, each at the ratio it reached.
+    pub frozen: Vec<(Tightest, f64)>,
+    /// Starting nodes and lines held still at the end.
+    pub held_nodes: usize,
+    pub held_lines: usize,
 }
 
 impl Report {
@@ -1136,7 +1180,9 @@ impl Report {
             stop: Stop::Nothing,
             least: f64::INFINITY,
             at: Tightest::Nothing,
-            frozen: 0,
+            frozen: Vec::new(),
+            held_nodes: 0,
+            held_lines: 0,
         }
     }
 }
@@ -1347,6 +1393,7 @@ fn relax(
         let stood = moved > 0.0
             && (roomier || evener)
             && !after.broken
+            && after.shape + EPS >= now.shape
             && next.keeps(state, &original, crossings, crossed);
         if stood {
             layout = next;
@@ -1397,7 +1444,8 @@ fn relax(
         stride = STRIDE_START * unit;
     }
     report.work = work;
-    report.frozen = frozen.len();
+    report.held_nodes = still.nodes.iter().filter(|h| **h).count();
+    report.held_lines = still.lines.iter().filter(|h| **h).count();
     if held < least {
         let tightest = frozen
             .iter()
@@ -1410,6 +1458,7 @@ fn relax(
         report.least = least;
         report.at = at;
     }
+    report.frozen = frozen;
     let changed: Vec<bool> = layout
         .lines
         .iter()

@@ -652,22 +652,21 @@ fn settled_at(fixture: &replay::Fixture, count: usize, version: u8) -> (GameStat
     (state, report)
 }
 
-/// Move 6 of the saved 9-node game leaves a line squeezed past three nodes
-/// that no round can free. Version 1 stops there; version 2 freezes that
-/// pair, holds what takes part in it, and goes on spreading the rest, so
-/// the pairs end roomier on the whole, the lines farther apart, with the
-/// least no lower than drawn.
+/// Move 6 of the 5-node self-play game leaves a pair no round can free.
+/// Version 1 stops there; version 2 freezes that pair, holds what takes
+/// part in it, and goes on with the rest, with the least no lower than
+/// drawn and no bend left below the target that version 1 had above it.
 #[test]
 fn a_stuck_tightest_pair_still_lets_the_rest_of_the_board_spread() {
     let fixture = replay::load(
-        &Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/saved/ten-moves-9n-1000.json"),
+        &Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/games/selfplay-5n-1000.json"),
     )
     .unwrap();
     let (drawn, _) = least_clearance(&settled_at(&fixture, 6, 0).0);
     let (one, first) = settled_at(&fixture, 6, 1);
     let (two, second) = settled_at(&fixture, 6, 2);
     assert_eq!(first.stop, Stop::Stuck);
-    assert!(second.frozen >= 1, "{second:?}");
+    assert!(!second.frozen.is_empty(), "{second:?}");
     assert!(
         least_clearance(&two).0 + 1e-9 >= drawn,
         "{drawn} -> {second:?}"
@@ -680,20 +679,41 @@ fn a_stuck_tightest_pair_still_lets_the_rest_of_the_board_spread() {
             .fold(f64::INFINITY, f64::min)
     };
     assert!(
-        sharpest(&two) + 1e-9 >= sharpest(&one),
+        sharpest(&two) + 1e-9 >= sharpest(&one).min(1.0),
         "sharpest bend {:.3} -> {:.3}",
         sharpest(&one),
         sharpest(&two)
+    );
+    // The free pairs spread: lines and hairpins end farther apart.
+    let free = |state: &GameState| {
+        median(
+            ratios(state)
+                .into_iter()
+                .filter(|(at, _)| matches!(at, Tightest::Lines(..) | Tightest::Hairpin(_)))
+                .map(|(_, r)| r)
+                .collect(),
+        )
+    };
+    assert!(
+        free(&two) > free(&one),
+        "free pairs {:.3} -> {:.3}",
+        free(&one),
+        free(&two)
+    );
+    assert!(
+        second.held_lines < two.lines.len() && second.held_nodes < two.initial_node_count,
+        "{second:?}"
     );
     assert!(same_face_model(&two));
     assert!(replays_to_the_same_model(&two));
 }
 
 /// Every settle ends within its round and work caps, one round's tests
-/// over the cap at most, and a frozen pair is never pushed below the
-/// ratio it was frozen at.
+/// over the cap at most; the least distance ratio never drops across a
+/// settle, and a frozen pair ends at or above the ratio it was frozen at.
 #[test]
 fn the_leximin_ends_within_its_rounds_and_work() {
+    let mut frozen_pairs = 0;
     for fixture in all_fixtures() {
         let mut drawn = fixture.start();
         for recorded in &fixture.moves {
@@ -707,13 +727,290 @@ fn the_leximin_ends_within_its_rounds_and_work() {
             assert!(report.rounds <= ROUNDS_V2, "{report:?}");
             assert!(report.work <= WORK_CAP + 400_000, "{report:?}");
             assert!(
-                after + 1e-9 >= before.min(report.least),
+                after + 1e-9 >= before,
                 "{} nodes, {} lines: {before} -> {after} at {at:?} {report:?}",
                 fixture.initial_nodes,
                 copy.lines.len()
             );
+            let now = ratios(&copy);
+            for (pair, floor) in &report.frozen {
+                frozen_pairs += 1;
+                let ratio = now[pair];
+                assert!(
+                    ratio + 1e-9 >= *floor,
+                    "{pair:?} frozen at {floor:.4} ends at {ratio:.4}"
+                );
+            }
         }
     }
+    assert!(frozen_pairs > 0);
+}
+
+/// The issue 98 game, whose fifth line hooked into node 11 with a corner
+/// of radius 2.9 units under version 1, replayed as topology under version
+/// 2: the hook ends at the target or wider, and no more lines are left
+/// under it than version 1 left.
+#[test]
+fn the_hook_of_the_issue_98_game_is_straightened() {
+    let fixture = replay::load(
+        &Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/undrawn/pocket-4n-1000.json"),
+    )
+    .unwrap();
+    assert_eq!(fixture.settle_version, 1);
+    let mut given = fixture.start();
+    let mut faces = Vec::new();
+    for recorded in &fixture.moves {
+        let mov = fixture_move(&given, recorded);
+        faces.push(crate::embedding::embed(&given, &mov).unwrap());
+        given.apply_move(mov).unwrap();
+        settle(&mut given);
+    }
+    let bends = |state: &GameState| -> Vec<f64> {
+        ratios(state)
+            .into_iter()
+            .filter(|(at, _)| matches!(at, Tightest::Bend(_)))
+            .map(|(_, r)| r)
+            .collect()
+    };
+    let hooked = bends(&given);
+    assert!(hooked[4] < 1.0, "{hooked:?}");
+    let start: Vec<Point> = fixture
+        .nodes
+        .as_ref()
+        .unwrap()
+        .iter()
+        .map(|p| Point::new(p[0], p[1]))
+        .collect();
+    let mut state = protocol::start(4, fixture.board_size, Player::Human, Some(start), 2).unwrap();
+    // A move the router refuses on this board goes in as the stroke that
+    // was recorded, as a link would carry it.
+    for (index, listed) in faces.iter().enumerate() {
+        let placed = crate::route::route(&state, listed).is_ok_and(|routed| {
+            let flat = routed.flatten(curve::tolerance(state.board_size));
+            let face: protocol::FaceMove = listed.clone().into();
+            let mut tries = vec![flat[flat.len() / 2]];
+            tries.extend(flat.iter().copied());
+            tries.into_iter().any(|at| {
+                matches!(
+                    protocol::apply_face_move(&mut state, face.clone(), at),
+                    protocol::Outcome::Applied { .. }
+                )
+            })
+        });
+        if !placed {
+            let outcome = protocol::apply(&mut state, fixture.moves[index].wire());
+            assert!(
+                matches!(outcome, protocol::Outcome::Applied { .. }),
+                "move {index} neither routes nor replays as drawn: {outcome:?}"
+            );
+        }
+    }
+    let straightened = bends(&state);
+    assert_eq!(straightened.len(), 9);
+    assert!(straightened[4] >= 1.0, "{hooked:?} -> {straightened:?}");
+    let under = |bends: &[f64]| bends.iter().filter(|r| **r < 1.0).count();
+    assert!(
+        under(&straightened) <= under(&hooked),
+        "{hooked:?} -> {straightened:?}"
+    );
+    assert!(same_face_model(&state));
+}
+
+/// Two chords leaving a node a few degrees apart: the settle turns their
+/// handles apart until the angle clears the target.
+#[test]
+fn close_spokes_at_a_node_are_turned_apart() {
+    let mut state = GameState::new(4);
+    state.nodes[0].position = Point::new(200.0, 500.0);
+    state.nodes[1].position = Point::new(700.0, 470.0);
+    state.nodes[2].position = Point::new(700.0, 530.0);
+    state.nodes[3].position = Point::new(450.0, 850.0);
+    for (to, y) in [(1usize, 470.0f64), (2, 530.0)] {
+        let polyline: Vec<Point> = (0..=50)
+            .map(|i| {
+                let t = i as f64 / 50.0;
+                Point::new(200.0 + 500.0 * t, 500.0 + (y - 500.0) * t)
+            })
+            .collect();
+        let mid = polyline[25];
+        let mov = crate::types::Move::new(0, to, polyline, mid, Player::Human, 1000);
+        protocol::check(&state, &mov).unwrap();
+        state.apply_move(mov).unwrap();
+        state.current_player = Player::Human;
+    }
+    let chord = |state: &GameState| ratios(state)[&Tightest::Spokes(0, 0, 1)];
+    let before = chord(&state);
+    assert!(before < 1.0, "the spokes read as close: {before:.3}");
+    settle(&mut state);
+    let after = chord(&state);
+    assert!(after >= 1.0, "spokes {before:.3} -> {after:.3}");
+    assert!(same_face_model(&state));
+}
+
+/// Version 1 on the 24-node fixture, where the work cap binds: the rounds,
+/// the work and the settled geometry over the game, as recorded on macOS.
+#[test]
+fn version_1_settles_the_24_node_fixture_as_recorded() {
+    const ROUNDS_24: usize = 918;
+    const WORK_24: usize = 68_494_272;
+    const HASH_24: u64 = 0x78fa209cff5f4fd7;
+    let fixture = replay::load(
+        &Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/settle/selfplay-24n-1000.json"),
+    )
+    .unwrap();
+    let mut drawn = fixture.start();
+    let (mut rounds, mut work) = (0, 0);
+    let mut fnv = crate::exact::Fnv::default();
+    for recorded in &fixture.moves {
+        let mov = fixture_move(&drawn, recorded);
+        drawn.apply_move(mov).unwrap();
+        let mut copy = drawn.clone();
+        copy.settle_version = 1;
+        let report = settle_reported(&mut copy);
+        rounds += report.rounds;
+        work += report.work;
+        for b in bits(&copy) {
+            fnv.feed(f64::from_bits(b));
+        }
+    }
+    assert_eq!(
+        (rounds, work, fnv.0),
+        (ROUNDS_24, WORK_24, HASH_24),
+        "rounds {rounds}, work {work}, hash {}",
+        fnv.hex()
+    );
+}
+
+/// A game recorded at version 1 replays through the version 1 settle to
+/// the same bytes on a fresh board.
+#[test]
+fn a_version_1_record_replays_through_version_1() {
+    let (played, moves) = play_random(6, &seeded_picks(6, 40), 1);
+    assert!(moves.len() >= 4);
+    let mut state = GameState::with_nodes_at(crate::types::opening_layout(6, 1000), 1000, 1);
+    state.current_player = Player::Human;
+    for mov in &moves {
+        assert!(matches!(
+            protocol::apply(&mut state, mov.clone()),
+            protocol::Outcome::Applied { .. }
+        ));
+    }
+    assert_eq!(state.settle_version, 1);
+    assert_eq!(bits(&state), bits(&played));
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(64))]
+
+    /// The pruned nearest-point scan finds the same distance as the full
+    /// one on random chains and points.
+    #[test]
+    fn pruned_and_full_nearest_scans_agree(
+        pts in proptest::collection::vec((0.0..1000.0f64, 0.0..1000.0f64), 4..=10),
+        probes in proptest::collection::vec((-100.0..1100.0f64, -100.0..1100.0f64), 1..=8),
+    ) {
+        let cubics = 3 * ((pts.len() - 1) / 3) + 1;
+        let pts: Vec<Point> = pts[..cubics].iter().map(|(x, y)| Point::new(x.round(), y.round())).collect();
+        let targets = Targets::for_version(2, 1000);
+        let make = |pruned: bool| {
+            let mut chain = Chain {
+                from: 0,
+                to: 1,
+                pts: pts.clone(),
+                seg: 0,
+                t: 0.0,
+                smooth: Vec::new(),
+                samples: Vec::new(),
+                blocks: Vec::new(),
+                pruned,
+            };
+            chain.resample(&targets);
+            chain
+        };
+        let (full, pruned) = (make(false), make(true));
+        for (x, y) in probes {
+            let p = Point::new(x, y);
+            let (_, a, _, _) = full.nearest(&p);
+            let (_, b, _, _) = pruned.nearest(&p);
+            prop_assert_eq!(a, b);
+        }
+    }
+}
+
+/// Replays a saved page record (strokes and face moves) from the path in
+/// SPROUTS_RECORD under the settle version SPROUTS_SETTLE names, printing
+/// the pair table after every move and the bend of every line at the end.
+#[test]
+#[ignore]
+fn probe_record_shape() {
+    let path = std::env::var("SPROUTS_RECORD").expect("SPROUTS_RECORD names a record");
+    let version: u8 = std::env::var("SPROUTS_SETTLE")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(SETTLE_VERSION);
+    let raw: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    let point = |v: &serde_json::Value| Point::new(v[0].as_f64().unwrap(), v[1].as_f64().unwrap());
+    let nodes: Vec<Point> = raw["nodes"].as_array().unwrap().iter().map(point).collect();
+    let first = if raw["firstPlayer"] == "ai" {
+        Player::AI
+    } else {
+        Player::Human
+    };
+    let mut state = protocol::start(
+        raw["initialNodes"].as_u64().unwrap() as usize,
+        raw["boardSize"].as_u64().unwrap() as usize,
+        first,
+        Some(nodes),
+        version,
+    )
+    .unwrap();
+    println!("{path} under version {version}");
+    println!("{}", header());
+    for (index, m) in raw["moves"].as_array().unwrap().iter().enumerate() {
+        let outcome = if m.get("face").is_some() {
+            let face: protocol::FaceMove = serde_json::from_value(m["face"].clone()).unwrap();
+            protocol::apply_face_move(&mut state, face, point(&m["node"]))
+        } else {
+            let wire = protocol::Move {
+                from_node: m["from"].as_u64().unwrap() as usize,
+                to_node: m["to"].as_u64().unwrap() as usize,
+                polyline: m["polyline"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(point)
+                    .collect(),
+                new_node_pos: point(&m["newNode"]),
+                segments: m
+                    .get("segments")
+                    .map(|s| serde_json::from_value(s.clone()).unwrap()),
+            };
+            protocol::apply(&mut state, wire)
+        };
+        if let protocol::Outcome::Rejected { rejection } = &outcome {
+            println!("move {index} refused: {}", rejection.message);
+            break;
+        }
+        let (least, at) = least_clearance(&state);
+        let report = Report {
+            least,
+            at,
+            ..Report::nothing()
+        };
+        println!("{}", describe(index, &report, &state));
+    }
+    let bends: Vec<String> = ratios(&state)
+        .iter()
+        .filter(|(at, _)| matches!(at, Tightest::Bend(_)))
+        .map(|(at, r)| format!("{at:?} {r:.2}"))
+        .collect();
+    println!("bends: {}", bends.join(", "));
+}
+
+fn median(mut values: Vec<f64>) -> f64 {
+    values.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    values[values.len() / 2]
 }
 
 fn class(at: Tightest) -> &'static str {
@@ -802,7 +1099,10 @@ fn report_game(name: &str, fixture: &replay::Fixture) {
         state.apply_move(mov).unwrap();
         let report = if state.settle_version == 0 {
             let mut copy = state.clone();
-            copy.settle_version = SETTLE_VERSION;
+            copy.settle_version = std::env::var("SPROUTS_SETTLE")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(SETTLE_VERSION);
             let report = settle_reported(&mut copy);
             println!("{}", describe(index, &report, &copy));
             report
@@ -857,63 +1157,6 @@ fn probe_settle_room() {
     }
 }
 
-/// Settle time per position of the 24-node fixture under the current
-/// version, and the cost of one survey, one crossing count and one model
-/// check at its last position. Run with --ignored --nocapture in release.
-#[test]
-#[ignore]
-fn probe_settle_time() {
-    let fixture = replay::load(
-        &Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/settle/selfplay-24n-1000.json"),
-    )
-    .unwrap();
-    let times = replay::settle_times(&fixture);
-    let peak = times.iter().copied().fold(0.0, f64::max);
-    let printed: Vec<String> = times.iter().map(|t| format!("{t:.0}")).collect();
-    println!("settle ms per position: {}", printed.join(" "));
-    println!("peak {peak:.1} ms");
-    let mut state = fixture.start();
-    for recorded in &fixture.moves {
-        let mov = fixture_move(&state, recorded);
-        state.apply_move(mov).unwrap();
-    }
-    state.settle_version = SETTLE_VERSION;
-    let targets = targets_of(&state);
-    let layout = Layout::from_state(&state, &targets).unwrap();
-    let original = journal(&state);
-    let tolerance = curve::tolerance(state.board_size);
-    let t = std::time::Instant::now();
-    let survey = layout.survey(&targets, 1.5, None, None, &[]);
-    println!(
-        "survey at level 1.5: {:.2} ms, {} tests",
-        t.elapsed().as_secs_f64() * 1000.0,
-        survey.tests
-    );
-    let t = std::time::Instant::now();
-    let crossed = layout.crossings(tolerance);
-    println!(
-        "crossings: {:.2} ms ({crossed})",
-        t.elapsed().as_secs_f64() * 1000.0
-    );
-    let t = std::time::Instant::now();
-    let holds = layout.holds(&state, &original);
-    println!(
-        "holds: {:.2} ms ({holds})",
-        t.elapsed().as_secs_f64() * 1000.0
-    );
-    let t = std::time::Instant::now();
-    let mut next = layout.clone();
-    let push = Push::empty(&layout);
-    let held = Held::none(&layout);
-    next.apply(&push, 1.0, &held);
-    next.rebuild(&targets, &layout, &held);
-    next.quantise(grid(state.board_size), &targets);
-    println!(
-        "clone, apply, rebuild, quantise: {:.2} ms",
-        t.elapsed().as_secs_f64() * 1000.0
-    );
-}
-
 /// The page record at SPROUTS_RECORD (strokes and face moves) as a record
 /// of face moves alone, each with the node it lands on when the engine
 /// routes and settles it under the settle version SPROUTS_SETTLE names;
@@ -941,10 +1184,12 @@ fn print_topology_record() {
     // The record replayed as it was made gives every move's face move.
     let mut given = protocol::start(count, board, first, Some(nodes.clone()), recorded).unwrap();
     let mut faces: Vec<protocol::FaceMove> = Vec::new();
+    let mut strokes: Vec<Option<protocol::Move>> = Vec::new();
     for m in raw["moves"].as_array().unwrap() {
         let outcome = if m.get("face").is_some() {
             let face: protocol::FaceMove = serde_json::from_value(m["face"].clone()).unwrap();
             faces.push(face.clone());
+            strokes.push(None);
             protocol::apply_face_move(&mut given, face, point(&m["node"]))
         } else {
             let wire = protocol::Move {
@@ -963,6 +1208,7 @@ fn print_topology_record() {
             };
             let entered = protocol::enter(wire.clone(), &given).unwrap();
             faces.push(crate::embedding::embed(&given, &entered).unwrap().into());
+            strokes.push(Some(wire.clone()));
             protocol::apply(&mut given, wire)
         };
         assert!(
@@ -974,29 +1220,50 @@ fn print_topology_record() {
     let mut moves = Vec::new();
     for (index, face) in faces.iter().enumerate() {
         let listed: crate::face::Move = face.clone().into();
-        let routed = match crate::route::route(&state, &listed) {
-            Ok(routed) => routed,
-            Err(why) => panic!("move {index} does not route under version {version}: {why:?}"),
-        };
-        let flat = routed.flatten(curve::tolerance(board));
-        let mut tries = vec![flat[flat.len() / 2]];
-        tries.extend(flat.iter().copied());
         let mut landed = None;
-        for at in tries {
-            if let protocol::Outcome::Applied { mov, .. } =
-                protocol::apply_face_move(&mut state, face.clone(), at)
-            {
-                landed = Some(mov.new_node_pos);
-                break;
+        let mut refused = String::new();
+        match crate::route::route(&state, &listed) {
+            Ok(routed) => {
+                let flat = routed.flatten(curve::tolerance(board));
+                let mut tries = vec![flat[flat.len() / 2]];
+                tries.extend(flat.iter().copied());
+                for at in tries {
+                    match protocol::apply_face_move(&mut state, face.clone(), at) {
+                        protocol::Outcome::Applied { mov, .. } => {
+                            landed = Some(mov.new_node_pos);
+                            break;
+                        }
+                        protocol::Outcome::Rejected { rejection } => refused = rejection.message,
+                    }
+                }
             }
+            Err(why) => eprintln!("move {index} does not route under version {version}: {why:?}"),
         }
-        let node = landed
-            .unwrap_or_else(|| panic!("move {index}: no point on the routed curve takes the node"));
+        if let Some(node) = landed {
+            moves.push(serde_json::json!({
+                "from": face.a,
+                "to": face.b,
+                "face": face,
+                "node": [node.x, node.y],
+            }));
+            continue;
+        }
+        // The stroke as recorded, when the router will not draw the move
+        // on this board.
+        let Some(wire) = strokes[index].clone() else {
+            panic!("move {index}: no point on the routed curve takes the node ({refused})");
+        };
+        let outcome = protocol::apply(&mut state, wire.clone());
+        assert!(
+            matches!(outcome, protocol::Outcome::Applied { .. }),
+            "move {index}: the stroke is refused too: {outcome:?} ({refused})"
+        );
         moves.push(serde_json::json!({
-            "from": face.a,
-            "to": face.b,
-            "face": face,
-            "node": [node.x, node.y],
+            "from": wire.from_node,
+            "to": wire.to_node,
+            "polyline": wire.polyline.iter().map(|p| [p.x, p.y]).collect::<Vec<_>>(),
+            "newNode": [wire.new_node_pos.x, wire.new_node_pos.y],
+            "segments": wire.segments,
         }));
     }
     let record = serde_json::json!({
@@ -1010,87 +1277,4 @@ fn print_topology_record() {
         "moves": moves,
     });
     println!("RECORD {record}");
-}
-
-/// Replays a saved page record (strokes and face moves) from the path in
-/// SPROUTS_RECORD under the settle version SPROUTS_SETTLE names, printing
-/// the pair table after every move and the bend of every line at the end.
-#[test]
-#[ignore]
-fn probe_record_shape() {
-    let path = std::env::var("SPROUTS_RECORD").expect("SPROUTS_RECORD names a record");
-    let version: u8 = std::env::var("SPROUTS_SETTLE")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(SETTLE_VERSION);
-    let raw: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-    let nodes: Vec<Point> = raw["nodes"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|p| Point::new(p[0].as_f64().unwrap(), p[1].as_f64().unwrap()))
-        .collect();
-    let first = if raw["firstPlayer"] == "ai" {
-        Player::AI
-    } else {
-        Player::Human
-    };
-    let mut state = protocol::start(
-        raw["initialNodes"].as_u64().unwrap() as usize,
-        raw["boardSize"].as_u64().unwrap() as usize,
-        first,
-        Some(nodes),
-        version,
-    )
-    .unwrap();
-    println!("{path} under version {version}");
-    println!("{}", header());
-    for (index, m) in raw["moves"].as_array().unwrap().iter().enumerate() {
-        let point =
-            |v: &serde_json::Value| Point::new(v[0].as_f64().unwrap(), v[1].as_f64().unwrap());
-        let outcome = if m.get("face").is_some() {
-            let face: protocol::FaceMove = serde_json::from_value(m["face"].clone()).unwrap();
-            protocol::apply_face_move(&mut state, face, point(&m["node"]))
-        } else {
-            let wire = protocol::Move {
-                from_node: m["from"].as_u64().unwrap() as usize,
-                to_node: m["to"].as_u64().unwrap() as usize,
-                polyline: m["polyline"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .map(point)
-                    .collect(),
-                new_node_pos: point(&m["newNode"]),
-                segments: m
-                    .get("segments")
-                    .map(|s| serde_json::from_value(s.clone()).unwrap()),
-            };
-            protocol::apply(&mut state, wire)
-        };
-        if let protocol::Outcome::Rejected { rejection } = &outcome {
-            println!("move {index} refused: {}", rejection.message);
-            break;
-        }
-        let (least, at) = least_clearance(&state);
-        let report = Report {
-            least,
-            at,
-            ..Report::nothing()
-        };
-        println!("{}", describe(index, &report, &state));
-    }
-    let bends: Vec<String> = ratios(&state)
-        .iter()
-        .filter(|(at, _)| matches!(at, Tightest::Bend(_)))
-        .map(|(at, r)| format!("{at:?} {r:.2}"))
-        .collect();
-    println!("bends: {}", bends.join(", "));
-    let spokes: Vec<String> = ratios(&state)
-        .iter()
-        .filter(|(at, _)| matches!(at, Tightest::Spokes(..)))
-        .map(|(at, r)| format!("{at:?} {r:.2}"))
-        .collect();
-    println!("spokes: {}", spokes.join(", "));
 }
