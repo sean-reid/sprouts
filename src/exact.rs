@@ -33,6 +33,41 @@ pub fn distance(a: Point, b: Point) -> f64 {
     distance_squared(a, b).sqrt()
 }
 
+/// The `n` points of the unit circle at multiples of a turn over `n`,
+/// counterclockwise from (1, 0), for `n` a power of two of at least 4.
+/// Each quadrant is the first turned by right angles, and the first is
+/// bisected from its ends by normalising midpoints, so the points come
+/// from square roots alone and mirror each other bit for bit.
+pub fn unit_circle(n: usize) -> Vec<Point> {
+    assert!(n >= 4 && n.is_power_of_two(), "{n} points");
+    let quarter = n / 4;
+    let mut first = vec![Point::new(0.0, 0.0); quarter + 1];
+    first[0] = Point::new(1.0, 0.0);
+    first[quarter] = Point::new(0.0, 1.0);
+    let mut gap = quarter;
+    while gap > 1 {
+        let half = gap / 2;
+        for k in (0..quarter).step_by(gap) {
+            let (a, b) = (first[k], first[k + gap]);
+            let (x, y) = (a.x + b.x, a.y + b.y);
+            let len = length(x, y);
+            first[k + half] = Point::new(x / len, y / len);
+        }
+        gap = half;
+    }
+    (0..n)
+        .map(|k| {
+            let p = first[k % quarter];
+            match k / quarter {
+                0 => p,
+                1 => Point::new(-p.y, p.x),
+                2 => Point::new(-p.x, -p.y),
+                _ => Point::new(p.y, -p.x),
+            }
+        })
+        .collect()
+}
+
 /// Screen-side test: positive when `q` is on the right of the heading
 /// `o` to `p`, where y grows downward; zero when collinear.
 pub fn cross(o: Point, p: Point, q: Point) -> f64 {
@@ -90,5 +125,30 @@ mod tests {
             fnv.points(&[snap_to_grid(a), snap_to_grid(b)]);
         }
         assert_eq!(fnv.0, HELPERS_HASH, "helpers hash {}", fnv.hex());
+    }
+
+    /// The 128 unit circle points a Mac records; the sqrt-only build has
+    /// to give the same bits on every platform.
+    const UNIT_CIRCLE_HASH: u64 = 0x8d6f_9e15_31f6_5fb5;
+
+    #[test]
+    fn the_unit_circle_is_exact_and_the_same_on_every_platform() {
+        let n = 128;
+        let circle = unit_circle(n);
+        assert_eq!(circle.len(), n);
+        for (k, p) in circle.iter().enumerate() {
+            let t = std::f64::consts::TAU * k as f64 / n as f64;
+            assert!((p.x - t.cos()).abs() < 1e-15, "{k}: {p:?}");
+            assert!((p.y - t.sin()).abs() < 1e-15, "{k}: {p:?}");
+            // Each quadrant is the first turned by a right angle, and the
+            // first mirrors across its diagonal, bit for bit.
+            let turned = circle[(k + n / 4) % n];
+            assert_eq!((turned.x, turned.y), (-p.y, p.x), "{k}");
+            let mirrored = circle[(n / 4 + n - k) % n];
+            assert_eq!((mirrored.x, mirrored.y), (p.y, p.x), "{k}");
+        }
+        let mut fnv = Fnv::default();
+        fnv.points(&circle);
+        assert_eq!(fnv.0, UNIT_CIRCLE_HASH, "unit circle hash {}", fnv.hex());
     }
 }
