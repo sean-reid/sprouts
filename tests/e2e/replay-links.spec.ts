@@ -11,6 +11,7 @@ import {
   interceptWorkerMessages,
   recordNodesOnScreen,
   colourPixelsNear,
+  requestCount,
   rowIds,
   savedRecord,
   share,
@@ -34,8 +35,8 @@ const fixtures = [
 // the payload budget in characters, the form the link takes, and for a
 // shapes link how many AI moves go as topology. The link carries indices
 // when the engine regenerates the whole game on a fresh board, and shapes
-// when the regenerated board refuses a move, as the nine-node and
-// thirty-move games do. The budget belongs to the recording: the payload
+// when the regenerated board refuses a move, as the nine-node,
+// thirty-move and 24-node games do. The budget belongs to the recording: the payload
 // measured when the game was recorded (34, 1486 and 2047) plus 10
 // percent, rounded up. The nine-node game went from 1335 to 1486 when
 // the bare loop's circle points moved a quarter step off the heading
@@ -46,6 +47,7 @@ const routed: [string, number, "indices" | "shapes", number][] = [
   ["fixtures/saved/eight-moves-4n-1000.json", 38, "indices", 4],
   ["fixtures/saved/ten-moves-9n-1000.json", 1635, "shapes", 5],
   ["fixtures/saved/thirty-moves-12n-1000.json", 2252, "shapes", 15],
+  ["fixtures/saved/ten-moves-24n-1000.json", 777, "shapes", 5],
 ];
 
 // A share replays the game up to three times in the engine, routing
@@ -69,7 +71,11 @@ function visitorOptions(): BrowserContextOptions {
 async function openSaved(page: Page, file: string): Promise<number> {
   const fixture = JSON.parse(readFileSync(file, "utf8")) as Fixture;
   const record = { firstPlayer: "human", cursor: fixture.moves.length, ...fixture };
-  await page.addInitScript((s) => localStorage.setItem("sprouts.game", s), JSON.stringify(record));
+  await page.addInitScript(interceptWorkerMessages);
+  // Seeded once, so a reload keeps what the page saved since.
+  await page.addInitScript((s) => {
+    if (!localStorage.getItem("sprouts.game")) localStorage.setItem("sprouts.game", s);
+  }, JSON.stringify(record));
   await page.goto("/");
   await expect(entries(page)).toHaveCount(fixture.moves.length, { timeout: 240_000 });
   await expect(page.locator("#status")).not.toHaveText(/Initializing|Replay/, {
@@ -132,7 +138,15 @@ for (const [file, budget, form, topologyMoves] of routed) {
     const total = await openSaved(page, file);
     await expect(page.locator("#status")).toHaveText("Your turn!");
     const before = await strokeCells(page);
+    const started = Date.now();
     const { url, payload } = await share(page, `${name}-payload-chars`, SHARE_WAIT);
+    test.info().annotations.push({
+      type: `${name}-share-ms`,
+      description: String(Date.now() - started),
+    });
+    // The replay that restored the game indexed every move, so the share
+    // asks the engine for nothing more.
+    expect(await requestCount(page, "indexMoves")).toBe(0);
     expect(payload).toBeLessThan(budget);
     await expect(page.locator("#status")).not.toHaveText(/replay may stop|may differ/);
     await shot(page, `${name}-source`);
@@ -180,10 +194,17 @@ for (const [file, budget, form, topologyMoves] of routed) {
       // on the live game, since the saved record indexes to the link's
       // moves.
       expect(page.url()).toBe(url);
+      const reloaded = Date.now();
       await page.reload();
       await expect(page.locator("#status")).toHaveText("Your turn!", { timeout: 240_000 });
+      test.info().annotations.push({
+        type: `${name}-reopen-ms`,
+        description: String(Date.now() - reloaded),
+      });
       expect(page.url()).not.toContain("#");
       await expect(entries(page)).toHaveCount(total);
+      // The saved record carried its indices, so boot compared bytes.
+      expect(await requestCount(page, "indexMoves")).toBe(0);
       return;
     }
     expect(relinked.moves.map(hasStroke)).toEqual(linked.moves.map(hasStroke));

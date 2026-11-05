@@ -438,6 +438,7 @@ export function interceptWorkerMessages(): void {
     holdNext: typeof holdNext;
     failNext: typeof failNext;
     answerNext: typeof answerNext;
+    requests: Record<string, number>;
     latestNodes?: BoardNode[];
     latestLines?: BoardLine[];
     latestCurve?: Cubic[];
@@ -453,6 +454,7 @@ export function interceptWorkerMessages(): void {
   hooks.holdNext = holdNext;
   hooks.failNext = failNext;
   hooks.answerNext = answerNext;
+  hooks.requests = {};
   // Every reply that carries a board leaves its nodes on the window, so a
   // test reads node positions from the engine rather than the layout; a
   // fit reply leaves its curve, an applied move the stroke it was drawn as.
@@ -498,6 +500,8 @@ export function interceptWorkerMessages(): void {
   }
   Worker.prototype.postMessage = function (this: Worker, ...args: unknown[]) {
     const envelope = args[0] as { id?: number; method?: string } | undefined;
+    if (envelope?.method)
+      hooks.requests[envelope.method] = (hooks.requests[envelope.method] ?? 0) + 1;
     if (fail && envelope?.method === fail.method) {
       const data = { id: envelope.id, ok: false, error: fail.error };
       fail = null;
@@ -926,4 +930,13 @@ export async function share(
   const payload = url.length - at - HASH_PREFIX.length;
   test.info().annotations.push({ type: label, description: String(payload) });
   return { url, payload };
+}
+
+// How many requests of `method` the page has sent its worker since the
+// interceptor was installed.
+export function requestCount(page: Page, method: string): Promise<number> {
+  return page.evaluate(
+    (m) => (window as unknown as { requests?: Record<string, number> }).requests?.[m] ?? 0,
+    method,
+  );
 }
