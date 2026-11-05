@@ -775,15 +775,32 @@ fn relax(
     // The relaxation settles a little short of its room, so the room sits a
     // line clearance above what the validator demands.
     let room = (NODE_ROOM * want.spacing).max(want.node_clearance + want.clearance);
-    // The fit may move the curve a tolerance toward a node as well.
+    // The fit may move the curve a tolerance toward a node, and a settling
+    // game's grid a half diagonal more.
     let rooms = clearance::Rooms {
         clearance: eroded_by(state, want),
-        node_clearance: want.node_clearance + curve::tolerance(state.board_size),
+        node_clearance: want.node_clearance
+            + curve::tolerance(state.board_size)
+            + erode::grid_snap(state),
         node_room: room,
         end_room: want.spacing,
     };
     let obstacles = clearance::Obstacles::new(arena.walls(), nodes, ends, rooms, path);
-    clearance::push(path.to_vec(), &obstacles)
+    let relaxed = clearance::push(path.to_vec(), &obstacles)?;
+    // The pushes move points, so two clear points can leave a segment
+    // between them skimming a wall, and the fit, the flattening and the
+    // stored grid can each move the curve further; every segment is
+    // sampled against what the validator will forgive, and a path that
+    // fails anywhere gives way to the taut one.
+    let tolerance = curve::tolerance(state.board_size);
+    let snap = erode::grid_snap(state);
+    let margin = 2.0 * tolerance + snap;
+    let node_clearance = want.clearance + tolerance + snap;
+    let sampled = clearance::resample(&relaxed, clearance::SPACING * rooms.clearance);
+    sampled
+        .iter()
+        .all(|q| arena.keeps_validity(*q, margin, node_clearance))
+        .then_some(relaxed)
 }
 
 /// Feeds the flattening and node of every routed search move of `state`
@@ -866,12 +883,15 @@ pub(crate) fn finish(
         return Err(Unroutable::Shape("touching"));
     }
     let mov = Move::from_segments(mv.a, mv.b, path, segments, node, state.current_player);
+    // The checks run on the move as the board will store it: a settling
+    // game rounds it to the grid before apply looks at it.
+    let stored = state.entering(mov.clone());
     match state.current_player {
-        Player::AI => validate_ai_move(state, &mov),
-        Player::Human => validate_move(state, &mov),
+        Player::AI => validate_ai_move(state, &stored),
+        Player::Human => validate_move(state, &stored),
     }
     .map_err(|r| Unroutable::Bug(kind_name(r.kind)))?;
-    let read = embedding::embed(state, &mov).map_err(|r| Unroutable::Bug(kind_name(r.kind)))?;
+    let read = embedding::embed(state, &stored).map_err(|r| Unroutable::Bug(kind_name(r.kind)))?;
     let mut want = mv.enclosed.clone();
     want.sort_unstable();
     let mut got = read.enclosed.clone();

@@ -320,10 +320,10 @@ const FENCE_MISSES_CEILING: usize = 1;
 /// last case ends and re-recorded with every router change, so a change
 /// in either direction shows. A corridor that hugs a node costs a later
 /// move its room, which the Room count carries.
-const AI_ROUTES: usize = 927;
-const AI_ROOM: usize = 554;
-const HUMAN_ROUTES: usize = 973;
-const HUMAN_ROOM: usize = 608;
+const AI_ROUTES: usize = 924;
+const AI_ROOM: usize = 551;
+const HUMAN_ROUTES: usize = 985;
+const HUMAN_ROOM: usize = 618;
 /// Parity searches in one sweep game that left EXACT_STATES behind,
 /// whether a fence then missed or a fenced corridor was retried, so a
 /// lowered cap or an arena change that floods the fallback shows.
@@ -415,6 +415,16 @@ proptest! {
         }
     }
 
+    /// The same games on a settling board, every drawn move sent through
+    /// apply as the page sends it: rounded to the unit grid, checked and
+    /// settled. A move apply refuses is a bug.
+    #[test]
+    fn no_drawn_move_is_refused_on_a_settling_board(nodes in 4usize..=12, picks in prop::collection::vec(any::<u32>(), 36)) {
+        let tally = sweep::settling_game(nodes, &picks, Player::AI);
+        prop_assert!(tally.is_ok(), "{}", tally.as_ref().unwrap_err());
+        prop_assert_eq!(tally.unwrap().bug, 0);
+    }
+
     /// The same games drawn at the human clearances, which routeMove and
     /// applyFaceMove use for the player at the keyboard.
     #[test]
@@ -487,9 +497,16 @@ fn recorded_positions_keep_a_drawable_move() {
     assert!(undrawn.is_empty(), "no listed move routes in {undrawn:?}");
 }
 
-/// The position after every move of a fixture, with the AI to move.
+/// The position after every move of a fixture, with the AI to move. A
+/// settled fixture replays as the page played it, every move applied as
+/// it committed and the board settled after each.
 fn position(path: &std::path::Path) -> GameState {
     let fixture = crate::replay::load(path).unwrap();
+    if fixture.settle_version > 0 {
+        let mut state = crate::replay::play_as(&fixture, Player::Human);
+        state.current_player = Player::AI;
+        return state;
+    }
     let mut state = fixture.start();
     state.current_player = Player::AI;
     for m in &fixture.moves {
@@ -940,10 +957,7 @@ fn shared_game_at(pick: usize) -> Result<SharedGame, String> {
 #[test]
 #[cfg(not(debug_assertions))]
 fn a_shared_game_replays_to_the_same_board() {
-    // Pick 1 is out: the recorder cannot apply its move 3, a chord the
-    // router draws within a unit of its own spoke, which the unit-grid
-    // snap on entry turns into a crossing.
-    for pick in [0, 2, 3, 4, 9, 10, 11, 12, 17, 36] {
+    for pick in [0, 1, 2, 3, 4, 9, 10, 11, 12, 17, 36] {
         let game = shared_game_at(pick).unwrap();
         let drift = rehearse_shared_game(&game);
         assert_eq!(
@@ -1020,7 +1034,7 @@ fn record_shared_games() {
     record_shared_game(
         12,
         30,
-        pick("SPROUTS_PICK_12", 5),
+        pick("SPROUTS_PICK_12", 0),
         &dir.join("thirty-moves-12n-1000.json"),
     );
     record_shared_game(
@@ -1279,7 +1293,7 @@ const SWEEP_FIXTURE: &str = "fixtures/routing/sweep-6n-6m.json";
 /// The final routing hash a Mac records; the Linux runner and the wasm
 /// build (tests/unit/route-hash.test.ts) have to produce the same one,
 /// since a share link is redrawn on the visitor's device.
-const ROUTING_HASH: u64 = 0x7ebb_828c_5672_7ae7;
+const ROUTING_HASH: u64 = 0x0f57_e898_b609_8ff0;
 
 #[test]
 fn routing_hashes_the_same_on_every_platform() {
@@ -2754,4 +2768,175 @@ fn probe_topology_stages() {
             }
         }
     }
+}
+
+/// Shared game positions where the router drew the AI's move and apply
+/// refused it as a crossing, because the unit grid a settling game stores
+/// the curve on pushed it across a line: in two 12-node games the
+/// relaxed path had skimmed a line far from the ends, and in a 4-node
+/// game the chord grazed its own spoke's far end within a unit. Each
+/// carries the move that was refused. The fixtures are frozen
+/// recordings; the recorder plays other games on other routers.
+const GRID_SNAP_FIXTURES: [(&str, FaceMove); 3] = [
+    (
+        "fixtures/routing/unitgrid-12n-21m.json",
+        FaceMove {
+            a: 8,
+            at_a: Some(71),
+            b: 29,
+            at_b: Some(69),
+            enclosed: Vec::new(),
+        },
+    ),
+    (
+        "fixtures/routing/unitgrid-12n-29m.json",
+        FaceMove {
+            a: 38,
+            at_a: Some(105),
+            b: 40,
+            at_b: Some(113),
+            enclosed: Vec::new(),
+        },
+    ),
+    (
+        "fixtures/routing/unitgrid-4n-3m.json",
+        FaceMove {
+            a: 1,
+            at_a: Some(8),
+            b: 2,
+            at_b: None,
+            enclosed: Vec::new(),
+        },
+    ),
+];
+
+/// On the grid-snap positions every move the router draws applies,
+/// stored on the unit grid as a settling game stores it, and the move
+/// apply once refused either draws or is refused by the router's own
+/// check of the stored form, never handed on.
+#[test]
+fn a_drawn_route_passes_the_checks_apply_makes() {
+    let mut refused = Vec::new();
+    for (path, once_refused) in GRID_SNAP_FIXTURES {
+        let state = position(&std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(path));
+        assert_eq!(state.settle_version, protocol::SETTLE_VERSION);
+        let moves = state.face.search_moves();
+        assert!(
+            moves.contains(&once_refused),
+            "{path}: the refused move is listed"
+        );
+        match route(&state, &once_refused) {
+            Ok(_) => eprintln!("{path}: {once_refused:?} draws"),
+            Err(Unroutable::Bug(what)) => eprintln!("{path}: {once_refused:?} refused: {what}"),
+            Err(why) => panic!("{path}: {once_refused:?}: {why:?}"),
+        }
+        for mv in moves {
+            let Ok(mov) = draws(&state, &mv) else {
+                continue;
+            };
+            let mut after = state.clone();
+            if let protocol::Outcome::Rejected { rejection } =
+                protocol::apply(&mut after, protocol::Move::from(mov))
+            {
+                refused.push(format!(
+                    "{path}: {mv:?} drew a move apply refuses: {}",
+                    rejection.message
+                ));
+            }
+        }
+    }
+    assert!(refused.is_empty(), "{}", refused.join("\n"));
+}
+
+/// Over every probe position, how many routes keep their relaxed path
+/// and how many give it up because a relaxed segment fails the arena's
+/// clearances: `cargo test --release probe_relaxed_fallbacks -- --ignored
+/// --nocapture`.
+#[test]
+#[ignore]
+fn probe_relaxed_fallbacks() {
+    let (mut kept, mut pushed_none, mut failed_segments) = (0usize, 0usize, 0usize);
+    for state in probe_positions() {
+        let want = rules(&state);
+        for mv in state.face.search_moves() {
+            if mv.a == mv.b && mv.enclosed.is_empty() {
+                continue;
+            }
+            let Ok((arena, taut, _)) = plan(
+                &mut Router::new(),
+                &state,
+                &mv,
+                &want,
+                Parity::Search,
+                Fencing::Up,
+            ) else {
+                continue;
+            };
+            let ends = [state.nodes[mv.a].position, state.nodes[mv.b].position];
+            let nodes: Vec<Point> = state
+                .nodes
+                .iter()
+                .filter(|n| n.id != mv.a && n.id != mv.b)
+                .map(|n| n.position)
+                .collect();
+            let room = (NODE_ROOM * want.spacing).max(want.node_clearance + want.clearance);
+            let rooms = clearance::Rooms {
+                clearance: super::eroded_by(&state, &want),
+                node_clearance: want.node_clearance + curve::tolerance(state.board_size),
+                node_room: room,
+                end_room: want.spacing,
+            };
+            let obstacles = clearance::Obstacles::new(arena.walls(), nodes, ends, rooms, &taut);
+            match clearance::push(taut.clone(), &obstacles) {
+                None => pushed_none += 1,
+                Some(_) => {
+                    if relax(&state, &mv, &want, &arena, &taut).is_some() {
+                        kept += 1;
+                    } else {
+                        failed_segments += 1;
+                    }
+                }
+            }
+        }
+    }
+    eprintln!(
+        "relaxed paths kept {kept}, refused by push {pushed_none}, refused by the segment check {failed_segments}"
+    );
+}
+
+/// How the recorder's 12-node game ends at each of the first 30 picks:
+/// recorded live, recorded but over, stopped by the human selector, or
+/// stopped by the router: `cargo test --release probe_twelve_node_picks
+/// -- --ignored --nocapture`.
+#[test]
+#[ignore]
+fn probe_twelve_node_picks() {
+    let (mut live, mut over, mut human, mut router, mut refused) = (0, 0, 0, 0, 0);
+    for pick in 0..30 {
+        match shared_game(12, 30, pick) {
+            Ok(game) => {
+                let state = crate::replay::play_as(&game.fixture, Player::Human);
+                if state.face.search_moves().is_empty() {
+                    over += 1;
+                } else {
+                    live += 1;
+                }
+                eprintln!(
+                    "pick {pick}: recorded, game over {}",
+                    state.face.search_moves().is_empty()
+                );
+            }
+            Err(why) => {
+                if why.contains("no human move") {
+                    human += 1;
+                } else if why.contains("rejected") {
+                    refused += 1;
+                } else {
+                    router += 1;
+                }
+                eprintln!("pick {pick}: {why}");
+            }
+        }
+    }
+    eprintln!("TABLE live {live} over {over} human-selector {human} router {router} apply-refused {refused}");
 }

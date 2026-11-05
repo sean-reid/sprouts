@@ -537,6 +537,16 @@ fn subdivide_closed(corners: &[Point], step: f64) -> Vec<Point> {
     out
 }
 
+/// How far rounding to the unit grid can move a stored curve: half the
+/// grid's diagonal in a settling game, nothing otherwise.
+pub(super) fn grid_snap(state: &GameState) -> f64 {
+    if state.settle_version > 0 {
+        crate::types::grid(state.board_size) * std::f64::consts::FRAC_1_SQRT_2
+    } else {
+        0.0
+    }
+}
+
 /// The path of half-edge `h` with the node positions as its ends; a drawn
 /// stroke ends within the validator's tolerance of its node.
 fn spoke_path(state: &GameState, h: HalfEdgeId) -> Vec<Point> {
@@ -816,6 +826,25 @@ impl Arena {
         };
         arena.classify();
         Ok(arena)
+    }
+
+    /// Whether a curve through `p` passes the validator wherever the fit
+    /// and the stored grid may move it: `margin` from every wall that is
+    /// no end node's spoke and from the far runs of the spokes, and
+    /// `node_clearance` from every other node. The near runs are forgiven
+    /// wherever the curve crosses them.
+    pub(super) fn keeps_validity(&self, p: Point, margin: f64, node_clearance: f64) -> bool {
+        self.other_walls.distance(p, margin) >= margin
+            && self
+                .nodes
+                .iter()
+                .all(|n| n.distance_to(&p) >= node_clearance)
+            && self.spokes.iter().all(|spoke| {
+                spoke
+                    .far
+                    .iter()
+                    .all(|run| closest_point_on_polyline(run, &p).1 >= margin)
+            })
     }
 
     /// Whether `p` keeps every clearance: the line clearance from walls that
