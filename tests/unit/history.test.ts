@@ -1152,6 +1152,101 @@ describe("a link that names moves by index", () => {
     expect(bytesOf(encodeRecord(history))[0]).toBe(LINK_VERSION);
   });
 
+  // A refused game: the engine answers classify and rehearse and counts
+  // the calls, so a cached second share shows as none.
+  const secondFace: FaceMove = { a: 2, atA: undefined, b: 3, atB: undefined, enclosed: [] };
+  function shapesEngine() {
+    const seen = { classified: 0, rehearsed: 0 };
+    const engine: LinkEngine = {
+      classify: (plan) => {
+        seen.classified++;
+        return Promise.resolve({
+          topology: plan.moves.map((_, i) => (i === 1 ? secondFace : undefined)),
+        });
+      },
+      index: noIndex,
+      rehearse: () => {
+        seen.rehearsed++;
+        return Promise.resolve({ refused: undefined, nodes: [], settled: [] });
+      },
+    };
+    return { engine, seen };
+  }
+
+  function refusedGame(): History {
+    const history = twoMoves();
+    history.moves[0]!.indexed = { index: 3, along: 128 };
+    history.moves[1]!.refused = true;
+    return history;
+  }
+
+  it("caches the shapes a refused game settled and shares them without the engine", async () => {
+    const { engine, seen } = shapesEngine();
+    const first = await prepareLink(refusedGame(), engine);
+    expect(seen).toEqual({ classified: 1, rehearsed: 1 });
+    expect(first.history.moves.map((m) => m.shape)).toEqual(["geometry", "topology"]);
+    expect(first.history.shapes).toEqual({ moves: 2 });
+    const saved = first.history.record();
+    expect(saved.shapes).toEqual({ moves: 2 });
+    expect(saved.moves[1]).toMatchObject({
+      cache: { refused: true, shape: "topology", topology: secondFace },
+    });
+    const again = await prepareLink(History.from(saved), engine);
+    expect(seen).toEqual({ classified: 1, rehearsed: 1 });
+    expect(again.mismatch).toBeUndefined();
+    expect(again.history.moves.map((m) => m.topology)).toEqual([undefined, secondFace]);
+    expect(encodeRecord(again.history)).toBe(encodeRecord(first.history));
+  });
+
+  it("drops the shapes cache when a move is added or the list is truncated", async () => {
+    const { engine, seen } = shapesEngine();
+    const { history } = await prepareLink(refusedGame(), engine);
+    expect(history.shaped).toBe(true);
+    const grown = history.clone();
+    grown.push({
+      fromNode: 4,
+      toNode: 5,
+      polyline: [at(500, 500), at(500, 650)],
+      newNodePos: at(500, 575),
+    });
+    expect(grown.shapes).toBeUndefined();
+    expect(grown.shaped).toBe(false);
+    const cut = history.clone();
+    cut.cursor = 1;
+    cut.truncate();
+    expect(cut.shapes).toBeUndefined();
+    expect(cut.shaped).toBe(false);
+    await prepareLink(history, engine);
+    expect(seen.classified).toBe(1);
+    // The one move left carries its index, so the cut game goes as indices.
+    const { history: cutLink } = await prepareLink(cut, engine);
+    expect(seen.classified).toBe(1);
+    expect(bytesOf(encodeRecord(cutLink))[0]).toBe(6);
+    // The grown game has a move without an index and no shapes, so it is
+    // worked out again.
+    grown.moves[2]!.refused = true;
+    await prepareLink(grown, engine);
+    expect(seen.classified).toBe(2);
+  });
+
+  it("loads a shapes cache from other versions as none and an old record settles once", async () => {
+    const { engine, seen } = shapesEngine();
+    const { history } = await prepareLink(refusedGame(), engine);
+    const saved = history.record();
+    const stale = {
+      ...saved,
+      cacheVersions: { ...saved.cacheVersions!, router: ROUTER_VERSION + 1 },
+    };
+    const back = History.from(stale);
+    expect(back.shapes).toBeUndefined();
+    expect(back.moves.map((m) => m.shape)).toEqual([undefined, undefined]);
+    expect(back.moves.map((m) => m.topology)).toEqual([undefined, undefined]);
+    const old = History.from(refusedGame().record());
+    expect(old.shaped).toBe(false);
+    await prepareLink(old, engine);
+    expect(seen.classified).toBe(2);
+  });
+
   it("knows an own link from the cached indices without the engine", async () => {
     const saved = twoMoves();
     saved.moves[0]!.indexed = { index: 3, along: 128 };

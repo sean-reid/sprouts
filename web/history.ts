@@ -15,7 +15,7 @@ import type {
 } from "../pkg/sprouts";
 import { circleLayout, openingLayout, sameLayout, type Position } from "./layout";
 import { distance } from "./path";
-import type { Fixture, FixtureMove } from "./record";
+import type { Fixture, FixtureMove, MoveCache } from "./record";
 import { shapeText } from "./shape";
 
 // A move a link carried as its face move and node; the engine draws the
@@ -49,6 +49,16 @@ export interface GameRecord extends Omit<Fixture, "moves"> {
   // The router, move list and settle the moves' caches were worked out
   // under; a record from other versions loads with no cache.
   cacheVersions?: CacheVersions;
+  shapes?: ShapesCache;
+}
+
+// What a share settled for the shapes link of this exact move list: the
+// move count and the warnings it ended with; each move's form sits in
+// its cache. Any change to the move list drops it.
+export interface ShapesCache {
+  moves: number;
+  mismatch?: boolean;
+  refusedAt?: number;
 }
 
 export interface CacheVersions {
@@ -95,6 +105,8 @@ export interface RecordedMove extends Move {
   // The regenerated board would not take this move, so the game cannot
   // travel as indices while the move stands.
   refused?: true;
+  // How a share settled the move travels in a shapes link.
+  shape?: "topology" | "geometry";
 }
 
 export const UNKNOWN_NODE = -1;
@@ -174,6 +186,8 @@ export class History {
   cursor = 0;
   // Starting positions once the engine has laid the board out.
   nodes: Position[] | null = null;
+  // The shapes link a share settled for this move list, until it changes.
+  shapes: ShapesCache | undefined;
 
   constructor(
     public initialNodes: number,
@@ -191,13 +205,17 @@ export class History {
     );
     history.nodes = record.nodes ?? null;
     history.moves = record.moves.map(fromRecordMove);
+    history.shapes = record.shapes;
     // A cache from other versions is dropped; a move a link carries by
     // index alone keeps its index, which is the move itself.
     if (!currentVersions(record.cacheVersions)) {
       for (const move of history.moves.filter(drawn)) {
         delete move.indexed;
         delete move.refused;
+        if (move.shape) delete move.topology;
+        delete move.shape;
       }
+      history.shapes = undefined;
     }
     history.cursor = Math.min(Math.max(record.cursor, 0), history.moves.length);
     return history;
@@ -230,6 +248,7 @@ export class History {
     if (topology) kept.topology = topology;
     this.moves.push(kept);
     this.cursor = this.moves.length;
+    this.shapes = undefined;
   }
 
   // Whether every move carries the index the link would send. A move's
@@ -250,11 +269,22 @@ export class History {
     copy.nodes = this.nodes ? this.nodes.map(([x, y]) => [x, y]) : null;
     copy.moves = this.moves.map(cloneMove);
     copy.cursor = this.cursor;
+    copy.shapes = this.shapes ? { ...this.shapes } : undefined;
     return copy;
   }
 
   truncate(): void {
     this.moves.length = this.cursor;
+    this.shapes = undefined;
+  }
+
+  // Whether the shapes a share settled still describe this move list.
+  get shaped(): boolean {
+    return (
+      this.shapes !== undefined &&
+      this.shapes.moves === this.moves.length &&
+      this.moves.every((move) => move.shape && (move.shape === "geometry" || move.topology))
+    );
   }
 
   // Takes the spline the engine holds for each move up to the cursor. Under
@@ -338,9 +368,10 @@ export class History {
       settleVersion: this.settleVersion,
       moves: this.moves.map(toRecordMove),
       cursor: this.cursor,
-      ...(this.moves.some((move) => move.indexed || move.refused)
+      ...(this.moves.some((move) => move.indexed || move.refused || move.shape)
         ? { cacheVersions: cacheVersions() }
         : {}),
+      ...(this.shapes ? { shapes: { ...this.shapes } } : {}),
     };
   }
 }
@@ -364,6 +395,7 @@ function cloneMove(move: RecordedMove): RecordedMove {
   if (move.cutOff !== undefined) clone.cutOff = move.cutOff;
   if (move.indexed) clone.indexed = move.indexed;
   if (move.refused) clone.refused = true;
+  if (move.shape) clone.shape = move.shape;
   return clone;
 }
 
@@ -392,6 +424,7 @@ export function toMove(move: RecordedMove): Move {
 // yet has none to give.
 function toRecordMove(move: RecordedMove): FixtureMove {
   if (!drawn(move)) throw new RangeError("a move the engine has not drawn cannot be saved");
+  const cache = cacheOf(move);
   return {
     from: move.fromNode,
     to: move.toNode,
@@ -399,12 +432,20 @@ function toRecordMove(move: RecordedMove): FixtureMove {
     newNode: [move.newNodePos.x, move.newNodePos.y],
     ...(move.cutOff !== undefined ? { cutOff: move.cutOff } : {}),
     ...(move.segments ? { segments: move.segments } : {}),
-    ...(move.indexed
-      ? { cache: { index: move.indexed.index, along: move.indexed.along } }
-      : move.refused
-        ? { cache: { refused: true as const } }
-        : {}),
+    ...(cache ? { cache } : {}),
   };
+}
+
+// The saved form of what shares worked out for a move, or undefined when
+// nothing is cached.
+function cacheOf(move: RecordedMove): MoveCache | undefined {
+  const cache: MoveCache = {
+    ...(move.indexed ? { index: move.indexed.index, along: move.indexed.along } : {}),
+    ...(move.refused ? { refused: true as const } : {}),
+    ...(move.shape ? { shape: move.shape } : {}),
+    ...(move.shape === "topology" && move.topology ? { topology: move.topology } : {}),
+  };
+  return Object.keys(cache).length > 0 ? cache : undefined;
 }
 
 function fromRecordMove(move: RecordMove): RecordedMove {
@@ -429,6 +470,10 @@ function fromRecordMove(move: RecordMove): RecordedMove {
         ? { indexed: { index: move.cache.index, along: move.cache.along } }
         : {}),
       ...(move.cache?.refused ? { refused: true as const } : {}),
+      ...(move.cache?.shape ? { shape: move.cache.shape } : {}),
+      ...(move.cache?.shape === "topology" && move.cache.topology
+        ? { topology: move.cache.topology }
+        : {}),
     };
   }
   return {
@@ -487,6 +532,8 @@ function asRecord(value: unknown): GameRecord | null {
   if (!isCount(settleVersion) || settleVersion > SETTLE_VERSION) return null;
   const cacheVersions = v.cacheVersions === undefined ? undefined : asVersions(v.cacheVersions);
   if (v.cacheVersions !== undefined && !cacheVersions) return null;
+  const shapes = v.shapes === undefined ? undefined : asShapes(v.shapes, v.moves.length);
+  if (v.shapes !== undefined && !shapes) return null;
   return {
     version: 1,
     initialNodes: v.initialNodes,
@@ -498,6 +545,20 @@ function asRecord(value: unknown): GameRecord | null {
     moves: v.moves,
     cursor: v.cursor,
     ...(cacheVersions ? { cacheVersions } : {}),
+    ...(shapes ? { shapes } : {}),
+  };
+}
+
+function asShapes(value: unknown, count: number): ShapesCache | null {
+  if (typeof value !== "object" || value === null) return null;
+  const c = value as Record<string, unknown>;
+  if (!isCount(c.moves) || c.moves > count) return null;
+  if (c.mismatch !== undefined && typeof c.mismatch !== "boolean") return null;
+  if (c.refusedAt !== undefined && !(isCount(c.refusedAt) && c.refusedAt < count)) return null;
+  return {
+    moves: c.moves,
+    ...(c.mismatch !== undefined ? { mismatch: c.mismatch } : {}),
+    ...(c.refusedAt !== undefined ? { refusedAt: c.refusedAt } : {}),
   };
 }
 
@@ -539,7 +600,9 @@ function isRecordMove(value: unknown, nodes: number, halfEdges: number): value i
   if (!isCount(m.from) || !isCount(m.to) || m.from >= nodes || m.to >= nodes) return false;
   if ("face" in m) return isPair(m.node) && isFace(m.face, m.from, m.to, nodes, halfEdges);
   if (m.cutOff !== undefined && !isCount(m.cutOff)) return false;
-  if (m.cache !== undefined && !isMoveCache(m.cache)) return false;
+  if (m.cache !== undefined && !isMoveCache(m.cache, m.from, m.to, nodes, halfEdges)) {
+    return false;
+  }
   return (
     Array.isArray(m.polyline) &&
     m.polyline.length >= 2 &&
@@ -549,12 +612,21 @@ function isRecordMove(value: unknown, nodes: number, halfEdges: number): value i
   );
 }
 
-function isMoveCache(value: unknown): boolean {
+function isMoveCache(
+  value: unknown,
+  from: number,
+  to: number,
+  nodes: number,
+  halfEdges: number,
+): boolean {
   if (typeof value !== "object" || value === null) return false;
   const c = value as Record<string, unknown>;
   if (c.index !== undefined && !isCount(c.index)) return false;
   if (c.along !== undefined && !(isCount(c.along) && c.along <= 255)) return false;
   if (c.refused !== undefined && c.refused !== true) return false;
+  if (c.shape !== undefined && c.shape !== "topology" && c.shape !== "geometry") return false;
+  if (c.topology !== undefined && !isFace(c.topology, from, to, nodes, halfEdges)) return false;
+  if (c.shape === "topology" && c.topology === undefined) return false;
   return true;
 }
 
@@ -968,10 +1040,11 @@ export interface LinkEngine {
 // The game as the link will carry it, worked out on a copy. An index
 // link comes first: a game whose every move carries an index from an
 // earlier share goes out at once, a game with a move the regenerated
-// board refused goes as shapes at once, and otherwise the engine indexes
-// the whole game while replaying it on a fresh board, so the visitor's
-// board is that board rather than this one; only that call's failure is
-// caught. For shapes the
+// board refused goes as shapes at once (from the forms an earlier share
+// settled for this move list when it has them, else worked out again),
+// and otherwise the engine indexes the whole game while replaying it on
+// a fresh board, so the visitor's board is that board rather than this
+// one; only that call's failure is caught. For shapes the
 // engine says which drawn moves the router redraws, then the link
 // is replayed as decoded and any topology move the replay refuses,
 // or lands its node more than DRIFT_TOLERANCE from the recorded
@@ -996,8 +1069,23 @@ export async function prepareLink(
 ): Promise<{ history: History; refusedAt?: number; mismatch?: boolean }> {
   const history = source.clone();
   if (history.indexed) return { history };
+  const refused = history.moves.some((move) => move.refused);
+  if (refused && history.shaped) {
+    for (const move of history.moves) if (move.shape === "geometry") delete move.topology;
+    const { mismatch, refusedAt } = history.shapes!;
+    return {
+      history,
+      ...(mismatch ? { mismatch } : {}),
+      ...(refusedAt !== undefined ? { refusedAt } : {}),
+    };
+  }
+  const settle = (outcome: { refusedAt?: number; mismatch?: boolean }) => {
+    for (const move of history.moves) move.shape = move.topology ? "topology" : "geometry";
+    history.shapes = { moves: history.moves.length, ...outcome };
+    return { history, ...outcome };
+  };
   const plan = classification(history);
-  if (plan && !history.moves.some((move) => move.refused)) {
+  if (plan && !refused) {
     const indexed = await engine.index(plan).catch(() => undefined);
     if (indexed) {
       history.moves.forEach((move, i) => setIndexed(move, indexed.moves[i] ?? false));
@@ -1021,10 +1109,10 @@ export async function prepareLink(
   const tolerance = DRIFT_TOLERANCE * scaleOf(history.boardSize);
   for (;;) {
     const link = rehearsal(history);
-    if (!link) return { history };
+    if (!link) return settle({});
     const rehearsed = await engine.rehearse(link);
-    const { refused, nodes } = rehearsed;
-    if (refused === undefined) {
+    const { refused: stopped, nodes } = rehearsed;
+    if (stopped === undefined) {
       let drifted = false;
       nodes.forEach((node, i) => {
         const move = history.moves[i];
@@ -1037,16 +1125,16 @@ export async function prepareLink(
         settled !== undefined &&
         (settled.length !== rehearsed.settled.length ||
           settled.some((node, i) => distance(node, rehearsed.settled[i]!) > tolerance));
-      if (!apart) return { history };
+      if (!apart) return settle({});
       let latest = history.moves.length - 1;
       while (latest >= 0 && !demote(history, latest)) latest--;
-      if (latest < 0) return { history, mismatch: true };
+      if (latest < 0) return settle({ mismatch: true });
       continue;
     }
-    if (demote(history, refused)) continue;
-    let blamed = refused - 1;
+    if (demote(history, stopped)) continue;
+    let blamed = stopped - 1;
     while (blamed >= 0 && !demote(history, blamed)) blamed--;
-    if (blamed < 0) return { history, refusedAt: refused };
+    if (blamed < 0) return settle({ refusedAt: stopped });
   }
 }
 

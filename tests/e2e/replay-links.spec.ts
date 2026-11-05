@@ -165,6 +165,7 @@ for (const [file, budget, form, topologyMoves] of routed) {
       description: String(Date.now() - started),
     });
     expect(await requestCount(page, "indexMoves")).toBe(1);
+    const firstRehearsals = await requestCount(page, "rehearse");
     const again = Date.now();
     const second = await share(page, `${name}-payload-chars-again`, SHARE_WAIT);
     test.info().annotations.push({
@@ -174,6 +175,11 @@ for (const [file, budget, form, topologyMoves] of routed) {
     expect(second.url).toBe(url);
     expect(await requestCount(page, "indexMoves")).toBe(1);
     expect(payload).toBeLessThan(budget);
+    // A shapes game's second share reads the forms the first settled.
+    if (form === "shapes") {
+      expect(await requestCount(page, "classify")).toBe(1);
+      expect(await requestCount(page, "rehearse")).toBe(firstRehearsals);
+    }
     await expect(page.locator("#status")).not.toHaveText(/replay may stop|may differ/);
     await shot(page, `${name}-source`);
 
