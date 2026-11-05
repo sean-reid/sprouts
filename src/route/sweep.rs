@@ -6,7 +6,6 @@ use std::collections::BTreeMap;
 use super::{route, Unroutable};
 use crate::face::Move as FaceMove;
 use crate::types::{GameState, Move, Player};
-use crate::validation::{validate_ai_move, validate_move};
 
 /// Routes a search move the way the AI does: the move itself, else the
 /// other members of its class, reporting the last failure.
@@ -141,12 +140,26 @@ impl std::fmt::Display for Forfeit {
 
 /// One random game on `nodes` nodes drawn as `player`: each pick names a
 /// search move to try first, the rest follow in order until one draws.
-/// Every drawn move has to pass that player's validator and no route may
+/// Every drawn move has to pass the checks apply makes and no route may
 /// fail as a bug; otherwise the game is forfeited with the position as a
-/// fixture and the reason.
+/// fixture and the reason. The board does not settle, so the checks run
+/// on the move as drawn; `settling_game` runs them on the stored form.
 pub fn game(nodes: usize, picks: &[u32], player: Player) -> Result<Tally, Forfeit> {
     // Sweep positions are recorded and hashed as drawn, with no settle.
-    let mut state = GameState::with_nodes_at(crate::types::opening_layout(nodes, 1000), 1000, 0);
+    play(nodes, picks, player, 0)
+}
+
+/// `game` on a settling board: every drawn move goes through apply, which
+/// rounds it to the unit grid, checks it and settles the board, as the
+/// page sends it, and a move apply refuses is a bug.
+#[cfg(test)]
+pub fn settling_game(nodes: usize, picks: &[u32], player: Player) -> Result<Tally, Forfeit> {
+    play(nodes, picks, player, crate::protocol::SETTLE_VERSION)
+}
+
+fn play(nodes: usize, picks: &[u32], player: Player, settle: u8) -> Result<Tally, Forfeit> {
+    let mut state =
+        GameState::with_nodes_at(crate::types::opening_layout(nodes, 1000), 1000, settle);
     state.current_player = player;
     let mut tally = Tally::default();
     for &pick in picks {
@@ -160,17 +173,15 @@ pub fn game(nodes: usize, picks: &[u32], player: Player) -> Result<Tally, Forfei
             tally.tried += 1;
             match draws(&state, &moves[k]) {
                 Ok(mov) => {
-                    let checked = match player {
-                        Player::AI => validate_ai_move(&state, &mov),
-                        Player::Human => validate_move(&state, &mov),
-                    };
-                    if let Err(e) = checked {
-                        let why = format!(
-                            "a drawn move was rejected: {:?} in\n{}",
-                            e.kind,
-                            fixture_json(&state)
-                        );
-                        return Err(Forfeit { tally, why });
+                    if settle == 0 {
+                        if let Err(e) = crate::protocol::check(&state, &mov) {
+                            let why = format!(
+                                "a drawn move was rejected: {:?} in\n{}",
+                                e.kind,
+                                fixture_json(&state)
+                            );
+                            return Err(Forfeit { tally, why });
+                        }
                     }
                     drawn = Some(mov);
                     break;
@@ -191,7 +202,18 @@ pub fn game(nodes: usize, picks: &[u32], player: Player) -> Result<Tally, Forfei
         let Some(mov) = drawn else {
             break;
         };
-        state.apply_move(mov).unwrap();
+        if settle == 0 {
+            state.apply_move(mov).unwrap();
+        } else if let crate::protocol::Outcome::Rejected { rejection } =
+            crate::protocol::apply(&mut state, crate::protocol::Move::from(mov))
+        {
+            let why = format!(
+                "a drawn move was refused by apply: {} in\n{}",
+                rejection.message,
+                fixture_json(&state)
+            );
+            return Err(Forfeit { tally, why });
+        }
         state.current_player = player;
     }
     Ok(tally)

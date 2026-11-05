@@ -494,9 +494,14 @@ test("the lens keeps its lift and stays on the canvas along the whole top edge",
     if (Math.hypot(p.x - prev.x, p.y - prev.y) >= 8) path.push(p);
   }
   expect(path.length).toBeGreaterThan(20);
-  // The run starts where only the lens's right side fits and ends where
-  // only its left side fits, so the sweep must change side.
-  expect(path[0]!.x - frame.left).toBeLessThan(RADIUS + LIFT - 10);
+  // The lens holds within LOUPE_HIDE_BEYOND of the line, so the sweep opens
+  // on the run, steps level past each end as far as that allows, and so
+  // reaches the zones where only one side fits wherever the settle left
+  // the run.
+  const reach = 30;
+  path.splice(1, 0, { x: path[0]!.x - reach, y: path[0]!.y }, path[0]!);
+  path.push({ x: path[path.length - 1]!.x + reach, y: path[path.length - 1]!.y });
+  expect(path[1]!.x - frame.left).toBeLessThan(RADIUS + LIFT - 10);
   expect(path[path.length - 1]!.x - frame.left).toBeGreaterThan(frame.width - RADIUS - LIFT + 10);
 
   const bottom = [...(await boardNodes(page)).keys()].reduce((best, id) => {
