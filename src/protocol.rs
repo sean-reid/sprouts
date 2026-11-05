@@ -795,6 +795,11 @@ pub fn index_moves(plan: Classification) -> Result<Indexed, String> {
             .apply_move(mov)
             .map_err(|e| format!("move {index}: {}", e.message))?;
         settle::settle(&mut state);
+        if face::canonical_form(&state.face) != face::canonical_form(&fresh.face) {
+            return Err(format!(
+                "move {index}: the regenerated board is another position"
+            ));
+        }
     }
     Ok(Indexed { moves })
 }
@@ -2573,6 +2578,12 @@ mod tests {
                 else {
                     panic!("{name} move {i}: {mov:?} was refused");
                 };
+                apply(&mut recorded, m.wire());
+                assert_eq!(
+                    face::canonical_form(&recorded.face),
+                    face::canonical_form(&replayed.face),
+                    "{name} move {i}: the boards are different positions"
+                );
                 if mov.along > 0 {
                     let landed =
                         along_of(applied.segments.as_deref().unwrap(), applied.new_node_pos);
@@ -2582,7 +2593,6 @@ mod tests {
                         mov.along
                     );
                 }
-                apply(&mut recorded, m.wire());
             }
         }
         assert!(indexed_games > 0);
