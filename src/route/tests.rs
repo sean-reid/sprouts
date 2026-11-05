@@ -1087,25 +1087,29 @@ fn a_shared_game_replays_to_the_same_board() {
 /// The recorder's default pick for the 12-node game.
 const PICK_12: usize = 0;
 
-/// The human selector keeps a 12-node game going when no chord routes at
-/// twice the human clearances: picks 3, 21 and 24 stopped between moves
-/// 26 and 28 with one tier and now play every move, one on each fallback
-/// path, and the default pick plays its thirty at the doubled clearances.
+/// Picks 3, 21 and 24 of the 12-node game play 30 moves with the human
+/// on a fallback tier for some of them, one pick per tier, and the
+/// default pick plays its 30 at the doubled clearances.
 #[test]
 #[cfg(not(debug_assertions))]
 fn the_selector_plays_a_twelve_node_game_past_a_doubled_clearance_stop() {
-    for pick in [3, 21, 24] {
+    let paths = |doubled, plain, tight, looped| HumanPaths {
+        doubled,
+        plain,
+        tight,
+        looped,
+    };
+    let pinned = [
+        (3, paths(13, 0, 2, 0)),
+        (21, paths(14, 0, 0, 1)),
+        (24, paths(13, 1, 1, 0)),
+        (PICK_12, paths(15, 0, 0, 0)),
+    ];
+    for (pick, paths) in pinned {
         let game = shared_game(12, 30, pick).unwrap();
         assert_eq!(game.fixture.moves.len(), 30, "pick {pick}");
-        assert!(
-            game.human.plain + game.human.tight + game.human.looped > 0,
-            "pick {pick}: {:?}",
-            game.human
-        );
+        assert_eq!(game.human, paths, "pick {pick}");
     }
-    let game = shared_game(12, 30, PICK_12).unwrap();
-    assert_eq!(game.fixture.moves.len(), 30);
-    assert_eq!(game.human.doubled, 15, "{:?}", game.human);
 }
 
 /// The drift table over the 21 picks the recorder can play:
