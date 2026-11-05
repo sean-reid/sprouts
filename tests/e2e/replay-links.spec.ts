@@ -309,7 +309,7 @@ test("a long index link that is not the saved game opens in review and steps", a
     fixture.initialNodes,
     fixture.boardSize,
     "human",
-    fixture.settleVersion ?? 1,
+    fixture.settleVersion ?? 0,
   );
   for (let i = 0; i < 15; i++) {
     other.push({ fromNode: 0, toNode: 0, polyline: [{ x: 0, y: 0 }], newNodePos: { x: 0, y: 0 } });
