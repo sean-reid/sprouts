@@ -113,9 +113,14 @@ fn print_rows(title: &str, rows: &[Row]) {
             eprintln!("     bugs {:?} shape {:?}", s.refused.bugs, s.refused.shape);
         }
         eprintln!(
-            "     most states in a corridor found {}; parity searches {}",
+            "     most states in a corridor found {}; parity searches {}; fence misses {}; ms in parity searches {:.0}, tighten {:.0}, relax {:.0}, finish {:.0}",
             s.states_ok_max,
-            parity_summary(&s.parity)
+            parity_summary(&s.parity),
+            s.fence_misses,
+            s.phase_ms[0],
+            s.phase_ms[1],
+            s.phase_ms[2],
+            s.phase_ms[3]
         );
     }
     let worst = rows.iter().map(Row::total_ms).fold(0.0, f64::max);
@@ -336,11 +341,15 @@ fn a_shared_router_answers_as_fresh_routers_do() {
 
 /// A chord whose ends the arena disconnects puts its corners in the no
 /// room memo, and the next chord between those corners is refused without
-/// another arena or search.
+/// another arena or search. The live record has such chords; the opening
+/// positions are tried first.
 #[test]
 fn a_second_chord_between_corners_without_room_is_refused_from_memory() {
-    for moves in [6, 8, 10, 12] {
-        let state = opening_after(moves);
+    let positions = [6, 8, 10, 12]
+        .into_iter()
+        .map(opening_after)
+        .chain(std::iter::once(position_of_record("room-24n-1000.json")));
+    for state in positions {
         let candidates = state.face.search_moves();
         for first in candidates.iter().filter(|m| m.a != m.b) {
             let mut router = route::Router::new();
@@ -597,6 +606,8 @@ fn probe_live_room_candidates() {
         let s = stats::take();
         let parity = if s.parity.is_empty() {
             "no parity"
+        } else if s.fence_misses > 0 {
+            "parity, fences missed"
         } else {
             "parity"
         };
@@ -667,10 +678,11 @@ fn probe_sweep_search_states() {
         }
         let s = stats::take();
         eprintln!(
-            "{label}: {tally}; most states in a corridor found {}, bugs {:?}; parity searches {}",
+            "{label}: {tally}; most states in a corridor found {}, bugs {:?}; parity searches {}; fence misses {}",
             s.states_ok_max,
             s.refused.bugs,
-            parity_summary(&s.parity)
+            parity_summary(&s.parity),
+            s.fence_misses
         );
     }
 }

@@ -2903,11 +2903,14 @@ mod tests {
     fn a_node_behind_the_split_boundary_counts_for_neither_side() {
         let mut state = start(7, 1000, Player::Human, None, 0).unwrap();
         assert_eq!(routed(&mut state, bare(2, 2, vec![3])), 1);
+        // Whichever pair of outer nodes the loop's shape lets a chord round,
+        // node 3 behind the loop counts for neither side.
         let chord = moves_from(&state, 2)
             .moves
             .into_iter()
-            .find(|m| m.a == 2 && m.b == 7 && m.enclosed == vec![0, 1])
-            .expect("the chord is listed");
+            .filter(|m| m.a == 2 && m.b == 7 && m.enclosed.len() == 2 && !m.enclosed.contains(&3))
+            .find(|m| route::route(&state, &m.clone().into()).is_ok())
+            .expect("a chord round two outer nodes routes");
         assert_eq!(routed(&mut state, chord), 2);
     }
 

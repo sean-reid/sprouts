@@ -54,6 +54,11 @@ pub(crate) mod stats {
         pub parity: Vec<(u32, u32, bool)>,
         /// Chords refused from the no room memo without a search.
         pub memo_hits: usize,
+        /// Parity searches the fences held back from their corridor, run
+        /// again without them.
+        pub fence_misses: usize,
+        /// Milliseconds by phase: parity searches, tighten, relax, finish.
+        pub phase_ms: [f64; 4],
         pub refused: super::sweep::Tally,
     }
 
@@ -286,13 +291,23 @@ impl Router {
             return small_loop::route(state, mv, want.clearance, want.node_clearance);
         }
         let (arena, path) = plan(self, state, mv, want, parity)?;
+        #[cfg(test)]
+        let t = std::time::Instant::now();
+        let relaxed = relax(state, mv, want, &arena, &path);
+        #[cfg(test)]
+        stats::with(|s| s.phase_ms[2] += t.elapsed().as_secs_f64() * 1000.0);
+        #[cfg(test)]
+        let t = std::time::Instant::now();
         // The relaxed path is the one wanted; the taut path already keeps
         // every clearance when the relaxation ends up somewhere it cannot
         // be used.
-        match relax(state, mv, want, &arena, &path) {
+        let out = match relaxed {
             Some(relaxed) => finish(state, mv, relaxed).or_else(|_| finish(state, mv, path)),
             None => finish(state, mv, path),
-        }
+        };
+        #[cfg(test)]
+        stats::with(|s| s.phase_ms[3] += t.elapsed().as_secs_f64() * 1000.0);
+        out
     }
 
     /// `face` eroded for a move between `mv`'s ends, built once.
@@ -400,7 +415,15 @@ fn taut_path(
         .face
         .component_of(mv.a, mv.at_a)
         .map_err(|_| Unroutable::Bug("corner"))?;
-    let first = corridor::search(&arena, &cuts, &entry, &exit, corridor::Want::Any, is_loop);
+    let first = corridor::search(
+        &arena,
+        &cuts,
+        &entry,
+        &exit,
+        corridor::Want::Any,
+        is_loop,
+        &erode::Fences::none(),
+    );
     let first = match first {
         Err(Unroutable::Room) if !is_loop => {
             // A path the search missed is a bug.
@@ -411,7 +434,11 @@ fn taut_path(
         }
         other => other?,
     };
+    #[cfg(test)]
+    let t = std::time::Instant::now();
     let mut path = arena.tighten(&cuts, &corridor::draw(&first, &entry, &exit), &entry, &exit);
+    #[cfg(test)]
+    stats::with(|s| s.phase_ms[1] += t.elapsed().as_secs_f64() * 1000.0);
     if cuts.all != 0 {
         let wrong = wrong_sides(state, mv, own, &cuts, &path);
         if wrong != 0 {
@@ -421,22 +448,65 @@ fn taut_path(
             // Flipping every bit at once is the same move drawn round the
             // other side of its own piece, and a bare node has no sides.
             let want = corridor::Want::Parity(first.parity ^ wrong);
-            let second = corridor::search(&arena, &cuts, &entry, &exit, want, is_loop);
+            let second = parity_search(&arena, &cuts, &entry, &exit, want, is_loop, || {
+                arena.fences(state, mv, face)
+            });
             #[cfg(test)]
             stats::with(|s| {
                 s.parity
                     .push((wrong.count_ones(), cuts.all.count_ones(), second.is_ok()))
             });
             let second = second?;
+            #[cfg(test)]
+            let t = std::time::Instant::now();
             path = arena.tighten(
                 &cuts,
                 &corridor::draw(&second, &entry, &exit),
                 &entry,
                 &exit,
             );
+            #[cfg(test)]
+            stats::with(|s| s.phase_ms[1] += t.elapsed().as_secs_f64() * 1000.0);
         }
     }
     Ok((arena, path))
+}
+
+/// The corridor in the parity class `want`: refused as Room when no walk
+/// through the arena reaches that class, else searched with the fences up
+/// first, since they keep the search to a few parities, and without them
+/// when a fence stood in the only way through.
+fn parity_search(
+    arena: &erode::Arena,
+    cuts: &erode::Cuts,
+    entry: &erode::Entry,
+    exit: &erode::Entry,
+    want: corridor::Want,
+    is_loop: bool,
+    fences: impl FnOnce() -> erode::Fences,
+) -> Result<corridor::Corridor, Unroutable> {
+    #[cfg(test)]
+    let started = std::time::Instant::now();
+    if !corridor::parity_reachable(arena, cuts, entry, exit, want, is_loop) {
+        return Err(Unroutable::Room);
+    }
+    let fenced = corridor::search(arena, cuts, entry, exit, want, is_loop, &fences());
+    #[cfg(test)]
+    stats::with(|s| s.phase_ms[0] += started.elapsed().as_secs_f64() * 1000.0);
+    if fenced.is_ok() {
+        return fenced;
+    }
+    #[cfg(test)]
+    stats::with(|s| s.fence_misses += 1);
+    corridor::search(
+        arena,
+        cuts,
+        entry,
+        exit,
+        want,
+        is_loop,
+        &erode::Fences::none(),
+    )
 }
 
 /// Two legs of a path the funnel pulled through the same vertex are set a
