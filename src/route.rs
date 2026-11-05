@@ -780,7 +780,7 @@ fn place_node(
 /// The pieces a bare node's loop would enclose from its other side.
 // A bare loop's two sides are the same position on the sphere, so either
 // reading of which pieces it encloses is the listed move.
-pub(crate) fn other_side(state: &GameState, mv: &FaceMove) -> Vec<NodeId> {
+fn other_side(state: &GameState, mv: &FaceMove) -> Vec<NodeId> {
     let face = state.face.corner_face(mv.a, mv.at_a).expect("own corner");
     let mut out: Vec<NodeId> = state
         .face

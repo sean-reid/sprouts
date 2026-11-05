@@ -440,7 +440,8 @@ pub const SETTLE_VERSION: u8 = 1;
 
 /// Changes whenever `move_list` orders a position's moves differently. A
 /// link that names moves by index carries it, so a page listing moves
-/// another way refuses the link instead of replaying other moves.
+/// another way refuses the link instead of replaying other moves. The
+/// golden in `the_move_list_order_is_pinned` changes with it.
 pub const MOVE_LIST_VERSION: u8 = 1;
 
 /// A game with its real geometry, for working out which moves the router
@@ -693,6 +694,33 @@ pub(crate) fn move_list(state: &GameState) -> Vec<ModelMove> {
     out
 }
 
+/// The same move read from its other side: a chord within one boundary
+/// piece, or a loop, walked the other way encloses the face's other
+/// pieces instead, and the list holds one of the two readings. None for
+/// a chord between two pieces, which has one reading.
+fn flipped(model: &face::FaceModel, mv: &ModelMove) -> Option<ModelMove> {
+    let own = model.component_of(mv.a, mv.at_a).ok()?;
+    if own != model.component_of(mv.b, mv.at_b).ok()? {
+        return None;
+    }
+    let face = model.corner_face(mv.a, mv.at_a).ok()?;
+    let mut enclosed: Vec<usize> = model
+        .components(face)
+        .iter()
+        .filter(|&&c| c != own)
+        .map(|&c| model.lowest_node(c))
+        .filter(|v| !mv.enclosed.contains(v))
+        .collect();
+    enclosed.sort_unstable();
+    Some(ModelMove {
+        a: mv.b,
+        at_a: mv.at_b,
+        b: mv.a,
+        at_b: mv.at_a,
+        enclosed,
+    })
+}
+
 /// A chord between two different boundary pieces with its lower node
 /// first, `enclosed` sorted.
 fn normalised(face: &face::FaceModel, mut mv: ModelMove) -> ModelMove {
@@ -707,9 +735,20 @@ fn normalised(face: &face::FaceModel, mut mv: ModelMove) -> ModelMove {
 
 /// Replays the real history as `classify` does and names each move by its
 /// index in the position's move list, with the human's node as its place
-/// along the curve and the AI's left to the router.
+/// along the curve and the AI's left to the router. Alongside, the moves
+/// are replayed by index on a fresh board the way a visitor's engine
+/// replays the link; a move that board refuses, or that lists as another
+/// move there, is an error, so a link only goes out as indices when the
+/// visitor regenerates the recorded game.
 pub fn index_moves(plan: Classification) -> Result<Indexed, String> {
     let mut state = start(
+        plan.initial_nodes,
+        plan.board_size,
+        plan.first_player,
+        plan.nodes.clone(),
+        plan.settle_version,
+    )?;
+    let mut fresh = start(
         plan.initial_nodes,
         plan.board_size,
         plan.first_player,
@@ -721,21 +760,33 @@ pub fn index_moves(plan: Classification) -> Result<Indexed, String> {
         let mov = enter(mov, &state).map_err(|e| format!("move {index}: {}", e.message))?;
         let face = topology(&state, &mov).map_err(|e| format!("move {index}: {}", e.message))?;
         let face = normalised(&state.face, face);
-        // A bare node's loop reads as either of its sides; the list holds
-        // one of them.
-        let other = (face.a == face.b && face.at_a.is_none()).then(|| ModelMove {
-            enclosed: route::other_side(&state, &face),
-            ..face.clone()
-        });
+        let other = flipped(&state.face, &face);
+        let same = |mv: &ModelMove| *mv == face || other.as_ref() == Some(mv);
         let listed = move_list(&state)
             .iter()
-            .position(|mv| *mv == face || other.as_ref() == Some(mv))
+            .position(same)
             .ok_or_else(|| format!("move {index}: the position does not list {face:?}"))?;
         let along = if state.current_player == Player::AI {
             0
         } else {
             along_of(&mov.segments, mov.new_node_pos)
         };
+        let regenerated = move_list(&fresh)
+            .into_iter()
+            .nth(listed)
+            .filter(same)
+            .ok_or_else(|| format!("move {index}: the regenerated board lists another move"))?;
+        let spot = if along == 0 {
+            Spot::Router
+        } else {
+            Spot::Along(along)
+        };
+        if let Outcome::Rejected { rejection } = apply_listed(&mut fresh, regenerated, spot) {
+            return Err(format!(
+                "move {index}: the regenerated board refuses it: {}",
+                rejection.message
+            ));
+        }
         moves.push(IndexedMove {
             index: listed,
             along,
@@ -2344,6 +2395,249 @@ mod tests {
             .map(|n| move_list(&GameState::new(n)).len())
             .collect();
         assert_eq!(sizes, vec![3, 19, 247, 4_799]);
+    }
+
+    /// The order a link's indices count in, pinned: the head of the
+    /// four-node list and a hash of the whole nine-node list. A change
+    /// here is a MOVE_LIST_VERSION bump.
+    #[test]
+    fn the_move_list_order_is_pinned() {
+        let loop_on = |a: usize, enclosed: Vec<usize>| ModelMove {
+            a,
+            at_a: None,
+            b: a,
+            at_b: None,
+            enclosed,
+        };
+        let chord = |a: usize, b: usize, enclosed: Vec<usize>| ModelMove {
+            a,
+            at_a: None,
+            b,
+            at_b: None,
+            enclosed,
+        };
+        let four = move_list(&GameState::new(4));
+        assert_eq!(
+            four[..6],
+            [
+                loop_on(0, vec![]),
+                loop_on(1, vec![]),
+                loop_on(2, vec![]),
+                loop_on(3, vec![]),
+                loop_on(0, vec![1]),
+                loop_on(0, vec![2]),
+            ]
+        );
+        assert!(four.contains(&chord(0, 1, vec![])));
+        let mut fnv = crate::exact::Fnv::default();
+        for mv in move_list(&GameState::new(9)) {
+            for v in [mv.a, mv.b] {
+                fnv.feed(v as f64);
+            }
+            for at in [mv.at_a, mv.at_b] {
+                fnv.feed(at.map_or(-1.0, |h| h as f64));
+            }
+            fnv.feed(mv.enclosed.len() as f64);
+            for v in mv.enclosed {
+                fnv.feed(v as f64);
+            }
+        }
+        assert_eq!(fnv.hex(), "0x7ac953df74ef901d");
+    }
+
+    #[test]
+    fn an_index_past_the_list_is_refused() {
+        let mut state = GameState::new(4);
+        let count = move_list(&state).len();
+        let Outcome::Rejected { rejection } = apply_indexed_move(
+            &mut state,
+            IndexedMove {
+                index: count,
+                along: 0,
+            },
+        ) else {
+            panic!("an index past the list was applied");
+        };
+        assert!(
+            rejection.message.contains("does not list"),
+            "{}",
+            rejection.message
+        );
+        assert!(state.lines.is_empty());
+    }
+
+    #[test]
+    fn a_rehearsal_counting_in_another_list_order_is_an_error() {
+        let plan = Rehearsal {
+            router_version: ROUTER_VERSION,
+            settle_version: SETTLE_VERSION,
+            list_version: MOVE_LIST_VERSION + 1,
+            initial_nodes: 4,
+            board_size: 1000,
+            first_player: Player::Human,
+            nodes: None,
+            moves: vec![LinkMove::Indexed { index: 2, along: 0 }],
+        };
+        let Err(why) = rehearse(plan) else {
+            panic!("another list order was rehearsed");
+        };
+        assert!(why.contains("list version"), "{why}");
+    }
+
+    /// A place byte on an AI move puts the node where the byte says, not
+    /// where the router would.
+    #[test]
+    fn a_place_byte_moves_an_ai_node_along_the_curve() {
+        let mut state = GameState::new(4);
+        state.current_player = Player::AI;
+        let chord = move_list(&state)
+            .iter()
+            .position(|mv| mv.a == 0 && mv.b == 1 && mv.enclosed.is_empty())
+            .unwrap();
+        let mut routed = state.clone();
+        let Outcome::Applied { mov: own, .. } = apply_indexed_move(
+            &mut routed,
+            IndexedMove {
+                index: chord,
+                along: 0,
+            },
+        ) else {
+            panic!("the chord was refused");
+        };
+        let Outcome::Applied { mov: placed, .. } = apply_indexed_move(
+            &mut state,
+            IndexedMove {
+                index: chord,
+                along: 40,
+            },
+        ) else {
+            panic!("the placed chord was refused");
+        };
+        assert_eq!(own.segments, placed.segments);
+        assert_ne!(own.new_node_pos, placed.new_node_pos);
+        let along = along_of(placed.segments.as_deref().unwrap(), placed.new_node_pos);
+        assert!((i32::from(along) - 40).abs() <= 1, "landed at {along}");
+    }
+
+    /// Every committed recording either goes out as indices, replaying on a
+    /// fresh board to the recorded moves with the human's node near its
+    /// place along the curve, or is refused by the regenerated board.
+    #[test]
+    fn every_recording_indexes_or_is_refused_by_the_regenerated_board() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut paths: Vec<std::path::PathBuf> = ["fixtures/saved", "fixtures/games"]
+            .iter()
+            .flat_map(|dir| std::fs::read_dir(root.join(dir)).unwrap())
+            .filter_map(Result::ok)
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|e| e == "json"))
+            .collect();
+        paths.sort();
+        let mut indexed_games = 0;
+        for path in &paths {
+            let fixture = crate::replay::load(path).unwrap();
+            let name = path.file_name().unwrap().to_string_lossy();
+            let plan = Classification {
+                initial_nodes: fixture.initial_nodes,
+                board_size: fixture.board_size,
+                first_player: Player::Human,
+                nodes: fixture
+                    .nodes
+                    .as_ref()
+                    .map(|nodes| nodes.iter().map(|p| Point::new(p[0], p[1])).collect()),
+                settle_version: fixture.settle_version,
+                moves: fixture.moves.iter().map(|m| m.wire()).collect(),
+                known: vec![None; fixture.moves.len()],
+            };
+            let indexed = match index_moves(plan) {
+                Ok(indexed) => indexed.moves,
+                Err(why) if why.contains("regenerated board") => {
+                    eprintln!("{name}: {why}");
+                    continue;
+                }
+                Err(why) => panic!("{name}: {why}"),
+            };
+            indexed_games += 1;
+            let mut recorded = fixture.start();
+            let mut replayed = fixture.start();
+            for (i, (m, mov)) in fixture.moves.iter().zip(&indexed).enumerate() {
+                let entered = m.enter(&recorded).unwrap();
+                let want = normalised(&recorded.face, topology(&recorded, &entered).unwrap());
+                let listed = move_list(&replayed)[mov.index].clone();
+                let other = flipped(&recorded.face, &want);
+                assert!(
+                    listed == want || Some(&listed) == other.as_ref(),
+                    "{name} move {i}: {listed:?}"
+                );
+                let Outcome::Applied { mov: applied, .. } = apply_indexed_move(&mut replayed, *mov)
+                else {
+                    panic!("{name} move {i}: {mov:?} was refused");
+                };
+                if mov.along > 0 {
+                    let landed =
+                        along_of(applied.segments.as_deref().unwrap(), applied.new_node_pos);
+                    assert!(
+                        (i32::from(landed) - i32::from(mov.along)).abs() <= 2,
+                        "{name} move {i}: node at {landed} for {}",
+                        mov.along
+                    );
+                }
+                apply(&mut recorded, m.wire());
+            }
+        }
+        assert!(indexed_games > 0);
+    }
+
+    /// A game that opens with a loop on a bare node, which the list holds
+    /// from one side only, indexes and regenerates to the same moves.
+    #[test]
+    fn a_game_opening_with_a_bare_loop_indexes_and_regenerates() {
+        let mut state = GameState::new(5);
+        let mut record = Vec::new();
+        for face in [
+            face_move(0, 0, vec![1, 2]),
+            face_move(3, 4, vec![]),
+            face_move(1, 2, vec![]),
+        ] {
+            let RouteReply::Routed { mov, .. } = route_move(&state, face) else {
+                panic!("the move did not route");
+            };
+            let Outcome::Applied { mov, .. } = apply(&mut state, mov) else {
+                panic!("the move was refused");
+            };
+            record.push(mov);
+        }
+        let indexed = index_moves(Classification {
+            initial_nodes: 5,
+            board_size: 1000,
+            first_player: Player::Human,
+            nodes: None,
+            settle_version: SETTLE_VERSION,
+            moves: record.clone(),
+            known: vec![None; 3],
+        })
+        .unwrap()
+        .moves;
+        let mut recorded = GameState::new(5);
+        let mut replayed = GameState::new(5);
+        for (m, mov) in record.iter().zip(&indexed) {
+            let entered = enter(m.clone(), &recorded).unwrap();
+            let want = normalised(&recorded.face, topology(&recorded, &entered).unwrap());
+            let listed = move_list(&replayed)[mov.index].clone();
+            let other = flipped(&recorded.face, &want);
+            assert!(
+                listed == want || Some(&listed) == other.as_ref(),
+                "{listed:?}"
+            );
+            let Outcome::Applied { .. } = apply_indexed_move(&mut replayed, *mov) else {
+                panic!("{mov:?} was refused");
+            };
+            apply(&mut recorded, m.clone());
+        }
+        assert_eq!(
+            face::canonical_form(&recorded.face),
+            face::canonical_form(&replayed.face)
+        );
     }
 
     #[test]
