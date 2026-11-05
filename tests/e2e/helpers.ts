@@ -1,4 +1,4 @@
-import { expect, test, type CDPSession, type Page } from "@playwright/test";
+import { expect, test, type CDPSession, type Locator, type Page } from "@playwright/test";
 import type { Cubic } from "../../pkg/sprouts";
 import { openingLayout } from "../../web/layout";
 
@@ -225,6 +225,23 @@ export async function expectNodeDrawnNear(
 }
 
 export const PLACING_HINT = /Drag the dot/;
+
+// The first player controls a project shows: the compact AI starts button on
+// a phone, the segmented pair above 768 px.
+export function firstPlayerControls(page: Page): Locator {
+  return page.locator("button[data-first], #aiStartsBtn").filter({ visible: true });
+}
+
+// Picks who starts through whichever control the viewport shows.
+export async function chooseFirstPlayer(page: Page, player: "human" | "ai"): Promise<void> {
+  const compact = page.locator("#aiStartsBtn");
+  if (await compact.isVisible()) {
+    const pressed = (await compact.getAttribute("aria-pressed")) === "true";
+    if (pressed !== (player === "ai")) await compact.click();
+    return;
+  }
+  await page.locator(`button[data-first="${player}"]`).click();
+}
 
 // Sets the starting node count and starts a game with it. The value goes
 // in without events so the stepper does not start a game of its own first.

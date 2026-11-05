@@ -88,6 +88,10 @@ const startCount = byId<HTMLElement>("startCount");
 const turnEl = byId<HTMLElement>("turn");
 const turnText = byId<HTMLElement>("turnText");
 const firstPlayerButtons = document.querySelectorAll<HTMLButtonElement>("button[data-first]");
+const aiStartsBtn = byId<HTMLButtonElement>("aiStartsBtn");
+const historyNav = byId<HTMLElement>("historyNav");
+const gameControls = byId<HTMLElement>("gameControls");
+const phoneQuery = window.matchMedia("(max-width: 767px)");
 const backBtn = byId<HTMLButtonElement>("backBtn");
 const forwardBtn = byId<HTMLButtonElement>("forwardBtn");
 const shareBtn = byId<HTMLButtonElement>("shareBtn");
@@ -1195,6 +1199,13 @@ function chooseFirstPlayer(player: Player): void {
   for (const button of firstPlayerButtons) {
     button.setAttribute("aria-pressed", String(button.dataset.first === player));
   }
+  aiStartsBtn.setAttribute("aria-pressed", String(player === "ai"));
+}
+
+// Undo sits with Back, Forward and Share on a phone, where the toolbar is one row.
+function placeUndo(): void {
+  if (phoneQuery.matches) historyNav.append(undoBtn);
+  else gameControls.append(undoBtn);
 }
 
 // A link made for another router opens whatever game is saved, with a
@@ -1291,6 +1302,11 @@ function wireInput(): void {
   for (const button of firstPlayerButtons) {
     button.addEventListener("click", () => pickFirstPlayer(button.dataset.first as Player));
   }
+  aiStartsBtn.addEventListener("click", () => {
+    pickFirstPlayer(firstPlayer === "ai" ? "human" : "ai");
+  });
+  phoneQuery.addEventListener("change", placeUndo);
+  placeUndo();
   moveListEl.addEventListener("pointerover", (e) => {
     pointedMove = rowIndex(e.target);
     showHighlight();

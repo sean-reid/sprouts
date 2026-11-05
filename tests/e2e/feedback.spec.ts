@@ -4,9 +4,11 @@ import { expect, test, type Page } from "@playwright/test";
 import type { GameRecord } from "../../web/history";
 import {
   armFlashProbe,
+  chooseFirstPlayer,
   clickAway,
   drawBetween,
   expectDotAt,
+  firstPlayerControls,
   frameOf,
   holdNext,
   interceptWorkerMessages,
@@ -135,15 +137,15 @@ test("the turn indicator and ring follow the exchange", async ({ page }) => {
 
 test("AI starts opens with the AI's line and no human input", async ({ page }) => {
   await openBoard(page);
-  const toggle = page.locator("button[data-first]");
-  for (const button of await toggle.all()) {
+  for (const button of await firstPlayerControls(page).all()) {
     const box = await button.boundingBox();
     expect(box?.width ?? 0).toBeGreaterThanOrEqual(44);
     expect(box?.height ?? 0).toBeGreaterThanOrEqual(44);
   }
-  await page.locator('button[data-first="ai"]').click();
+  await chooseFirstPlayer(page, "ai");
   await expect(page.locator('button[data-first="ai"]')).toHaveAttribute("aria-pressed", "true");
   await expect(page.locator('button[data-first="human"]')).toHaveAttribute("aria-pressed", "false");
+  await expect(page.locator("#aiStartsBtn")).toHaveAttribute("aria-pressed", "true");
   await shot(page, "toggle");
   await expect(page.locator("#status")).toHaveText("AI is thinking", { timeout: 20_000 });
   await expect(page.locator("#turnText")).toHaveText("AI's turn");
