@@ -1065,7 +1065,33 @@ fn record_topology_positions() {
 
 /// Read-back mismatches the four recorded positions show; the measured
 /// value, since the positions and the router are exact.
-const RECORDED_TOPOLOGY: usize = 1;
+const RECORDED_TOPOLOGY: usize = 0;
+
+/// The same-line chord that refused last: in game23 after ten moves, the
+/// chord from node 4 to node 13 on one of 4's own lines enclosing node 5
+/// draws, and the curve reads back as the move it was asked for.
+#[test]
+fn the_same_line_chord_in_game23_draws_as_listed() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("fixtures/topology/game23-6n-10m.json");
+    let state = position(&path);
+    let chords: Vec<FaceMove> = state
+        .face
+        .moves()
+        .into_iter()
+        .filter(|m| m.a == 4 && m.b == 13 && m.enclosed == vec![5])
+        .collect();
+    assert!(!chords.is_empty(), "the chord is listed");
+    for mv in &chords {
+        let drawn = route(&state, mv).unwrap_or_else(|why| panic!("{mv:?}: {why:?}"));
+        let read = crate::embedding::embed(&state, &drawn).expect("the curve embeds");
+        assert_eq!(
+            (read.a, read.at_a, read.b, read.at_b),
+            (mv.a, mv.at_a, mv.b, mv.at_b)
+        );
+        assert_eq!(read.enclosed, mv.enclosed);
+    }
+}
 
 /// Positions where a route read back as another move when recorded. No
 /// route fails as a bug, and the mismatches do not grow.
