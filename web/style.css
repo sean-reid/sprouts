@@ -141,20 +141,26 @@ h1 {
   margin: 0;
 }
 
+/* The badge sits over the button's top edge so it takes no room in the row. */
 @media (max-width: 767px) {
+  #startBtn {
+    position: relative;
+  }
+
   #startBtn.pending::after {
     content: attr(data-count);
-    display: inline-block;
+    position: absolute;
+    top: -7px;
+    right: 4px;
     min-width: 18px;
-    margin-left: 6px;
     padding: 0 5px;
     border-radius: 9px;
-    background: #2a2a2a;
+    background: #3a3a3a;
     color: #ffffff;
     font-size: 10px;
     line-height: 18px;
     letter-spacing: 0;
-    vertical-align: middle;
+    text-align: center;
   }
 }
 
