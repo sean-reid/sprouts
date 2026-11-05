@@ -51,7 +51,6 @@ async function expectRing(page: Page, id: number): Promise<void> {
     .toBeGreaterThanOrEqual(8);
 }
 
-// Tab from the last toolbar button lands on the first node target.
 // Tab runs from the last first-player control into the node targets.
 async function tabToNode(page: Page, id: number): Promise<void> {
   await firstPlayerControls(page).last().focus();
