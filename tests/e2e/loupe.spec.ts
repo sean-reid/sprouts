@@ -1,5 +1,7 @@
+import { readFileSync } from "node:fs";
 import { expect, test, type Page } from "@playwright/test";
 import { LOUPE_FOLLOW } from "../../web/loupe";
+import type { Fixture } from "../../web/record";
 import {
   alongLine,
   boardNodes,
@@ -9,6 +11,7 @@ import {
   nodeOnScreen,
   openBoard,
   playExchange,
+  recordNodesOnScreen,
   ringPixels,
   shot,
   startGame,
@@ -368,21 +371,43 @@ test("a stroke from a node with a line opens no lens until the finger is clear o
   await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
 });
 
+// A recorded game replayed as drawn, so its geometry does not depend on
+// the settle: node 5 sits 151 units from the top, within the lens's lift
+// and radius of the top edge at every viewport.
+const TOP_NODE_GAME = "fixtures/games/false-game-over-4n-1000.json";
+
 test("the lens slides beside the finger across the top edge without a jump", async ({ page }) => {
   test.skip(!test.info().project.use.hasTouch, "touch only");
+  // The board after the eighth move, with the human to move and the stroke
+  // free to start.
+  const fixture = JSON.parse(readFileSync(TOP_NODE_GAME, "utf8")) as Fixture;
+  const record = { firstPlayer: "human", cursor: 8, ...fixture, moves: fixture.moves.slice(0, 8) };
+  await page.addInitScript((s) => localStorage.setItem("sprouts.game", s), JSON.stringify(record));
+  await page.goto("/");
+  await expect(page.locator("#moveList li")).toHaveCount(8, { timeout: 60_000 });
+  await expect(page.locator("#status")).toHaveText("Your turn!", { timeout: 60_000 });
+  await nextFrame(page);
   const frame = await frameOf(page);
-  // The highest node on the settled board sits within the lens's lift and
-  // radius of the top edge at the fitted view, so a stroke that climbs past
-  // it crosses the zone where the lens leaves its spot above the finger.
-  const nodes = await boardNodes(page);
-  const highest = [...nodes.entries()].reduce((best, entry) =>
-    entry[1].y < best[1].y ? entry : best,
-  );
-  const top = await nodeOnScreen(page, highest[0], nodes.size);
+  // A stroke that climbs past the highest node crosses the zone where the
+  // lens leaves its spot above the finger.
+  const onScreen = await recordNodesOnScreen(page, record);
+  const highest = onScreen.reduce((best, at, id) => (at.y < onScreen[best]!.y ? id : best), 0);
+  const top = onScreen[highest]!;
+  expect(top.y - frame.top).toBeLessThan(LIFT + RADIUS);
   await expectNodeDrawnAt(page, top);
   const cdp = await page.context().newCDPSession(page);
 
-  const start = await nodeOnScreen(page, highest[0] === 0 ? 3 : 0, nodes.size);
+  // The lowest node with a line left starts the stroke, clear of the climb.
+  const live = (
+    await page
+      .locator("#nodeTargets button")
+      .evaluateAll((buttons) => buttons.map((b) => b.getAttribute("aria-label") ?? ""))
+  )
+    .map((name) => Number(/Node (\d+)/.exec(name)?.[1]))
+    .filter(Number.isFinite);
+  expect(live.length).toBeGreaterThan(0);
+  const lowest = live.reduce((best, id) => (onScreen[id]!.y > onScreen[best]!.y ? id : best));
+  const start = onScreen[lowest]!;
   const below = { x: top.x, y: Math.min(top.y + 40, frame.top + frame.height - 20) };
   await cdp.send("Input.dispatchTouchEvent", {
     type: "touchStart",
@@ -423,8 +448,10 @@ test("the lens keeps its lift and stays on the canvas along the whole top edge",
   const frame = await frameOf(page);
   const cdp = await page.context().newCDPSession(page);
 
-  // A human line that runs along the top edge, so a finger tracing it keeps
-  // the lens open from one side of the board to the other.
+  // A human line that runs along the top edge from near the left side to
+  // near the right, so a finger tracing it keeps the lens open from the
+  // zone where only its right side fits to the zone where only its left
+  // side fits, and the lens has to change side once on the way.
   const nodes = await boardNodes(page);
   const ids = [...nodes.keys()];
   const screen = new Map<number, Client>();
@@ -434,23 +461,32 @@ test("the lens keeps its lift and stays on the canvas along the whole top edge",
   const a = screen.get(leftmost)!;
   const b = screen.get(rightmost)!;
   const high = frame.top + 20;
+  const left = frame.left + 30;
+  const right = frame.left + frame.width - 30;
   await page.mouse.move(a.x, a.y);
   await page.mouse.down();
-  await page.mouse.move(a.x, high, { steps: 10 });
-  await page.mouse.move(b.x, high, { steps: 20 });
+  await page.mouse.move(left, a.y, { steps: 10 });
+  await page.mouse.move(left, high, { steps: 10 });
+  await page.mouse.move(right, high, { steps: 30 });
+  await page.mouse.move(right, b.y, { steps: 10 });
   await page.mouse.move(b.x, b.y, { steps: 10 });
   await page.mouse.up();
   await expect(page.locator("#status")).toHaveText(/Drag the dot/);
   await page.mouse.click(frame.left + frame.width / 2, frame.top + frame.height - 20);
   await expect(page.locator("#status")).toHaveText("Your turn!", { timeout: 60_000 });
 
-  // The run of that line within 70 px of the top, resampled every 8 px,
-  // traced 12 px below it from left to right.
-  const run: Client[] = [];
-  for (let i = 0; i <= 300; i++) {
-    const { at } = await alongLine(page, 0, i / 300);
-    if (at.y - frame.top < 70) run.push({ x: at.x, y: at.y + 12 });
-  }
+  // The run of that line through the zone where the top edge swings the
+  // lens aside, wherever the settle left it, resampled every 8 px, traced
+  // 12 px below it from left to right.
+  const samples: Client[] = [];
+  for (let i = 0; i <= 300; i++) samples.push((await alongLine(page, 0, i / 300)).at);
+  const highest = Math.min(...samples.map((p) => p.y));
+  expect(highest - frame.top).toBeLessThan(LIFT + RADIUS - 40);
+  // The top run only, not the legs down to the nodes, which sorting by x
+  // would interleave into jumps.
+  const run: Client[] = samples
+    .filter((p) => p.y < highest + 30)
+    .map((p) => ({ x: p.x, y: p.y + 12 }));
   run.sort((p, q) => p.x - q.x);
   const path: Client[] = [run[0]!];
   for (const p of run) {
@@ -458,6 +494,10 @@ test("the lens keeps its lift and stays on the canvas along the whole top edge",
     if (Math.hypot(p.x - prev.x, p.y - prev.y) >= 8) path.push(p);
   }
   expect(path.length).toBeGreaterThan(20);
+  // The run starts where only the lens's right side fits and ends where
+  // only its left side fits, so the sweep must change side.
+  expect(path[0]!.x - frame.left).toBeLessThan(RADIUS + LIFT - 10);
+  expect(path[path.length - 1]!.x - frame.left).toBeGreaterThan(frame.width - RADIUS - LIFT + 10);
 
   const bottom = [...(await boardNodes(page)).keys()].reduce((best, id) => {
     const p = nodes.get(id);

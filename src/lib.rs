@@ -35,12 +35,12 @@ pub struct SproutsGame {
 }
 
 /// The settled board after each move of the seeded random game of `nodes`
-/// nodes, as hex, for checking a build against the values recorded in
-/// src/settle/golden.rs.
+/// nodes under settle `version`, as hex, for checking a build against the
+/// values recorded in src/settle/golden.rs.
 #[cfg(feature = "hash")]
 #[wasm_bindgen(js_name = goldenHashes)]
-pub fn golden_hashes(nodes: usize) -> Vec<String> {
-    seeded_hashes(nodes)
+pub fn golden_hashes(nodes: usize, version: u8) -> Vec<String> {
+    seeded_hashes(nodes, version)
         .iter()
         .map(|h| exact::Fnv(*h).hex())
         .collect()
