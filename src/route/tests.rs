@@ -2770,14 +2770,13 @@ fn probe_topology_stages() {
     }
 }
 
-/// Shared game positions where the router drew the AI's move and apply
-/// refused it as a crossing, because the unit grid a settling game stores
-/// the curve on pushed it across a line: in two 12-node games the
-/// relaxed path had skimmed a line far from the ends, and in a 4-node
-/// game the chord grazed its own spoke's far end within a unit. Each
-/// carries the move that was refused. The fixtures are frozen
-/// recordings; the recorder plays other games on other routers.
-const GRID_SNAP_FIXTURES: [(&str, FaceMove); 3] = [
+/// Settled positions with a chord whose stored form has to clear a line
+/// the fit, the flattening and the unit grid can carry a curve across:
+/// in two 12-node games a wall far from the chord's ends, in a 4-node game
+/// the far end of the chord's own spoke. Each names the chord and the
+/// verdict the router gives it, drawn on this router. The fixtures are
+/// frozen recordings; the recorder plays other games on other routers.
+const GRID_SNAP_FIXTURES: [(&str, FaceMove, Result<(), Unroutable>); 3] = [
     (
         "fixtures/routing/unitgrid-12n-21m.json",
         FaceMove {
@@ -2787,6 +2786,7 @@ const GRID_SNAP_FIXTURES: [(&str, FaceMove); 3] = [
             at_b: Some(69),
             enclosed: Vec::new(),
         },
+        Ok(()),
     ),
     (
         "fixtures/routing/unitgrid-12n-29m.json",
@@ -2797,6 +2797,7 @@ const GRID_SNAP_FIXTURES: [(&str, FaceMove); 3] = [
             at_b: Some(113),
             enclosed: Vec::new(),
         },
+        Ok(()),
     ),
     (
         "fixtures/routing/unitgrid-4n-3m.json",
@@ -2807,33 +2808,32 @@ const GRID_SNAP_FIXTURES: [(&str, FaceMove); 3] = [
             at_b: None,
             enclosed: Vec::new(),
         },
+        Ok(()),
     ),
 ];
 
-/// On the grid-snap positions every move the router draws applies,
-/// stored on the unit grid as a settling game stores it, and the move
-/// apply once refused either draws or is refused by the router's own
-/// check of the stored form, never handed on.
+/// On the grid-snap positions the named chord gets the verdict the
+/// fixture pins, and every move the router draws applies, stored on the
+/// unit grid as a settling game stores it.
 #[test]
 fn a_drawn_route_passes_the_checks_apply_makes() {
     let mut refused = Vec::new();
-    for (path, once_refused) in GRID_SNAP_FIXTURES {
+    for (path, chord, verdict) in GRID_SNAP_FIXTURES {
         let state = position(&std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(path));
         assert_eq!(state.settle_version, protocol::SETTLE_VERSION);
         let moves = state.face.search_moves();
-        assert!(
-            moves.contains(&once_refused),
-            "{path}: the refused move is listed"
+        assert!(moves.contains(&chord), "{path}: the chord is listed");
+        assert_eq!(
+            route(&state, &chord).map(drop),
+            verdict,
+            "{path}: {chord:?}"
         );
-        match route(&state, &once_refused) {
-            Ok(_) => eprintln!("{path}: {once_refused:?} draws"),
-            Err(Unroutable::Bug(what)) => eprintln!("{path}: {once_refused:?} refused: {what}"),
-            Err(why) => panic!("{path}: {once_refused:?}: {why:?}"),
-        }
+        let mut drawn = 0;
         for mv in moves {
             let Ok(mov) = draws(&state, &mv) else {
                 continue;
             };
+            drawn += 1;
             let mut after = state.clone();
             if let protocol::Outcome::Rejected { rejection } =
                 protocol::apply(&mut after, protocol::Move::from(mov))
@@ -2844,6 +2844,7 @@ fn a_drawn_route_passes_the_checks_apply_makes() {
                 ));
             }
         }
+        assert!(drawn > 0, "{path}: nothing drew");
     }
     assert!(refused.is_empty(), "{}", refused.join("\n"));
 }
