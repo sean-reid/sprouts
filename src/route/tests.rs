@@ -1816,3 +1816,116 @@ fn probe_shared_game_picks() {
         eprintln!("{nodes} nodes: {yes} of {of} AI moves redraw over {games} games");
     }
 }
+
+/// The far runs of `path` for ends at `ends` and radius 8, with every
+/// cut checked to sit on that radius.
+fn far_runs(path: &[Point], ends: &[Point]) -> Vec<Vec<Point>> {
+    let runs = erode::beyond(path, ends, 8.0);
+    for run in &runs {
+        assert!(run.len() >= 2, "a run has two points: {run:?}");
+        for q in run {
+            let nearest = ends
+                .iter()
+                .map(|e| e.distance_to(q))
+                .fold(f64::INFINITY, f64::min);
+            assert!(nearest >= 8.0 - 1e-6, "{q:?} lies inside the radius");
+        }
+    }
+    runs
+}
+
+/// A straight spoke between the move's two ends has no far part when
+/// the two forgiven discs cover it, and a 17 unit one keeps the unit
+/// between them, cut on the segment since both vertices lie inside.
+#[test]
+fn a_spoke_between_the_ends_is_cut_on_its_segment() {
+    let a = p(100.0, 100.0);
+    assert!(far_runs(&[a, p(115.0, 100.0)], &[a, p(115.0, 100.0)]).is_empty());
+    let b = p(117.0, 100.0);
+    assert_eq!(
+        far_runs(&[a, b], &[a, b]),
+        vec![vec![p(108.0, 100.0), p(109.0, 100.0)]]
+    );
+}
+
+/// A loop back to its own node is cut at both ends by the one owner.
+#[test]
+fn a_loop_spoke_is_cut_where_it_leaves_and_where_it_returns() {
+    let a = p(100.0, 100.0);
+    let path = [a, p(120.0, 100.0), p(120.0, 120.0), p(100.0, 120.0), a];
+    let runs = far_runs(&path, &[a]);
+    assert_eq!(runs.len(), 1);
+    let run = &runs[0];
+    assert_eq!(run.len(), 5);
+    assert!(run[0].distance_to(&p(108.0, 100.0)) < 1e-6);
+    assert_eq!(&run[1..4], &path[1..4]);
+    assert!(run[4].distance_to(&p(100.0, 108.0)) < 1e-6);
+}
+
+/// A spoke that leaves the radius, bends back inside it and leaves again
+/// gives two runs, so the stretch inside carries no margin, as the
+/// validator forgives a crossing there.
+#[test]
+fn a_spoke_that_comes_back_inside_gives_two_far_runs() {
+    let a = p(100.0, 100.0);
+    let path = [
+        a,
+        p(120.0, 100.0),
+        p(120.0, 106.0),
+        p(102.0, 106.0),
+        p(102.0, 130.0),
+    ];
+    let runs = far_runs(&path, &[a]);
+    assert_eq!(runs.len(), 2);
+    assert!(runs[0][0].distance_to(&p(108.0, 100.0)) < 1e-6);
+    assert_eq!(&runs[0][1..3], &path[1..3]);
+    let back_in = runs[0].last().unwrap();
+    assert!((back_in.y - 106.0).abs() < 1e-6 && back_in.x > 102.0 && back_in.x < 120.0);
+    let out_again = runs[1][0];
+    assert!((out_again.x - 102.0).abs() < 1e-6 && out_again.y > 106.0 && out_again.y < 130.0);
+    assert_eq!(runs[1][1], path[4]);
+}
+
+/// A spoke to another node is cut once, at its own end, and keeps that
+/// node's end.
+#[test]
+fn a_spoke_to_another_node_keeps_its_far_end() {
+    let a = p(100.0, 100.0);
+    let path = [a, p(150.0, 100.0), p(200.0, 140.0)];
+    let runs = far_runs(&path, &[a]);
+    assert_eq!(runs.len(), 1);
+    assert!(runs[0][0].distance_to(&p(108.0, 100.0)) < 1e-6);
+    assert_eq!(&runs[0][1..], &path[1..]);
+}
+
+/// A chord drawn alongside a straight line between its own two ends: the
+/// shared spoke is a two point polyline with both vertices inside the
+/// ends' forgiven radius, and a cut that looked at vertices alone left it
+/// with no far part, so the path ran along it and the read-back refused
+/// the heading as PathAlongLine.
+#[test]
+fn a_chord_beside_a_straight_line_between_its_ends_leaves_the_line() {
+    let state = position(
+        &std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("fixtures/routing/corridor-4n-2m.json"),
+    );
+    let mv = FaceMove {
+        a: 0,
+        at_a: Some(4),
+        b: 5,
+        at_b: Some(6),
+        enclosed: Vec::new(),
+    };
+    let line = crate::embedding::half_edge_path(&state, 4);
+    assert_eq!(line.len(), 2, "the spoke between the ends is straight");
+    let drawn = route(&state, &mv).unwrap();
+    let flat = drawn.flatten(curve::tolerance(state.board_size));
+    let (far_from_line, total) = flat.iter().fold((0usize, 0usize), |(far, n), q| {
+        let gap = closest_point_on_polyline(&line, q).1;
+        (far + usize::from(gap > curve::tolerance(1000)), n + 1)
+    });
+    assert!(
+        far_from_line * 2 > total,
+        "{far_from_line} of {total} points off the line"
+    );
+}

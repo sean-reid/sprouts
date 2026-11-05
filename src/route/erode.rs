@@ -65,9 +65,9 @@ struct End {
 /// from a node to the new node on it is a spoke of both.
 struct OwnSpoke {
     path: Vec<Point>,
-    /// The path beyond the inner radius of every owner, where the
-    /// validator would refuse a crossing; empty when the owners cover it.
-    far: Vec<Point>,
+    /// The runs of the path beyond the inner radius of every owner, where
+    /// the validator would refuse a crossing; none when the owners cover it.
+    far: Vec<Vec<Point>>,
     owners: Vec<usize>,
 }
 
@@ -520,12 +520,12 @@ fn spoke_path(state: &GameState, h: HalfEdgeId) -> Vec<Point> {
     path
 }
 
-/// `path` with every run within `radius` of a point of `ends` trimmed off
-/// its two ends, each cut exactly where the path crosses that radius, or
-/// empty when nothing lies outside. A straight spoke between the two
-/// ends has both its vertices inside, so the cuts are found on the
+/// The runs of `path` outside `radius` of every point of `ends`, each cut
+/// exactly where the path crosses that radius, so a path that comes back
+/// inside and leaves again gives two runs. A straight spoke between the
+/// two ends has both its vertices inside, so the cuts are found on the
 /// segments, not at the vertices.
-fn beyond(path: &[Point], ends: &[Point], radius: f64) -> Vec<Point> {
+pub(super) fn beyond(path: &[Point], ends: &[Point], radius: f64) -> Vec<Vec<Point>> {
     let Some(&last) = path.last() else {
         return Vec::new();
     };
@@ -554,14 +554,20 @@ fn beyond(path: &[Point], ends: &[Point], radius: f64) -> Vec<Point> {
         let mid = Point::new((p.x + q.x) / 2.0, (p.y + q.y) / 2.0);
         ends.iter().all(|e| e.distance_to(&mid) >= radius)
     };
-    let segments = pts.len().saturating_sub(1);
-    match (
-        (0..segments).find(|&i| outside(i)),
-        (0..segments).rev().find(|&i| outside(i)),
-    ) {
-        (Some(first), Some(end)) => pts[first..=end + 1].to_vec(),
-        _ => Vec::new(),
+    let mut runs: Vec<Vec<Point>> = Vec::new();
+    let mut open = false;
+    for i in 0..pts.len().saturating_sub(1) {
+        if !outside(i) {
+            open = false;
+            continue;
+        }
+        if !open {
+            runs.push(vec![pts[i]]);
+            open = true;
+        }
+        runs.last_mut().expect("an open run").push(pts[i + 1]);
     }
+    runs
 }
 
 /// Where the segment from `p` to `q` crosses the circle of `radius` round
@@ -720,15 +726,17 @@ impl Arena {
         for spoke in &mut spokes {
             let owners: Vec<Point> = spoke.owners.iter().map(|&k| ends[k].at).collect();
             spoke.far = beyond(&spoke.path, &owners, forgiven);
-            // The margin band round the far part ends in a half disc at
-            // each cut, and the triangles need its edge to stop at.
-            for (cut, whole) in [
-                (spoke.far.first(), spoke.path.first()),
-                (spoke.far.last(), spoke.path.last()),
-            ] {
-                if let Some(&cut) = cut {
-                    if Some(&cut) != whole {
-                        arrangement.add_closed(&disc(cut, margin), false);
+            // The margin band round a far run ends in a half disc at each
+            // cut, and the triangles need its edge to stop at.
+            for run in &spoke.far {
+                for (cut, whole) in [
+                    (run.first(), spoke.path.first()),
+                    (run.last(), spoke.path.last()),
+                ] {
+                    if let Some(&cut) = cut {
+                        if Some(&cut) != whole {
+                            arrangement.add_closed(&disc(cut, margin), false);
+                        }
                     }
                 }
             }
@@ -782,7 +790,7 @@ impl Arena {
     /// Whether `p` keeps every clearance: the line clearance from walls that
     /// are no end node's spoke, the node clearance from every other node,
     /// and from each end node's own spokes the least that any owning end
-    /// asks at `p`: the fit margin from the spoke's far part within its
+    /// asks at `p`: the fit margin from the spoke's far runs within its
     /// entry ring, the clearance from the whole spoke beyond.
     fn clear_at(&self, p: Point, slack: f64) -> bool {
         let c = self.clearance;
@@ -802,8 +810,10 @@ impl Arena {
                 end.at.distance_to(&p) < end.outer + slack
             });
             if entering {
-                spoke.far.is_empty()
-                    || closest_point_on_polyline(&spoke.far, &p).1 >= self.margin - slack
+                spoke
+                    .far
+                    .iter()
+                    .all(|run| closest_point_on_polyline(run, &p).1 >= self.margin - slack)
             } else {
                 closest_point_on_polyline(&spoke.path, &p).1 >= c - slack
             }
