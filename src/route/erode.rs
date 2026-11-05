@@ -1379,8 +1379,40 @@ impl Arena {
         segments: &mut [Option<Segment>],
         on_fence: &mut [bool],
     ) {
-        let n = self.free.len();
         let mut joined: Vec<usize> = vec![members[0]];
+        while joined.len() < members.len() {
+            let anchored = on_fence.to_vec();
+            let reached = self.grow_fence(
+                |_, edge, other| {
+                    anchored[edge] || (!self.free[other] && joined.contains(&blobs[other]))
+                },
+                |other| {
+                    !self.free[other]
+                        && members.contains(&blobs[other])
+                        && !joined.contains(&blobs[other])
+                },
+                segments,
+                on_fence,
+            );
+            let Some(other) = reached else {
+                return;
+            };
+            joined.push(blobs[other]);
+        }
+    }
+
+    /// One fence polyline through free triangles off the guards that host
+    /// none yet, fewest triangles first, from a triangle `anchor` accepts
+    /// by one of its edges (the edge the polyline starts at) to an edge
+    /// across which `target` accepts the triangle. Returns that triangle.
+    fn grow_fence(
+        &self,
+        anchor: impl Fn(usize, usize, usize) -> bool,
+        target: impl Fn(usize) -> bool,
+        segments: &mut [Option<Segment>],
+        on_fence: &mut [bool],
+    ) -> Option<usize> {
+        let n = self.free.len();
         let edges = |t: usize| {
             let v = self.ccw_vertices(t);
             (0..3).filter_map(move |k| {
@@ -1389,69 +1421,93 @@ impl Arena {
                     .map(|(other, edge)| (edge, other, p, q))
             })
         };
-        while joined.len() < members.len() {
-            let hostable = |t: usize, segments: &[Option<Segment>]| {
-                self.free[t] && self.guard[t] == 0 && segments[t].is_none()
-            };
-            let mut parent: Vec<Option<usize>> = vec![None; n];
-            let mut entry: Vec<Option<Crossing>> = vec![None; n];
-            let mut seen = vec![false; n];
-            let mut queue = VecDeque::new();
-            for t in (0..n).filter(|&t| self.handles[t].is_some() && hostable(t, segments)) {
-                let anchor = edges(t).find(|&(edge, other, _, _)| {
-                    on_fence[edge] || (!self.free[other] && joined.contains(&blobs[other]))
-                });
-                if let Some((edge, _, p, q)) = anchor {
-                    seen[t] = true;
-                    entry[t] = Some((edge, [p, q]));
-                    queue.push_back(t);
-                }
-            }
-            let mut found = None;
-            'search: while let Some(t) = queue.pop_front() {
-                for (edge, other, p, q) in edges(t) {
-                    if entry[t].is_some_and(|(e, _)| e == edge) {
-                        continue;
-                    }
-                    if !self.free[other] {
-                        let blob = blobs[other];
-                        if members.contains(&blob) && !joined.contains(&blob) {
-                            found = Some((t, (edge, [p, q]), blob));
-                            break 'search;
-                        }
-                        continue;
-                    }
-                    if seen[other] || !hostable(other, segments) {
-                        continue;
-                    }
-                    seen[other] = true;
-                    parent[other] = Some(t);
-                    entry[other] = Some((edge, [p, q]));
-                    queue.push_back(other);
-                }
-            }
-            let Some((mut cur, mut exit, blob)) = found else {
-                return;
-            };
-            joined.push(blob);
-            loop {
-                let came = entry[cur].expect("an entry edge");
-                let shared = came.1.into_iter().find(|v| exit.1.contains(v));
-                segments[cur] = Some(Segment {
-                    edges: [came.0, exit.0],
-                    shared: shared.expect("edges of one triangle"),
-                });
-                on_fence[came.0] = true;
-                on_fence[exit.0] = true;
-                match parent[cur] {
-                    Some(prev) => {
-                        exit = came;
-                        cur = prev;
-                    }
-                    None => break,
-                }
+        let hostable = |t: usize, segments: &[Option<Segment>]| {
+            self.free[t] && self.guard[t] == 0 && segments[t].is_none()
+        };
+        let mut parent: Vec<Option<usize>> = vec![None; n];
+        let mut entry: Vec<Option<Crossing>> = vec![None; n];
+        let mut seen = vec![false; n];
+        let mut queue = VecDeque::new();
+        for t in (0..n).filter(|&t| self.handles[t].is_some() && hostable(t, segments)) {
+            if let Some((edge, _, p, q)) =
+                edges(t).find(|&(edge, other, _, _)| anchor(t, edge, other))
+            {
+                seen[t] = true;
+                entry[t] = Some((edge, [p, q]));
+                queue.push_back(t);
             }
         }
+        let mut found = None;
+        'search: while let Some(t) = queue.pop_front() {
+            for (edge, other, p, q) in edges(t) {
+                if entry[t].is_some_and(|(e, _)| e == edge) {
+                    continue;
+                }
+                if target(other) {
+                    found = Some((t, (edge, [p, q]), other));
+                    break 'search;
+                }
+                if seen[other] || !hostable(other, segments) {
+                    continue;
+                }
+                seen[other] = true;
+                parent[other] = Some(t);
+                entry[other] = Some((edge, [p, q]));
+                queue.push_back(other);
+            }
+        }
+        let (mut cur, mut exit, reached) = found?;
+        loop {
+            let came = entry[cur].expect("an entry edge");
+            let shared = came.1.into_iter().find(|v| exit.1.contains(v));
+            segments[cur] = Some(Segment {
+                edges: [came.0, exit.0],
+                shared: shared.expect("edges of one triangle"),
+            });
+            on_fence[came.0] = true;
+            on_fence[exit.0] = true;
+            match parent[cur] {
+                Some(prev) => {
+                    exit = came;
+                    cur = prev;
+                }
+                None => return Some(reached),
+            }
+        }
+    }
+
+    /// The midpoint of every edge, by edge index.
+    #[cfg(test)]
+    pub(super) fn edge_midpoints(&self) -> Vec<Point> {
+        let mut out = vec![Point::new(0.0, 0.0); self.cdt.num_undirected_edges()];
+        for e in self.cdt.undirected_edges() {
+            let [p, q] = e.positions().map(point);
+            out[e.fix().index()] = Point::new((p.x + q.x) / 2.0, (p.y + q.y) / 2.0);
+        }
+        out
+    }
+
+    /// One fence from the triangle holding `from` to the one holding `to`,
+    /// for tests that want a wall of their own placing.
+    #[cfg(test)]
+    pub(super) fn fence_between(&self, from: Point, to: Point) -> Fences {
+        let at = |p: Point| match self.cdt.locate(point2(p)) {
+            PositionInTriangulation::OnFace(f) => f.index(),
+            _ => panic!("{p:?} is not inside a triangle"),
+        };
+        let (start, end) = (at(from), at(to));
+        let mut fences = Fences {
+            segments: vec![None; self.free.len()],
+        };
+        let mut on_fence = vec![false; self.cdt.num_undirected_edges()];
+        let reached = self.grow_fence(
+            |t, _, _| t == start,
+            |other| other == end,
+            &mut fences.segments,
+            &mut on_fence,
+        );
+        assert_eq!(reached, Some(end), "no fence runs from {from:?} to {to:?}");
+        fences
     }
 
     fn adjacency(&self) -> Vec<Vec<FixedVertexHandle>> {

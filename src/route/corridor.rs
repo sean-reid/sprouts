@@ -250,8 +250,35 @@ pub(super) fn search(
             };
             let (pp, qq) = (arena.vertex_point(p), arena.vertex_point(q));
             let mid = Point::new((pp.x + qq.x) / 2.0, (pp.y + qq.y) / 2.0);
-            let cost = item.cost + item.pos.distance_to(&mid);
             for &near in nears {
+                // The vertex the crossing keeps to once the fence on either
+                // side has fixed it, so the portal is that half of the edge
+                // and the taut path stays off the fence.
+                let keep = half.or_else(|| {
+                    fences.at(next_tri).and_then(|seg| {
+                        seg.edges.contains(&edge).then(|| {
+                            if near {
+                                seg.shared
+                            } else if p == seg.shared {
+                                q
+                            } else {
+                                p
+                            }
+                        })
+                    })
+                });
+                // Leaving through the edge `p` to `q` of a triangle on its
+                // screen-left puts `q` on the traveller's left.
+                let portal = match keep {
+                    Some(v) if v == q => (qq, mid),
+                    Some(_) => (mid, pp),
+                    None => (qq, pp),
+                };
+                let through = Point::new(
+                    (portal.0.x + portal.1.x) / 2.0,
+                    (portal.0.y + portal.1.y) / 2.0,
+                );
+                let cost = item.cost + item.pos.distance_to(&through);
                 let next = Key {
                     tri: next_tri,
                     mask: key.mask ^ cuts.bits[edge],
@@ -260,14 +287,12 @@ pub(super) fn search(
                 };
                 if best.get(&next).is_none_or(|&c| cost < c) {
                     best.insert(next, cost);
-                    // Leaving through the edge `p` to `q` of a triangle on
-                    // its screen-left puts `q` on the traveller's left.
-                    parent.insert(next, (key, (qq, pp)));
+                    parent.insert(next, (key, portal));
                     heap.push(Item {
                         cost,
-                        bound: cost + exit.at.distance_to(&mid),
+                        bound: cost + exit.at.distance_to(&through),
                         key: next,
-                        pos: mid,
+                        pos: through,
                     });
                 }
             }

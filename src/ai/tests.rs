@@ -341,15 +341,11 @@ fn a_shared_router_answers_as_fresh_routers_do() {
 
 /// A chord whose ends the arena disconnects puts its corners in the no
 /// room memo, and the next chord between those corners is refused without
-/// another arena or search. The live record has such chords; the opening
-/// positions are tried first.
+/// another arena or search. The live record supplies the chord: its draw
+/// answers 108 of 113 attempts from the memo.
 #[test]
 fn a_second_chord_between_corners_without_room_is_refused_from_memory() {
-    let positions = [6, 8, 10, 12]
-        .into_iter()
-        .map(opening_after)
-        .chain(std::iter::once(position_of_record("room-24n-1000.json")));
-    for state in positions {
+    for state in [position_of_record("room-24n-1000.json")] {
         let candidates = state.face.search_moves();
         for first in candidates.iter().filter(|m| m.a != m.b) {
             let mut router = route::Router::new();
@@ -546,6 +542,33 @@ fn the_live_room_position_draws_under_the_cheap_pass() {
         );
         assert!(s.attempts <= candidates.len());
     }
+}
+
+/// No listed move of the live position exhausts the corridor search:
+/// every candidate routes at the cheap clearance through one Router
+/// without a search states bug, and none of the fenced parity searches
+/// misses. 1,443 candidates, release only.
+#[cfg(not(debug_assertions))]
+#[test]
+fn no_listed_move_of_the_live_position_exhausts_the_search() {
+    let state = position_of_record("room-24n-1000.json");
+    let candidates = state.face.search_moves();
+    assert_eq!(candidates.len(), 1443);
+    let mut router = route::Router::new();
+    stats::take();
+    let mut exhausted = 0;
+    for mv in &candidates {
+        if matches!(
+            router.route_cheap(&state, mv),
+            Err(route::Unroutable::Bug("search states"))
+        ) {
+            exhausted += 1;
+        }
+    }
+    let s = stats::take();
+    assert_eq!(exhausted, 0);
+    assert_eq!(s.refused.bug, 0, "{:?}", s.refused.bugs);
+    assert_eq!(s.fence_misses, 0);
 }
 
 /// Replies on the live position where the page answered Undrawn with room

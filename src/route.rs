@@ -509,6 +509,50 @@ fn parity_search(
     )
 }
 
+/// Whether the parity `mv` names is one no corridor reaches, as the
+/// filter and the exhaustive search without fences each decide it; the
+/// two must agree. None when the first search finds no path at all or
+/// the first path already has every piece on its side.
+#[cfg(test)]
+pub(crate) fn parity_unreachable(state: &GameState, mv: &FaceMove) -> Option<bool> {
+    let want = rules(state);
+    let mut router = Router::new();
+    let face = state.face.corner_face(mv.a, mv.at_a).ok()?;
+    let arena = router.arena(state, face, mv, &want).ok()?;
+    let is_loop = mv.a == mv.b;
+    let entry = arena.entries(state, mv.a, mv.at_a).ok()?;
+    let exit = arena.entries(state, mv.b, mv.at_b).ok()?;
+    let blocked = corridor::blocked(&arena, &entry, &exit);
+    let cuts = arena.cuts(state, mv, face, &blocked).ok()?;
+    let own = state.face.component_of(mv.a, mv.at_a).ok()?;
+    let none = erode::Fences::none();
+    let first = corridor::search(
+        &arena,
+        &cuts,
+        &entry,
+        &exit,
+        corridor::Want::Any,
+        is_loop,
+        &none,
+    )
+    .ok()?;
+    let path = arena.tighten(&cuts, &corridor::draw(&first, &entry, &exit), &entry, &exit);
+    let wrong = wrong_sides(state, mv, own, &cuts, &path);
+    if wrong == 0 {
+        return None;
+    }
+    let wanted = corridor::Want::Parity(first.parity ^ wrong);
+    let filter = corridor::parity_reachable(&arena, &cuts, &entry, &exit, wanted, is_loop);
+    let exhaustive = corridor::search(&arena, &cuts, &entry, &exit, wanted, is_loop, &none);
+    assert_eq!(
+        filter,
+        exhaustive.is_ok(),
+        "the parity filter and the exhaustive search disagree: {:?}",
+        exhaustive.as_ref().err()
+    );
+    Some(!filter)
+}
+
 /// Two legs of a path the funnel pulled through the same vertex are set a
 /// little apart there, so they leave the vertex on different sides and the
 /// relaxation can open them further instead of crossing them: a leg moves

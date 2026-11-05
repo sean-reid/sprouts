@@ -312,13 +312,23 @@ fn within(count: usize, ceiling: usize) -> bool {
     count <= ceiling
 }
 
+/// Parity searches the fences may hold back from their corridor over the
+/// sweeps, so the search without them runs: none, as measured.
+const FENCE_MISSES_CEILING: usize = 0;
+
 /// The router's counters over one sweep game, checked against the
-/// ceiling above.
+/// ceilings above.
 fn sweep_stats_hold(s: &stats::Stats) -> Result<(), String> {
     if s.states_ok_max > CORRIDOR_STATES_CEILING {
         return Err(format!(
             "a corridor found held {} states, ceiling {CORRIDOR_STATES_CEILING}",
             s.states_ok_max
+        ));
+    }
+    if s.fence_misses > FENCE_MISSES_CEILING {
+        return Err(format!(
+            "{} parity searches missed with the fences up, ceiling {FENCE_MISSES_CEILING}",
+            s.fence_misses
         ));
     }
     Ok(())
@@ -2176,6 +2186,24 @@ fn a_chord_wrong_on_two_pieces_routes_round_them_through_the_fences() {
     let state = ring_face([p(380.0, 450.0), p(380.0, 550.0)]);
     let chords = inner_chords(&state);
     assert_eq!(chords.len(), 4, "{chords:?}");
+    // A fence joins the two inner nodes when the chord names them as one
+    // side, and a side with one piece gets none.
+    let want = rules(&state);
+    for mv in &chords {
+        let face = state.face.corner_face(mv.a, mv.at_a).unwrap();
+        let arena = Router::new().arena(&state, face, mv, &want).unwrap();
+        let fenced = arena
+            .fences(&state, mv, face)
+            .segments
+            .iter()
+            .flatten()
+            .count();
+        assert_eq!(
+            fenced > 0,
+            mv.enclosed.len() != 1,
+            "{mv:?}: {fenced} fenced triangles"
+        );
+    }
     let mut wrong_counts = Vec::new();
     for mv in &chords {
         stats::take();
@@ -2220,10 +2248,99 @@ fn a_chord_splitting_two_glued_pieces_is_refused_as_room_without_a_search() {
                 s.parity.iter().all(|&(_, _, found)| !found),
                 "{mv:?} found a corridor"
             );
+            // The exhaustive search without fences says the same.
+            assert_eq!(parity_unreachable(&state, mv), Some(true), "{mv:?}");
         } else {
             assert!(drawn.is_ok(), "{mv:?}: {drawn:?}");
         }
         assert_eq!(s.fence_misses, 0);
     }
     assert_eq!(router.corners_without_room(), 0);
+}
+
+/// A fence of the test's own placing across the straight chord on an
+/// empty board: the search with it up goes round the fence's end, so the
+/// corridor is longer than the straight one, crosses the fence's line
+/// only beyond its ends, and still reaches the exit.
+#[test]
+fn a_fence_across_the_straight_chord_sends_the_corridor_round_its_end() {
+    let mut state = GameState::new(4);
+    for (node, at) in state.nodes.iter_mut().zip([
+        p(200.0, 500.0),
+        p(800.0, 500.0),
+        p(500.0, 100.0),
+        p(500.0, 900.0),
+    ]) {
+        node.position = at;
+    }
+    state.current_player = Player::AI;
+    let mv = chord(0, 1);
+    let want = rules(&state);
+    let face = state.face.corner_face(0, None).unwrap();
+    let arena = Router::new().arena(&state, face, &mv, &want).unwrap();
+    let entry = arena.entries(&state, 0, None).unwrap();
+    let exit = arena.entries(&state, 1, None).unwrap();
+    let cuts = arena
+        .cuts(&state, &mv, face, &corridor::blocked(&arena, &entry, &exit))
+        .unwrap();
+    let length = |path: &[Point]| -> f64 { path.windows(2).map(|w| w[0].distance_to(&w[1])).sum() };
+    let route_with = |fences: &erode::Fences| {
+        let found = corridor::search(
+            &arena,
+            &cuts,
+            &entry,
+            &exit,
+            corridor::Want::Any,
+            false,
+            fences,
+        )
+        .unwrap();
+        corridor::draw(&found, &entry, &exit)
+    };
+    let straight = route_with(&erode::Fences::none());
+    assert!(length(&straight) < 601.0, "{}", length(&straight));
+    let fences = arena.fence_between(p(500.0, 350.0), p(500.0, 650.0));
+    assert!(fences.segments.iter().flatten().count() >= 2);
+    // The fence runs through the midpoints of the edges its segments join.
+    let midpoints = arena.edge_midpoints();
+    let fence_ys: Vec<f64> = fences
+        .segments
+        .iter()
+        .flatten()
+        .flat_map(|seg| seg.edges.map(|e| midpoints[e].y))
+        .collect();
+    let (top, bottom) = fence_ys
+        .iter()
+        .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), &y| {
+            (lo.min(y), hi.max(y))
+        });
+    assert!(
+        top < 450.0 && bottom > 550.0,
+        "fence spans {top:.0} to {bottom:.0}"
+    );
+    let detour = route_with(&fences);
+    assert!(
+        length(&detour) > length(&straight) + 10.0,
+        "straight {:.0}, detour {:.0}",
+        length(&straight),
+        length(&detour)
+    );
+    // The taut path crosses no piece of the fence, and the straight one
+    // crosses it.
+    let pieces: Vec<(Point, Point)> = fences
+        .segments
+        .iter()
+        .flatten()
+        .map(|seg| (midpoints[seg.edges[0]], midpoints[seg.edges[1]]))
+        .collect();
+    let crosses = |path: &[Point]| {
+        path.windows(2).any(|w| {
+            pieces
+                .iter()
+                .any(|&(c, d)| clearance::proper_crossing(w[0], w[1], c, d))
+        })
+    };
+    assert!(crosses(&straight));
+    assert!(!crosses(&detour), "{detour:?}");
+    assert_eq!(detour.last().map(|q| (q.x, q.y)), Some((800.0, 500.0)));
 }
