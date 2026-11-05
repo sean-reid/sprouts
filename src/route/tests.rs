@@ -1722,3 +1722,31 @@ fn a_route_into_an_end_with_two_spokes_arrives_between_them() {
 fn bits_of(state: &GameState) -> Vec<u64> {
     crate::settle::golden::bits(state)
 }
+
+/// Records forty picks of each shared game and prints how many AI moves
+/// of each classify as topology, the first thing
+/// tests/e2e/replay-links.spec.ts needs of a recording:
+/// `cargo test --release probe_shared_game_picks -- --ignored --nocapture`.
+#[test]
+#[ignore]
+fn probe_shared_game_picks() {
+    for (nodes, moves) in [(4, 8), (9, 10)] {
+        let (mut yes, mut of, mut games) = (0, 0, 0);
+        for pick in 0..40 {
+            match shared_game(nodes, moves, pick) {
+                Ok(game) => {
+                    let topology = game.topology.iter().flatten().count();
+                    eprintln!(
+                        "{nodes} nodes pick {pick}: {topology} of {} AI moves redraw",
+                        moves / 2
+                    );
+                    yes += topology;
+                    of += moves / 2;
+                    games += 1;
+                }
+                Err(why) => eprintln!("{nodes} nodes pick {pick}: {why}"),
+            }
+        }
+        eprintln!("{nodes} nodes: {yes} of {of} AI moves redraw over {games} games");
+    }
+}

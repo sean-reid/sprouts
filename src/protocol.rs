@@ -602,11 +602,18 @@ pub fn rehearse(plan: Rehearsal) -> Result<Rehearsed, String> {
 }
 
 /// Whether the router, given the face move, draws the curve of `mov`: the
-/// flattenings stay within the fit tolerance of each other. The node is
-/// carried with the move, since the best spot on a curve can jump far for
-/// a small change in it.
+/// flattenings stay within the fit tolerance of each other, plus the half
+/// diagonal of the unit grid a settling board rounds its stored curves
+/// to, so a curve the router reproduces up to that rounding counts. The
+/// node is carried with the move, since the best spot on a curve can jump
+/// far for a small change in it.
 pub(crate) fn redraws(state: &GameState, face: &face::Move, mov: &types::Move) -> bool {
     let tolerance = curve::tolerance(state.board_size);
+    let rounding = if state.settle_version > 0 {
+        grid(state.board_size) * std::f64::consts::FRAC_1_SQRT_2
+    } else {
+        0.0
+    };
     let Ok(drawn) = route::route(state, face) else {
         return false;
     };
@@ -615,7 +622,7 @@ pub(crate) fn redraws(state: &GameState, face: &face::Move, mov: &types::Move) -
     let within = |points: &[Point], of: &[Point]| {
         points
             .iter()
-            .all(|p| geometry::closest_point_on_polyline(of, p).1 <= tolerance)
+            .all(|p| geometry::closest_point_on_polyline(of, p).1 <= tolerance + rounding)
     };
     within(&ours, &theirs) && within(&theirs, &ours)
 }
