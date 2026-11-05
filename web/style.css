@@ -449,6 +449,12 @@ button:disabled {
 
 .modal-actions {
   display: flex;
+  flex-wrap: wrap;
   gap: 12px;
   justify-content: center;
+}
+
+.modal-actions button {
+  min-height: 44px;
+  min-width: 44px;
 }
