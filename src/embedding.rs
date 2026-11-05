@@ -211,10 +211,16 @@ pub(crate) fn turn(from: f64, to: f64) -> f64 {
 }
 
 /// The direction from `center` in which `path` leaves the circle of
-/// `radius`: where its first segment to cross the circle meets it, so a
-/// bend just past the circle does not swing the reading. A path that never
-/// reaches the radius reads at its farthest point.
+/// `radius`, as an angle counterclockwise on screen; 0 for an empty path.
 pub(crate) fn leaving_angle(center: Point, path: &[Point], radius: f64) -> f64 {
+    leaving_point(center, path, radius).map_or(0.0, |p| (center.y - p.y).atan2(p.x - center.x))
+}
+
+/// Where `path` leaves the circle of `radius` round `center`: where its
+/// first segment to cross the circle meets it, so a bend just past the
+/// circle does not swing the reading. A path that never reaches the
+/// radius reads at its farthest point.
+pub(crate) fn leaving_point(center: Point, path: &[Point], radius: f64) -> Option<Point> {
     let farther = |p: &&Point, q: &&Point| {
         p.distance_to(&center)
             .partial_cmp(&q.distance_to(&center))
@@ -231,8 +237,7 @@ pub(crate) fn leaving_angle(center: Point, path: &[Point], radius: f64) -> f64 {
         let t = (radius - dp) / (dq - dp);
         Some(Point::new(p.x + (q.x - p.x) * t, p.y + (q.y - p.y) * t))
     });
-    let far = exit.or_else(|| path.iter().max_by(farther).copied());
-    far.map_or(0.0, |p| (center.y - p.y).atan2(p.x - center.x))
+    exit.or_else(|| path.iter().max_by(farther).copied())
 }
 
 /// Geometry of half-edge `h`, from its origin to its head.

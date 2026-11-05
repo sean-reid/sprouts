@@ -130,6 +130,14 @@ impl SproutsGame {
         protocol::route_hash(plan.to_rust()?).map_err(|e| JsError::new(&e))
     }
 
+    /// One hash per routed move of the given positions, "plan/move hex",
+    /// for finding where a platform's routing parts from the native one.
+    #[cfg(feature = "hash")]
+    #[wasm_bindgen(js_name = routeHashes)]
+    pub fn route_hashes(&self, plan: Ts<RouteHashPlan>) -> Result<Vec<String>, JsError> {
+        protocol::route_hashes(plan.to_rust()?).map_err(|e| JsError::new(&e))
+    }
+
     pub fn undo(&mut self) -> bool {
         protocol::undo(&mut self.state)
     }
