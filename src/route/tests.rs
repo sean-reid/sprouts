@@ -911,7 +911,7 @@ fn record_shared_games() {
     record_shared_game(
         12,
         30,
-        pick("SPROUTS_PICK_12", 0),
+        pick("SPROUTS_PICK_12", 4),
         &dir.join("thirty-moves-12n-1000.json"),
     );
 }
