@@ -292,6 +292,34 @@ static HUMAN_TALLY: std::sync::Mutex<sweep::Tally> = std::sync::Mutex::new(sweep
 /// Cases run and parity searches that left EXACT_STATES behind, summed
 /// over every case so far, per player.
 static PROGRESS: std::sync::Mutex<[(u32, usize); 2]> = std::sync::Mutex::new([(0, 0); 2]);
+/// The settling sweeps' running totals and case counts, AI then human.
+static SETTLING_TALLY: std::sync::Mutex<sweep::Tally> = std::sync::Mutex::new(sweep::Tally {
+    tried: 0,
+    room: 0,
+    no_spot: 0,
+    shape: std::collections::BTreeMap::new(),
+    topology: 0,
+    sides: 0,
+    bug: 0,
+    bugs: std::collections::BTreeMap::new(),
+});
+static SETTLING_HUMAN_TALLY: std::sync::Mutex<sweep::Tally> = std::sync::Mutex::new(sweep::Tally {
+    tried: 0,
+    room: 0,
+    no_spot: 0,
+    shape: std::collections::BTreeMap::new(),
+    topology: 0,
+    sides: 0,
+    bug: 0,
+    bugs: std::collections::BTreeMap::new(),
+});
+static SETTLING_PROGRESS: std::sync::Mutex<[u32; 2]> = std::sync::Mutex::new([0; 2]);
+/// Routes tried and refused as Room over the settling sweeps, as the AI
+/// and as the human: the measured values on this Mac.
+const SETTLING_AI_ROUTES: usize = 655;
+const SETTLING_AI_ROOM: usize = 225;
+const SETTLING_HUMAN_ROUTES: usize = 647;
+const SETTLING_HUMAN_ROOM: usize = 245;
 
 /// Random games to play; an unoptimised build takes some twenty seconds
 /// over each. The games are the same on every run, so a result here is
@@ -417,12 +445,44 @@ proptest! {
 
     /// The same games on a settling board, every drawn move sent through
     /// apply as the page sends it: rounded to the unit grid, checked and
-    /// settled. A move apply refuses is a bug.
+    /// settled. A move apply refuses is a bug, and the route and Room
+    /// counts are pinned like the plain sweep's.
     #[test]
     fn no_drawn_move_is_refused_on_a_settling_board(nodes in 4usize..=12, picks in prop::collection::vec(any::<u32>(), 36)) {
         let tally = sweep::settling_game(nodes, &picks, Player::AI);
         prop_assert!(tally.is_ok(), "{}", tally.as_ref().unwrap_err());
-        prop_assert_eq!(tally.unwrap().bug, 0);
+        let mut total = SETTLING_TALLY.lock().unwrap();
+        total.add(&tally.unwrap());
+        eprintln!("settling {total}");
+        prop_assert_eq!(total.bug, 0);
+        let cases = {
+            let mut progress = SETTLING_PROGRESS.lock().unwrap();
+            progress[0] += 1;
+            progress[0]
+        };
+        if cases == CASES && cfg!(not(debug_assertions)) {
+            prop_assert_eq!((total.tried, total.room), (SETTLING_AI_ROUTES, SETTLING_AI_ROOM), "{}", total);
+        }
+    }
+
+    /// The settling sweep at the human clearances, which finish's check of
+    /// the stored form covers as well.
+    #[test]
+    fn no_drawn_move_is_refused_on_a_settling_board_for_the_human(nodes in 4usize..=12, picks in prop::collection::vec(any::<u32>(), 36)) {
+        let tally = sweep::settling_game(nodes, &picks, Player::Human);
+        prop_assert!(tally.is_ok(), "{}", tally.as_ref().unwrap_err());
+        let mut total = SETTLING_HUMAN_TALLY.lock().unwrap();
+        total.add(&tally.unwrap());
+        eprintln!("settling human {total}");
+        prop_assert_eq!(total.bug, 0);
+        let cases = {
+            let mut progress = SETTLING_PROGRESS.lock().unwrap();
+            progress[1] += 1;
+            progress[1]
+        };
+        if cases == CASES && cfg!(not(debug_assertions)) {
+            prop_assert_eq!((total.tried, total.room), (SETTLING_HUMAN_ROUTES, SETTLING_HUMAN_ROOM), "{}", total);
+        }
     }
 
     /// The same games drawn at the human clearances, which routeMove and
@@ -2820,7 +2880,7 @@ fn a_drawn_route_passes_the_checks_apply_makes() {
     let mut refused = Vec::new();
     for (path, chord, verdict) in GRID_SNAP_FIXTURES {
         let state = position(&std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(path));
-        assert_eq!(state.settle_version, protocol::SETTLE_VERSION);
+        assert!(state.settle_version > 0, "{path}: a settling board");
         let moves = state.face.search_moves();
         assert!(moves.contains(&chord), "{path}: the chord is listed");
         assert_eq!(

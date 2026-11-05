@@ -394,9 +394,10 @@ fn eroded_by(state: &GameState, want: &Rules) -> f64 {
 }
 
 /// The disc cut out round every other node: the fit may move the curve a
-/// tolerance off the path at a disc too.
+/// tolerance off the path at a disc too, and a settling game's grid a
+/// half diagonal more.
 fn disc_of(state: &GameState, want: &Rules) -> f64 {
-    want.node_clearance + curve::tolerance(state.board_size)
+    want.node_clearance + curve::tolerance(state.board_size) + erode::grid_snap(state)
 }
 
 /// The taut path for `mv` through the eroded face, in the homotopy class
@@ -880,7 +881,10 @@ pub(crate) fn finish(
     let path = densify(&path, clearance);
     let segments = curve::fit(&path, tolerance);
     let flat = curve::flatten(&segments, tolerance);
-    let node = place_node(state, &segments, &flat, spacing).ok_or(Unroutable::NoSpot)?;
+    // A settling game rounds the node to the grid and back onto the
+    // rounded curve, two half diagonals of travel at most.
+    let apart = spacing + 2.0 * erode::grid_snap(state);
+    let node = place_node(state, &segments, &flat, apart).ok_or(Unroutable::NoSpot)?;
     let ends = [state.nodes[mv.a].position, state.nodes[mv.b].position];
     // Two passes the relaxation could not pull apart touch, and the fit
     // can cross where they touch: no room for both.
