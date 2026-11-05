@@ -2,8 +2,10 @@ import { readFile } from "node:fs/promises";
 import { expect, test, type Page } from "@playwright/test";
 import { HIGHLIGHT_COLOR, PLAYER_COLORS } from "../../web/render";
 import {
+  alongLine,
   awaitReply,
   awayFrom,
+  boardSettled,
   colourPixelsNear,
   frameOf,
   nodeOnScreen,
@@ -46,9 +48,11 @@ test("hovering a row rings its nodes and outlines its line until the pointer lea
   test.skip(hasTouch(), "hover needs a mouse");
   await openBoard(page);
   await playExchange(page);
+  await boardSettled(page);
   const a = await nodeOnScreen(page, 0, 4);
   const b = await nodeOnScreen(page, 1, 4);
-  const quarter = { x: a.x + (b.x - a.x) / 4, y: a.y + (b.y - a.y) / 4 };
+  // A quarter of the way along the settled line, which bows off the chord.
+  const quarter = (await alongLine(page, 0, 0.25)).at;
   const blue = PLAYER_COLORS.human;
   await expectNoRing(page, a);
   const plain = await colourPixelsNear(page, quarter, 6, blue);

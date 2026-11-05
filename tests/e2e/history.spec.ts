@@ -49,10 +49,11 @@ const current = (page: Page) => page.locator("#moveList [aria-current]");
 
 // Link payload lengths in characters, after the hash prefix: one exchange
 // on either board, and the nine move game with the AI's reply to it,
-// measured with headroom. One exchange runs to about 62, since the chord
-// on the sunflower spans a third of the board; the nine move game runs
-// to 484, its raster-era AI lines being nothing the router redraws.
-const EXCHANGE_LINK_BUDGET = 70;
+// measured with headroom. One exchange runs to about 87 with both moves
+// as geometry, since the chord on the sunflower spans a third of the
+// board; the nine move game runs to 484, its raster-era AI lines being
+// nothing the router redraws.
+const EXCHANGE_LINK_BUDGET = 95;
 const NINE_MOVE_LINK_BUDGET = 520;
 const NINE_MOVES = "fixtures/saved/nine-moves-4n-1000.json";
 // A version 1 link: one exchange on the 500 board.
@@ -142,10 +143,12 @@ test("jumping to a board where the AI is to move enters review and keeps the tai
   await expect(current(page)).toHaveText(/^2\. AI/);
 });
 
-// The exchange travels as topology, so the visitor's router redraws the
-// lines and settles from there; the share is rehearsed until that settled
-// board sits within DRIFT_TOLERANCE of the sharer's, node for node, in
-// units of a 1000 board.
+// The share is rehearsed until the visitor's settled board sits within
+// DRIFT_TOLERANCE of the sharer's, node for node, in units of a 1000
+// board. A move that travels as topology gives the visitor the router's
+// curve, within the fit tolerance of the stroke but not the same, and
+// the settle carries that difference past the tolerance, so both moves
+// of the exchange go as geometry.
 const SHARED_BOARD_DRIFT_UNITS = DRIFT_TOLERANCE;
 
 test("a share link reopens the game in review and steps through it", async ({ page, browser }) => {
@@ -158,7 +161,7 @@ test("a share link reopens the game in review and steps through it", async ({ pa
   expect(payload).toBeLessThan(EXCHANGE_LINK_BUDGET);
   const shared = decodeRecord(url.slice(url.indexOf(HASH_PREFIX) + HASH_PREFIX.length));
   expect(shared?.settleVersion).toBeGreaterThan(0);
-  expect(shared?.moves.map(hasStroke)).toEqual([false, false]);
+  expect(shared?.moves.map(hasStroke)).toEqual([true, true]);
   await shot(page, "history-shared-source");
 
   const visitor = await browser.newContext(visitorOptions());
