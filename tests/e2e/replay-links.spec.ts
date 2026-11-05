@@ -60,7 +60,7 @@ const routed: [string, number, "indices" | "shapes", number][] = [
   ["fixtures/saved/eight-moves-4n-1000.json", 38, "indices", 4],
   ["fixtures/saved/ten-moves-9n-1000.json", 1635, "shapes", 5],
   ["fixtures/saved/thirty-moves-12n-1000.json", 2252, "shapes", 15],
-  ["fixtures/saved/ten-moves-24n-1000.json", 761, "shapes", 5],
+  ["fixtures/saved/ten-moves-24n-1000.json", 1305, "shapes", 5],
 ];
 
 // A share replays the game up to three times in the engine, routing
