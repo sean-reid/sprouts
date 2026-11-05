@@ -66,14 +66,21 @@ export class View {
     this.anchor(this.toWorld(screen), screen, this.scale * factor);
   }
 
-  // Sets the scale and places the given world point under the given screen point.
-  anchor(world: Point, screen: Point, scale: number): void {
+  // Sets the scale and places the given world point under the given screen
+  // point. Unbounded, the board may leave a gap at an edge until rebound.
+  anchor(world: Point, screen: Point, scale: number, bounded = true): void {
     const fit = this.fitScale;
     this.scale = Math.min(fit * MAX_ZOOM, Math.max(fit, scale));
     this.tx = screen.x - world.x * this.scale;
     this.ty = screen.y - world.y * this.scale;
-    this.clamp();
+    if (bounded) this.clamp();
     this.emit();
+  }
+
+  rebound(): void {
+    const { tx, ty } = this;
+    this.clamp();
+    if (tx !== this.tx || ty !== this.ty) this.emit();
   }
 
   panBy(dx: number, dy: number): void {
