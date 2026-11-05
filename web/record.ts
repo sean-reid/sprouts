@@ -1,4 +1,4 @@
-import type { Cubic } from "../pkg/sprouts";
+import type { Cubic, FaceMove } from "../pkg/sprouts";
 import type { GameRecord } from "./history";
 import type { Node } from "./state";
 
@@ -24,6 +24,10 @@ export interface MoveCache {
   index?: number;
   along?: number;
   refused?: true;
+  // How the move travels in a shapes link once a share has settled it, with
+  // the face move it travels as when it goes as topology.
+  shape?: "topology" | "geometry";
+  topology?: FaceMove;
 }
 
 export interface Fixture {

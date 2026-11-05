@@ -1054,7 +1054,12 @@ async function share(): Promise<void> {
         own.refused = true;
         delete own.indexed;
       }
+      if (move.shape) {
+        own.shape = move.shape;
+        if (move.topology) own.topology = move.topology;
+      }
     });
+    timeline.shapes = history.shapes;
     persist();
     const url = shareUrl(history);
     window.history.replaceState(null, "", url);
