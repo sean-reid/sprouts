@@ -2472,3 +2472,107 @@ fn saved_recordings_stay_live() {
         );
     }
 }
+
+/// Routes every listed move of every recorded position as the AI and as
+/// the human and prints one line per position and player: the fixture,
+/// the moves replayed, the player, the listed count, a 0/1 string of
+/// which listed moves drew in list order, and the refusals by kind. The
+/// positions are every prefix of every fixture under fixtures/routing,
+/// fixtures/undrawn, fixtures/topology, fixtures/settle and
+/// fixtures/saved, replayed as recorded, and a position lists at most
+/// its first 300 moves. Two routers' outputs line up move for move:
+/// `cargo test --release probe_fixed_position_room -- --ignored
+/// --nocapture`.
+#[test]
+#[ignore = "routes every listed move of every recorded position, run in release"]
+fn probe_fixed_position_room() {
+    const MOST_MOVES: usize = 300;
+    let mut totals = [[0usize; 7]; 2];
+    for dir in [
+        "fixtures/routing",
+        "fixtures/undrawn",
+        "fixtures/topology",
+        "fixtures/settle",
+        "fixtures/saved",
+    ] {
+        for path in fixture_paths(dir) {
+            let Ok(fixture) = crate::replay::load(&path) else {
+                continue;
+            };
+            let name = path.file_name().unwrap().to_string_lossy().to_string();
+            // Routing and topology fixtures were recorded under older rules
+            // and replay without validation; saved and settle records
+            // replay as the page does, and a prefix the engine refuses is
+            // skipped.
+            let recorded = dir == "fixtures/saved" || dir == "fixtures/settle";
+            for played in 0..=fixture.moves.len() {
+                let mut prefix = fixture.clone();
+                prefix.moves.truncate(played);
+                let base = if recorded {
+                    let replayed =
+                        std::panic::catch_unwind(|| crate::replay::play_as(&prefix, Player::Human));
+                    let Ok(base) = replayed else { continue };
+                    base
+                } else {
+                    let json = serde_json::to_string(&prefix).unwrap();
+                    let tmp = std::env::temp_dir().join(format!("fixed-{name}-{played}.json"));
+                    std::fs::write(&tmp, json).unwrap();
+                    let replayed = std::panic::catch_unwind(|| position(&tmp));
+                    let _ = std::fs::remove_file(&tmp);
+                    let Ok(base) = replayed else {
+                        eprintln!("skip\t{name}\t{played}");
+                        continue;
+                    };
+                    base
+                };
+                for (k, player) in [Player::AI, Player::Human].into_iter().enumerate() {
+                    let mut state = base.clone();
+                    state.current_player = player;
+                    let listed = state.face.search_moves();
+                    let mut bits = String::with_capacity(listed.len());
+                    let mut counts = [0usize; 7];
+                    for mv in listed.iter().take(MOST_MOVES) {
+                        let slot = match route(&state, mv) {
+                            Ok(_) => 0,
+                            Err(Unroutable::Room) => 1,
+                            Err(Unroutable::Shape(_)) => 2,
+                            Err(Unroutable::Topology) => 3,
+                            Err(Unroutable::Sides) => 4,
+                            Err(Unroutable::NoSpot) => 5,
+                            Err(Unroutable::Bug(_)) => 6,
+                        };
+                        counts[slot] += 1;
+                        bits.push(if slot == 0 { '1' } else { '0' });
+                    }
+                    for (t, c) in totals[k].iter_mut().zip(counts) {
+                        *t += c;
+                    }
+                    eprintln!(
+                        "pos\t{name}\t{played}\t{player:?}\t{}\t{bits}\t{}\t{}\t{}\t{}\t{}\t{}",
+                        listed.len().min(MOST_MOVES),
+                        counts[1],
+                        counts[2],
+                        counts[3],
+                        counts[4],
+                        counts[5],
+                        counts[6]
+                    );
+                }
+            }
+        }
+    }
+    for (k, player) in ["AI", "human"].into_iter().enumerate() {
+        let t = totals[k];
+        eprintln!(
+            "total\t{player}\tlisted {}\tdrawn {}\troom {}\tshape {}\ttopology {}\tsides {}\tnospot {}\tbug {}",
+            t.iter().sum::<usize>(),
+            t[0],
+            t[1],
+            t[2],
+            t[3],
+            t[4],
+            t[5],
+            t[6]
+        );
+    }
+}
