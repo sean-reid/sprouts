@@ -36,12 +36,12 @@ const fixtures = [
 // when the engine regenerates the whole game on a fresh board, and shapes
 // when the regenerated board refuses a move, as the nine-node and
 // thirty-move games do. The budget belongs to the recording: the payload
-// measured when the game was recorded (34, 1186 and 1868) with about 10
-// percent headroom.
+// measured when the game was recorded (34, 1186 and 1868) plus 10
+// percent, rounded up.
 const routed: [string, number, "indices" | "shapes", number][] = [
-  ["fixtures/saved/eight-moves-4n-1000.json", 40, "indices", 4],
+  ["fixtures/saved/eight-moves-4n-1000.json", 38, "indices", 4],
   ["fixtures/saved/ten-moves-9n-1000.json", 1305, "shapes", 5],
-  ["fixtures/saved/thirty-moves-12n-1000.json", 2050, "shapes", 15],
+  ["fixtures/saved/thirty-moves-12n-1000.json", 2055, "shapes", 15],
 ];
 
 // A share replays the game up to three times in the engine, routing
@@ -172,6 +172,12 @@ for (const [file, budget, form, topologyMoves] of routed) {
       // visitor's link is the sharer's.
       expect(again.payload).toBe(payload);
       await visitor.close();
+      // The sharer opening their own link lands on the live game, since
+      // the saved record indexes to the link's moves.
+      await page.goto(url);
+      await expect(page.locator("#status")).toHaveText("Your turn!", { timeout: 240_000 });
+      expect(page.url()).not.toContain("#");
+      await expect(entries(page)).toHaveCount(total);
       return;
     }
     expect(relinked.moves.map(hasStroke)).toEqual(linked.moves.map(hasStroke));
