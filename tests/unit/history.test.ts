@@ -1201,7 +1201,7 @@ describe("a link that names moves by index", () => {
   it("drops the shapes cache when a move is added or the list is truncated", async () => {
     const { engine, seen } = shapesEngine();
     const { history } = await prepareLink(refusedGame(), engine);
-    expect(history.shaped).toBe(true);
+    expect(history.shaped(false)).toBe(true);
     const grown = history.clone();
     grown.push({
       fromNode: 4,
@@ -1210,12 +1210,12 @@ describe("a link that names moves by index", () => {
       newNodePos: at(500, 575),
     });
     expect(grown.shapes).toBeUndefined();
-    expect(grown.shaped).toBe(false);
+    expect(grown.shaped(false)).toBe(false);
     const cut = history.clone();
     cut.cursor = 1;
     cut.truncate();
     expect(cut.shapes).toBeUndefined();
-    expect(cut.shaped).toBe(false);
+    expect(cut.shaped(false)).toBe(false);
     await prepareLink(history, engine);
     expect(seen.classified).toBe(1);
     // The one move left carries its index, so the cut game goes as indices.
@@ -1242,9 +1242,37 @@ describe("a link that names moves by index", () => {
     expect(back.moves.map((m) => m.shape)).toEqual([undefined, undefined]);
     expect(back.moves.map((m) => m.topology)).toEqual([undefined, undefined]);
     const old = History.from(refusedGame().record());
-    expect(old.shaped).toBe(false);
+    expect(old.shaped(false)).toBe(false);
     await prepareLink(old, engine);
     expect(seen.classified).toBe(2);
+  });
+
+  it("checks the board on screen when a cached share never saw one", async () => {
+    // The engine settles the rehearsed board away from the one on screen.
+    const seen = { rehearsed: 0 };
+    const rehearsed = [at(100, 100), at(900, 100), at(900, 900), at(100, 900), at(500, 500)];
+    const engine: LinkEngine = {
+      classify: (plan) => Promise.resolve({ topology: plan.moves.map(() => secondFace) }),
+      index: noIndex,
+      rehearse: () => {
+        seen.rehearsed++;
+        return Promise.resolve({ refused: undefined, nodes: [], settled: rehearsed });
+      },
+    };
+    const game = refusedGame();
+    const review = await prepareLink(game, engine);
+    expect(review.mismatch).toBeUndefined();
+    expect(review.history.shapes).toEqual({ moves: 2 });
+    const onScreen = rehearsed.map((p, i) => (i === 4 ? at(p.x, p.y + DRIFT_TOLERANCE + 1) : p));
+    const atEnd = await prepareLink(review.history, engine, onScreen);
+    expect(seen.rehearsed).toBeGreaterThan(1);
+    expect(atEnd.mismatch).toBe(true);
+    expect(atEnd.history.shapes).toMatchObject({ moves: 2, checked: true, mismatch: true });
+    // A cache that checked the board serves a share from a review position.
+    const count = seen.rehearsed;
+    const later = await prepareLink(atEnd.history, engine);
+    expect(seen.rehearsed).toBe(count);
+    expect(later.mismatch).toBe(true);
   });
 
   it("knows an own link from the cached indices without the engine", async () => {

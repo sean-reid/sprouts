@@ -53,10 +53,12 @@ export interface GameRecord extends Omit<Fixture, "moves"> {
 }
 
 // What a share settled for the shapes link of this exact move list: the
-// move count and the warnings it ended with; each move's form sits in
-// its cache. Any change to the move list drops it.
+// move count, whether the board on screen was checked against the
+// rehearsed one, and the warnings it ended with; each move's form sits
+// in its cache. Any change to the move list drops it.
 export interface ShapesCache {
   moves: number;
+  checked?: true;
   mismatch?: boolean;
   refusedAt?: number;
 }
@@ -278,11 +280,13 @@ export class History {
     this.shapes = undefined;
   }
 
-  // Whether the shapes a share settled still describe this move list.
-  get shaped(): boolean {
+  // Whether the shapes a share settled still describe this move list; a
+  // share with the board on screen needs a cache that checked it too.
+  shaped(withBoard: boolean): boolean {
     return (
       this.shapes !== undefined &&
       this.shapes.moves === this.moves.length &&
+      (!withBoard || this.shapes.checked === true) &&
       this.moves.every((move) => move.shape && (move.shape === "geometry" || move.topology))
     );
   }
@@ -553,10 +557,12 @@ function asShapes(value: unknown, count: number): ShapesCache | null {
   if (typeof value !== "object" || value === null) return null;
   const c = value as Record<string, unknown>;
   if (!isCount(c.moves) || c.moves > count) return null;
+  if (c.checked !== undefined && c.checked !== true) return null;
   if (c.mismatch !== undefined && typeof c.mismatch !== "boolean") return null;
   if (c.refusedAt !== undefined && !(isCount(c.refusedAt) && c.refusedAt < count)) return null;
   return {
     moves: c.moves,
+    ...(c.checked ? { checked: true as const } : {}),
     ...(c.mismatch !== undefined ? { mismatch: c.mismatch } : {}),
     ...(c.refusedAt !== undefined ? { refusedAt: c.refusedAt } : {}),
   };
@@ -1070,7 +1076,7 @@ export async function prepareLink(
   const history = source.clone();
   if (history.indexed) return { history };
   const refused = history.moves.some((move) => move.refused);
-  if (refused && history.shaped) {
+  if (refused && history.shaped(settled !== undefined)) {
     for (const move of history.moves) if (move.shape === "geometry") delete move.topology;
     const { mismatch, refusedAt } = history.shapes!;
     return {
@@ -1081,7 +1087,11 @@ export async function prepareLink(
   }
   const settle = (outcome: { refusedAt?: number; mismatch?: boolean }) => {
     for (const move of history.moves) move.shape = move.topology ? "topology" : "geometry";
-    history.shapes = { moves: history.moves.length, ...outcome };
+    history.shapes = {
+      moves: history.moves.length,
+      ...(settled !== undefined ? { checked: true as const } : {}),
+      ...outcome,
+    };
     return { history, ...outcome };
   };
   const plan = classification(history);
