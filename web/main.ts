@@ -1261,14 +1261,16 @@ function placeUndo(): void {
 }
 
 // An index link to the saved game: the cached indices are compared to the
-// link's, or the engine indexes the saved record. The worker answers every
-// call through a game instance, so one is built on the saved record's
-// header first. A failure reads as another game, which the link then opens.
+// link's, or a worker of its own indexes the saved record, so the game the
+// page shows is never touched. That worker answers every call through a
+// game instance, so one is built on the saved record's header first. A
+// failure reads as another game, which the link then opens.
 async function ownIndexedGame(saved: GameRecord, linked: GameRecord): Promise<boolean> {
   if (!linked.moves.every(isIndexed) || saved.moves.length < linked.moves.length) return false;
+  const checker = new Engine(() => {});
   try {
     const layout = saved.nodes ? { nodes: saved.nodes.map(([x, y]) => ({ x, y })) } : undefined;
-    await engine.call(
+    await checker.call(
       "init",
       saved.initialNodes,
       saved.boardSize,
@@ -1276,9 +1278,11 @@ async function ownIndexedGame(saved: GameRecord, linked: GameRecord): Promise<bo
       layout,
       saved.settleVersion,
     );
-    return await sameIndexedGame(saved, linked, (plan) => engine.call("indexMoves", plan));
+    return await sameIndexedGame(saved, linked, (plan) => checker.call("indexMoves", plan));
   } catch {
     return false;
+  } finally {
+    checker.dispose();
   }
 }
 

@@ -51,6 +51,13 @@ export class Engine {
     return this.send(lane, method, args);
   }
 
+  // Ends the worker; pending requests never settle.
+  dispose(): void {
+    for (const entry of this.pending.values()) clearTimeout(entry.timer);
+    this.pending.clear();
+    this.worker.terminate();
+  }
+
   cancel(lane: string): void {
     const id = this.lanes.get(lane);
     if (id === undefined) return;

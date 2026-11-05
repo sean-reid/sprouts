@@ -1,7 +1,15 @@
 import { readFileSync } from "node:fs";
 import { basename } from "node:path";
 import { expect, test, type BrowserContextOptions, type Page } from "@playwright/test";
-import { decodeRecord, DRIFT_TOLERANCE, hasStroke, isIndexed, sameGame } from "../../web/history";
+import {
+  decodeRecord,
+  DRIFT_TOLERANCE,
+  encodeRecord,
+  hasStroke,
+  History,
+  isIndexed,
+  sameGame,
+} from "../../web/history";
 import type { Fixture } from "../../web/record";
 import { HIGHLIGHT_COLOR } from "../../web/render";
 import {
@@ -271,11 +279,50 @@ test("Share is refused during the AI's turn and the move still lands", async ({ 
   await clickAway(page);
   await expect(page.locator("#status")).toHaveText(/AI is thinking/);
   await expect(page.locator("#shareBtn")).toBeDisabled();
-  await page.locator("#shareBtn").click({ force: true });
+  // A disabled button never dispatches a click, so the attribute comes off
+  // and the guard in share() is what refuses the click.
+  await page.evaluate(() => document.getElementById("shareBtn")?.removeAttribute("disabled"));
+  await page.locator("#shareBtn").click();
   await expect(page.locator("#status")).toHaveText("Your turn!", { timeout: 60_000 });
   await expect(page.locator("#moveList li")).toHaveCount(2);
   expect(await requestCount(page, "indexMoves")).toBe(0);
   await expect(page.locator("#shareBtn")).toBeEnabled();
+});
+
+// A long index link over a saved game with the same header is opened in
+// review first and checked against the saved record in a worker of its
+// own, so when it turns out to be another game the review still steps.
+test("a long index link that is not the saved game opens in review and steps", async ({ page }) => {
+  test.setTimeout(600_000);
+  const file = "fixtures/saved/thirty-moves-12n-1000.json";
+  const fixture = JSON.parse(readFileSync(file, "utf8")) as Fixture;
+  const saved = { firstPlayer: "human", cursor: fixture.moves.length, ...fixture };
+  // Fifteen moves on the same header, each the first move the engine
+  // lists, which is not the saved game.
+  const other = new History(fixture.initialNodes, fixture.boardSize, "human", 1);
+  for (let i = 0; i < 15; i++) {
+    other.push({ fromNode: 0, toNode: 0, polyline: [{ x: 0, y: 0 }], newNodePos: { x: 0, y: 0 } });
+    other.moves[i]!.indexed = { index: 0, along: 0 };
+  }
+  await page.addInitScript(interceptWorkerMessages);
+  await page.addInitScript((s) => localStorage.setItem("sprouts.game", s), JSON.stringify(saved));
+  await page.goto("/" + HASH_PREFIX + encodeRecord(other));
+  await expect(page.locator("#status")).toHaveText(/Checking whether this is your saved game/, {
+    timeout: 240_000,
+  });
+  await expect(page.locator("#status")).toHaveText(/^Reviewing: move \d+ of \d+|^Replay stopped/, {
+    timeout: 240_000,
+  });
+  expect(page.url()).toContain("#");
+  const rows = await page.locator("#moveList li").count();
+  expect(rows).toBeGreaterThan(1);
+  await page.locator("#backBtn").click();
+  await expect(page.locator("#status")).toHaveText(new RegExp(`^Reviewing: move ${rows - 1} of`), {
+    timeout: 60_000,
+  });
+  // The saved game is untouched.
+  const kept = await page.evaluate(() => JSON.parse(localStorage.getItem("sprouts.game") ?? "{}"));
+  expect((kept as { moves: unknown[] }).moves).toHaveLength(fixture.moves.length);
 });
 
 // A version 4 link of two moves, the second a face move, with its router
