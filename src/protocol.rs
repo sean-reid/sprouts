@@ -431,7 +431,7 @@ fn cut_off(model: &face::FaceModel) -> usize {
 /// Changes whenever the router draws a different curve for the same face
 /// move. A share link carries it, so a page with another router refuses
 /// the link instead of drawing a game the sharer never saw.
-pub const ROUTER_VERSION: u8 = 4;
+pub const ROUTER_VERSION: u8 = 5;
 
 /// Changes whenever the settle moves a board differently. Records and
 /// links carry the version they were played under; 0 is a game recorded
