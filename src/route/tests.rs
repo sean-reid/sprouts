@@ -302,10 +302,11 @@ const CASES: u32 = 4;
 const CASES: u32 = 24;
 const SEED: u64 = 7;
 /// Read-back mismatches the seeded sweep shows as the AI and as the
-/// human. The sweep is seeded and platform-exact, so these are the
-/// measured values, and a router change that moves them is recorded here.
-const AI_TOPOLOGY_CEILING: usize = 1;
-const HUMAN_TOPOLOGY_CEILING: usize = 3;
+/// human: none, since a path whose uncrossing or relaxation moves a
+/// piece is refused as twisted before the fit. The sweep is seeded and
+/// platform-exact, so a router change that moves these is recorded here.
+const AI_TOPOLOGY_CEILING: usize = 0;
+const HUMAN_TOPOLOGY_CEILING: usize = 0;
 /// Most states a corridor search that found its path may hold in one
 /// sweep game. The fenced search peaks near 5,000; the search without
 /// fences, run again when a fenced corridor fails in the relaxation or
