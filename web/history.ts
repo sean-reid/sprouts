@@ -876,11 +876,11 @@ export interface LinkEngine {
 }
 
 // The game as the link will carry it, worked out on a copy. An index
-// link is tried first: the engine names every move by index and the
-// link is replayed on a fresh board, which routes and settles each
-// move itself, so the visitor's board is that board rather than this
-// one; a refused move or a game the engine cannot index falls back
-// to shapes. For shapes the
+// link is tried first: the engine names every move by index while
+// replaying them on a fresh board, which routes and settles each move
+// itself, so the visitor's board is that board rather than this one;
+// a game the engine cannot index that way falls back to shapes, and
+// only that failure is caught. For shapes the
 // engine says which drawn moves the router redraws, then the link
 // is replayed as decoded and any topology move the replay refuses,
 // or lands its node more than DRIFT_TOLERANCE from the recorded
@@ -907,18 +907,14 @@ export async function prepareLink(
   for (const move of history.moves) delete move.indexed;
   const plan = classification(history);
   if (plan) {
-    try {
-      const { moves } = await engine.index(plan);
-      moves.forEach((indexed, i) => {
-        const move = history.moves[i];
-        if (move) move.indexed = indexed;
+    const indexed = await engine.index(plan).catch(() => undefined);
+    if (indexed) {
+      indexed.moves.forEach((move, i) => {
+        const target = history.moves[i];
+        if (target) target.indexed = move;
       });
-      const link = rehearsal(history);
-      if (link && (await engine.rehearse(link)).refused === undefined) return { history };
-    } catch {
-      // A game the engine cannot index travels as shapes.
+      return { history };
     }
-    for (const move of history.moves) delete move.indexed;
     try {
       const { topology } = await engine.classify(plan);
       topology.forEach((face, i) => {
@@ -962,6 +958,41 @@ export async function prepareLink(
     while (blamed >= 0 && !demote(history, blamed)) blamed--;
     if (blamed < 0) return { history, refusedAt: refused };
   }
+}
+
+// Whether an index link names the saved game: the two carry the same
+// header and the engine indexes the saved record to the link's moves.
+// A link's indices say nothing about a game without the engine, so a
+// saved record that cannot be indexed is another game.
+export async function sameIndexedGame(
+  saved: GameRecord,
+  linked: GameRecord,
+  index: (plan: Classification) => Promise<Indexed>,
+): Promise<boolean> {
+  if (!linked.moves.every(isIndexed) || saved.moves.length !== linked.moves.length) return false;
+  if (saved.initialNodes !== linked.initialNodes || saved.boardSize !== linked.boardSize) {
+    return false;
+  }
+  if (saved.firstPlayer !== linked.firstPlayer || saved.settleVersion !== linked.settleVersion) {
+    return false;
+  }
+  const quantum = LINK_QUANTUM * scaleOf(saved.boardSize);
+  if (!sameLayout(saved.nodes, linked.nodes, saved.initialNodes, saved.boardSize, quantum)) {
+    return false;
+  }
+  const plan = classification(History.from(saved));
+  if (!plan) return false;
+  const indexed = await index(plan).catch(() => undefined);
+  if (!indexed || indexed.moves.length !== linked.moves.length) return false;
+  return indexed.moves.every((move, i) => {
+    const other = linked.moves[i];
+    return (
+      other !== undefined &&
+      isIndexed(other) &&
+      other.index === move.index &&
+      other.along === move.along
+    );
+  });
 }
 
 export function shareUrl(history: History): string {

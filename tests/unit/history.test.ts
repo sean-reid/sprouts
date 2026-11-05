@@ -1,7 +1,7 @@
 import { readdirSync, readFileSync } from "node:fs";
 import { basename, join } from "node:path";
 import { describe, expect, it } from "vitest";
-import type { Cubic, FaceMove, Line, Point, Rehearsal } from "../../pkg/sprouts";
+import type { Classification, Cubic, FaceMove, Line, Point, Rehearsal } from "../../pkg/sprouts";
 import type { Indexed } from "../../pkg/sprouts";
 import {
   CURVE_TOLERANCE,
@@ -23,6 +23,7 @@ import {
   ROUTER_VERSION,
   SETTLE_VERSION,
   sameGame,
+  sameIndexedGame,
   StaleLink,
   STROKE_TOLERANCE,
   type GameRecord,
@@ -860,17 +861,12 @@ describe("a link that names moves by index", () => {
     expect(visitor.positionOf(4)).toEqual(at(500, 500));
   });
 
-  it("prepares an index link when the regenerated board takes every move", async () => {
-    const { engine, seen } = indexing([undefined]);
+  it("prepares an index link when the engine regenerates every move", async () => {
+    const { engine, seen } = indexing([]);
     const { history, refusedAt, mismatch } = await prepareLink(twoMoves(), engine);
     expect(refusedAt).toBeUndefined();
     expect(mismatch).toBeUndefined();
-    expect(seen).toEqual({
-      indexed: 1,
-      classified: 0,
-      rehearsed: 1,
-      kinds: [["indexed", "indexed"]],
-    });
+    expect(seen).toEqual({ indexed: 1, classified: 0, rehearsed: 0, kinds: [] });
     expect(history.moves.map((m) => m.indexed)).toEqual([
       { index: 3, along: 128 },
       { index: 200, along: 0 },
@@ -878,33 +874,74 @@ describe("a link that names moves by index", () => {
     expect(bytesOf(encodeRecord(history))[0]).toBe(6);
   });
 
-  it("falls back to shapes when the regenerated board refuses a move", async () => {
-    const { engine, seen } = indexing([1, undefined]);
-    const { history, refusedAt } = await prepareLink(twoMoves(), engine);
-    expect(refusedAt).toBeUndefined();
-    expect(seen.indexed).toBe(1);
-    expect(seen.classified).toBe(1);
-    expect(seen.kinds).toEqual([
-      ["indexed", "indexed"],
-      ["drawn", "drawn"],
-    ]);
-    expect(history.moves.every((m) => m.indexed === undefined)).toBe(true);
-    expect(bytesOf(encodeRecord(history))[0]).toBe(LINK_VERSION);
-  });
-
   it("falls back to shapes when the engine cannot index the game", async () => {
-    const seen = { rehearsed: 0 };
+    const seen = { rehearsed: 0, classified: 0, kinds: [] as string[][] };
     const engine: LinkEngine = {
-      classify: (plan) => Promise.resolve({ topology: plan.moves.map(() => undefined) }),
-      index: noIndex,
-      rehearse: () => {
+      classify: (plan) => {
+        seen.classified++;
+        return Promise.resolve({ topology: plan.moves.map(() => undefined) });
+      },
+      index: () => Promise.reject(new Error("move 1: the regenerated board refuses it")),
+      rehearse: (plan) => {
         seen.rehearsed++;
+        seen.kinds.push(plan.moves.map((m) => m.kind));
         return Promise.resolve({ refused: undefined, nodes: [], settled: [] });
       },
     };
     const { history } = await prepareLink(twoMoves(), engine);
-    expect(seen.rehearsed).toBe(1);
+    expect(seen).toEqual({ rehearsed: 1, classified: 1, kinds: [["drawn", "drawn"]] });
+    expect(history.moves.every((m) => m.indexed === undefined)).toBe(true);
     expect(bytesOf(encodeRecord(history))[0]).toBe(LINK_VERSION);
+  });
+
+  it("passes a failing shapes rehearsal on after the index fell back", async () => {
+    const engine: LinkEngine = {
+      classify: (plan) => Promise.resolve({ topology: plan.moves.map(() => undefined) }),
+      index: noIndex,
+      rehearse: () => Promise.reject(new Error("Worker call 'rehearse' timed out")),
+    };
+    await expect(prepareLink(twoMoves(), engine)).rejects.toThrow(/timed out/);
+  });
+
+  it("knows an index link of the saved game by indexing the record", async () => {
+    const saved = twoMoves().record();
+    const linked = twoMoves();
+    linked.moves[0]!.indexed = { index: 3, along: 128 };
+    linked.moves[1]!.indexed = { index: 200, along: 0 };
+    const link = decodeRecord(encodeRecord(linked))!;
+    const calls: Classification[] = [];
+    const index = (plan: Classification) => {
+      calls.push(plan);
+      return Promise.resolve({
+        moves: [
+          { index: 3, along: 128 },
+          { index: 200, along: 0 },
+        ],
+      });
+    };
+    expect(await sameIndexedGame(saved, link, index)).toBe(true);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.moves).toHaveLength(2);
+    const otherIndices = () =>
+      Promise.resolve({
+        moves: [
+          { index: 3, along: 128 },
+          { index: 201, along: 0 },
+        ],
+      });
+    expect(await sameIndexedGame(saved, link, otherIndices)).toBe(false);
+    const failing = () => Promise.reject(new Error("no index"));
+    expect(await sameIndexedGame(saved, link, failing)).toBe(false);
+    // A different header is another game before the engine is asked.
+    const shorter = { ...saved, moves: saved.moves.slice(0, 1) };
+    expect(await sameIndexedGame(shorter, link, index)).toBe(false);
+    expect(await sameIndexedGame({ ...saved, firstPlayer: "ai" }, link, index)).toBe(false);
+    expect(calls).toHaveLength(1);
+    // A shapes link is not compared this way.
+    expect(await sameIndexedGame(saved, decodeRecord(encodeRecord(twoMoves()))!, index)).toBe(
+      false,
+    );
+    expect(sameGame(saved, link)).toBe(false);
   });
 
   it("drops indices a history arrived with before indexing it again", async () => {
