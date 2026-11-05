@@ -46,6 +46,29 @@ export interface GameRecord extends Omit<Fixture, "moves"> {
   // The settle the game was played under; 0 replays with none.
   settleVersion: number;
   moves: RecordMove[];
+  // The router, move list and settle the moves' caches were worked out
+  // under; a record from other versions loads with no cache.
+  cacheVersions?: CacheVersions;
+}
+
+export interface CacheVersions {
+  router: number;
+  list: number;
+  settle: number;
+}
+
+function cacheVersions(): CacheVersions {
+  return { router: ROUTER_VERSION, list: MOVE_LIST_VERSION, settle: SETTLE_VERSION };
+}
+
+function currentVersions(versions: CacheVersions | undefined): boolean {
+  const now = cacheVersions();
+  return (
+    versions !== undefined &&
+    versions.router === now.router &&
+    versions.list === now.list &&
+    versions.settle === now.settle
+  );
 }
 
 export function hasStroke(move: RecordMove): move is FixtureMove {
@@ -168,6 +191,14 @@ export class History {
     );
     history.nodes = record.nodes ?? null;
     history.moves = record.moves.map(fromRecordMove);
+    // A cache from other versions is dropped; a move a link carries by
+    // index alone keeps its index, which is the move itself.
+    if (!currentVersions(record.cacheVersions)) {
+      for (const move of history.moves.filter(drawn)) {
+        delete move.indexed;
+        delete move.refused;
+      }
+    }
     history.cursor = Math.min(Math.max(record.cursor, 0), history.moves.length);
     return history;
   }
@@ -201,30 +232,11 @@ export class History {
     this.cursor = this.moves.length;
   }
 
-  // Forgets the indices of move number index + 1 and every move after it:
-  // an undo may change what comes before them, and the next share indexes
-  // again from here.
-  invalidateFrom(index: number): void {
-    for (const move of this.moves.slice(index)) {
-      delete move.indexed;
-      delete move.refused;
-    }
-  }
-
-  // Whether every move carries the index the link would send.
+  // Whether every move carries the index the link would send. A move's
+  // index depends only on the moves before it, so the moves a new move or
+  // a truncation discards take their caches with them and the rest hold.
   get indexed(): boolean {
     return this.moves.length > 0 && this.moves.every((move) => move.indexed);
-  }
-
-  // The indices of the leading moves that have them, which a share hands
-  // the engine so it indexes from the first move without one.
-  cachedIndices(): IndexedMove[] {
-    const cached: IndexedMove[] = [];
-    for (const move of this.moves) {
-      if (!move.indexed) break;
-      cached.push(move.indexed);
-    }
-    return cached;
   }
 
   // A copy to work on while the game goes on.
@@ -326,6 +338,9 @@ export class History {
       settleVersion: this.settleVersion,
       moves: this.moves.map(toRecordMove),
       cursor: this.cursor,
+      ...(this.moves.some((move) => move.indexed || move.refused)
+        ? { cacheVersions: cacheVersions() }
+        : {}),
     };
   }
 }
@@ -384,8 +399,11 @@ function toRecordMove(move: RecordedMove): FixtureMove {
     newNode: [move.newNodePos.x, move.newNodePos.y],
     ...(move.cutOff !== undefined ? { cutOff: move.cutOff } : {}),
     ...(move.segments ? { segments: move.segments } : {}),
-    ...(move.indexed ? { index: move.indexed.index, along: move.indexed.along } : {}),
-    ...(move.refused ? { refused: true as const } : {}),
+    ...(move.indexed
+      ? { cache: { index: move.indexed.index, along: move.indexed.along } }
+      : move.refused
+        ? { cache: { refused: true as const } }
+        : {}),
   };
 }
 
@@ -407,10 +425,10 @@ function fromRecordMove(move: RecordMove): RecordedMove {
       newNodePos: { x: move.newNode[0], y: move.newNode[1] },
       ...(move.cutOff !== undefined ? { cutOff: move.cutOff } : {}),
       ...(move.segments ? { segments: move.segments } : {}),
-      ...(move.index !== undefined && move.along !== undefined
-        ? { indexed: { index: move.index, along: move.along } }
+      ...(move.cache?.index !== undefined && move.cache.along !== undefined
+        ? { indexed: { index: move.cache.index, along: move.cache.along } }
         : {}),
-      ...(move.refused ? { refused: true as const } : {}),
+      ...(move.cache?.refused ? { refused: true as const } : {}),
     };
   }
   return {
@@ -467,6 +485,8 @@ function asRecord(value: unknown): GameRecord | null {
   // another board.
   const settleVersion = v.settleVersion ?? 0;
   if (!isCount(settleVersion) || settleVersion > SETTLE_VERSION) return null;
+  const cacheVersions = v.cacheVersions === undefined ? undefined : asVersions(v.cacheVersions);
+  if (v.cacheVersions !== undefined && !cacheVersions) return null;
   return {
     version: 1,
     initialNodes: v.initialNodes,
@@ -477,7 +497,15 @@ function asRecord(value: unknown): GameRecord | null {
     settleVersion,
     moves: v.moves,
     cursor: v.cursor,
+    ...(cacheVersions ? { cacheVersions } : {}),
   };
+}
+
+function asVersions(value: unknown): CacheVersions | null {
+  if (typeof value !== "object" || value === null) return null;
+  const c = value as Record<string, unknown>;
+  if (!isCount(c.router) || !isCount(c.list) || !isCount(c.settle)) return null;
+  return { router: c.router, list: c.list, settle: c.settle };
 }
 
 function isCount(value: unknown): value is number {
@@ -511,9 +539,7 @@ function isRecordMove(value: unknown, nodes: number, halfEdges: number): value i
   if (!isCount(m.from) || !isCount(m.to) || m.from >= nodes || m.to >= nodes) return false;
   if ("face" in m) return isPair(m.node) && isFace(m.face, m.from, m.to, nodes, halfEdges);
   if (m.cutOff !== undefined && !isCount(m.cutOff)) return false;
-  if (m.index !== undefined && !isCount(m.index)) return false;
-  if (m.along !== undefined && !(isCount(m.along) && m.along <= 255)) return false;
-  if (m.refused !== undefined && m.refused !== true) return false;
+  if (m.cache !== undefined && !isMoveCache(m.cache)) return false;
   return (
     Array.isArray(m.polyline) &&
     m.polyline.length >= 2 &&
@@ -521,6 +547,15 @@ function isRecordMove(value: unknown, nodes: number, halfEdges: number): value i
     isPair(m.newNode) &&
     (m.segments === undefined || isSegments(m.segments))
   );
+}
+
+function isMoveCache(value: unknown): boolean {
+  if (typeof value !== "object" || value === null) return false;
+  const c = value as Record<string, unknown>;
+  if (c.index !== undefined && !isCount(c.index)) return false;
+  if (c.along !== undefined && !(isCount(c.along) && c.along <= 255)) return false;
+  if (c.refused !== undefined && c.refused !== true) return false;
+  return true;
 }
 
 function isSegments(value: unknown): value is Cubic[] {
@@ -934,9 +969,9 @@ export interface LinkEngine {
 // link comes first: a game whose every move carries an index from an
 // earlier share goes out at once, a game with a move the regenerated
 // board refused goes as shapes at once, and otherwise the engine indexes
-// the moves past the cached ones while replaying them on a fresh board,
-// so the visitor's board is that board rather than this one; only that
-// call's failure is caught. For shapes the
+// the whole game while replaying it on a fresh board, so the visitor's
+// board is that board rather than this one; only that call's failure is
+// caught. For shapes the
 // engine says which drawn moves the router redraws, then the link
 // is replayed as decoded and any topology move the replay refuses,
 // or lands its node more than DRIFT_TOLERANCE from the recorded
@@ -963,7 +998,6 @@ export async function prepareLink(
   if (history.indexed) return { history };
   const plan = classification(history);
   if (plan && !history.moves.some((move) => move.refused)) {
-    plan.cached = history.cachedIndices();
     const indexed = await engine.index(plan).catch(() => undefined);
     if (indexed) {
       history.moves.forEach((move, i) => setIndexed(move, indexed.moves[i] ?? false));
@@ -1054,7 +1088,6 @@ export async function sameIndexedGame(
   if (cached.indexed) return same(cached.moves.map((move) => move.indexed!));
   const plan = classification(cached);
   if (!plan) return false;
-  plan.cached = cached.cachedIndices();
   const indexed = await index(plan).catch(() => undefined);
   return indexed !== undefined && indexed.refused === undefined && same(indexed.moves);
 }

@@ -11,6 +11,9 @@ import {
   interceptWorkerMessages,
   recordNodesOnScreen,
   colourPixelsNear,
+  lastRequestArgs,
+  openBoard,
+  playExchange,
   requestCount,
   rowIds,
   savedRecord,
@@ -237,6 +240,23 @@ for (const [file, budget, form, topologyMoves] of routed) {
     await visitor.close();
   });
 }
+
+// A new move after an undo discards the moves ahead with their cached
+// indices, so the next share indexes the whole game again.
+test("a share after an undo and a new move indexes the whole game again", async ({ page }) => {
+  test.setTimeout(300_000);
+  await openBoard(page);
+  await playExchange(page);
+  await share(page, "exchange-payload-chars", SHARE_WAIT);
+  expect(await requestCount(page, "indexMoves")).toBe(1);
+  await page.locator("#undoBtn").click();
+  await expect(page.locator("#status")).toHaveText("Move undone: your turn");
+  await playExchange(page);
+  await share(page, "exchange-again-payload-chars", SHARE_WAIT);
+  expect(await requestCount(page, "indexMoves")).toBe(2);
+  const [plan] = (await lastRequestArgs(page, "indexMoves")) as [{ moves: unknown[] }];
+  expect(plan.moves).toHaveLength(2);
+});
 
 // A version 4 link of two moves, the second a face move, with its router
 // byte set to a version this page does not have.

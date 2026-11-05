@@ -26,6 +26,7 @@ import {
   sameIndexedGame,
   StaleLink,
   STROKE_TOLERANCE,
+  toMove,
   type GameRecord,
   type LinkEngine,
   type RecordedMove,
@@ -973,15 +974,19 @@ describe("a link that names moves by index", () => {
     expect(bytesOf(encodeRecord(history))[0]).toBe(6);
   });
 
-  it("keeps the indices in the saved record and drops them from an undone move on", () => {
+  it("keeps the indices in the saved record under the versions they were made with", () => {
     const history = twoMoves();
     history.moves[0]!.indexed = { index: 2, along: 100 };
     history.moves[1]!.refused = true;
     expect(history.indexed).toBe(false);
-    expect(history.cachedIndices()).toEqual([{ index: 2, along: 100 }]);
     const saved = history.record();
-    expect(saved.moves[0]).toMatchObject({ index: 2, along: 100 });
-    expect(saved.moves[1]).toMatchObject({ refused: true });
+    expect(saved.cacheVersions).toEqual({
+      router: ROUTER_VERSION,
+      list: MOVE_LIST_VERSION,
+      settle: SETTLE_VERSION,
+    });
+    expect(saved.moves[0]).toMatchObject({ cache: { index: 2, along: 100 } });
+    expect(saved.moves[1]).toMatchObject({ cache: { refused: true } });
     expect(saved.moves.every(hasStroke)).toBe(true);
     expect(saved.moves.some(isIndexed)).toBe(false);
     const back = History.from(saved);
@@ -989,37 +994,57 @@ describe("a link that names moves by index", () => {
     expect(back.moves[0]?.polyline).toEqual(history.moves[0]?.polyline);
     expect(pendingIndex(back.moves[0]!)).toBeUndefined();
     expect(back.moves[1]?.refused).toBe(true);
-    history.invalidateFrom(1);
-    expect(history.moves[0]?.indexed).toEqual({ index: 2, along: 100 });
-    expect(history.moves[1]?.refused).toBeUndefined();
-    history.invalidateFrom(0);
-    expect(history.cachedIndices()).toEqual([]);
+    // A new move from an earlier cursor discards the moves ahead with their
+    // caches; the moves before it keep theirs.
+    back.cursor = 1;
+    back.push({ ...toMove(history.moves[1]!), fromNode: 3, toNode: 2 });
+    expect(back.moves).toHaveLength(2);
+    expect(back.moves[0]?.indexed).toEqual({ index: 2, along: 100 });
+    expect(back.moves[1]?.indexed).toBeUndefined();
+    expect(back.moves[1]?.refused).toBeUndefined();
+    expect(twoMoves().record().cacheVersions).toBeUndefined();
   });
 
-  it("hands the engine the cached prefix and indexes from the first move without one", async () => {
-    const source = twoMoves();
-    source.moves[0]!.indexed = { index: 9, along: 9 };
-    let cached: unknown;
-    const engine: LinkEngine = {
-      classify: (plan) => Promise.resolve({ topology: plan.moves.map(() => undefined) }),
-      index: (plan) => {
-        cached = plan.cached;
-        return Promise.resolve({
-          refused: undefined,
-          moves: [
-            { index: 9, along: 9 },
-            { index: 200, along: 0 },
-          ],
-        });
-      },
-      rehearse: () => Promise.reject(new Error("not asked")),
+  it("loads a record cached under other versions with no cache", () => {
+    const history = twoMoves();
+    history.moves[0]!.indexed = { index: 2, along: 100 };
+    history.moves[1]!.refused = true;
+    const saved = history.record();
+    for (const stale of [
+      { ...saved, cacheVersions: { ...saved.cacheVersions!, router: ROUTER_VERSION + 1 } },
+      { ...saved, cacheVersions: { ...saved.cacheVersions!, list: MOVE_LIST_VERSION + 1 } },
+      { ...saved, cacheVersions: { ...saved.cacheVersions!, settle: SETTLE_VERSION + 1 } },
+      (({ cacheVersions: _dropped, ...rest }) => rest)(saved),
+    ]) {
+      const back = History.from(stale);
+      expect(back.moves.map((m) => m.indexed)).toEqual([undefined, undefined]);
+      expect(back.moves.map((m) => m.refused)).toEqual([undefined, undefined]);
+      expect(back.moves[0]?.polyline).toEqual(history.moves[0]?.polyline);
+    }
+  });
+
+  it("reads a saved stroke with a cache and rejects a malformed one", () => {
+    const saved = twoMoves().record();
+    const withCache = (cache: unknown) => ({
+      ...saved,
+      moves: [{ ...saved.moves[0]!, cache }, saved.moves[1]!],
+    });
+    const load = (record: unknown) => {
+      Object.defineProperty(globalThis, "localStorage", {
+        value: { getItem: () => JSON.stringify(record) },
+        configurable: true,
+      });
+      return loadSaved();
     };
-    const { history } = await prepareLink(source, engine);
-    expect(cached).toEqual([{ index: 9, along: 9 }]);
-    expect(history.moves.map((m) => m.indexed)).toEqual([
-      { index: 9, along: 9 },
-      { index: 200, along: 0 },
-    ]);
+    expect(load(withCache({ index: 3, along: 128 }))?.moves[0]).toMatchObject({
+      cache: { index: 3, along: 128 },
+    });
+    expect(load(withCache({ refused: true }))?.moves[0]).toMatchObject({
+      cache: { refused: true },
+    });
+    expect(load(withCache({ refused: false }))).toBeNull();
+    expect(load(withCache({ index: 3, along: 300 }))).toBeNull();
+    expect(load(withCache({ index: -1, along: 0 }))).toBeNull();
   });
 
   it("indexes a record from before the cache once and keeps the result", async () => {

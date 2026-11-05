@@ -458,11 +458,6 @@ pub struct Classification {
     pub settle_version: u8,
     pub moves: Vec<Move>,
     pub known: Vec<Option<FaceMove>>,
-    /// Indices already worked out for the leading moves, which index_moves
-    /// takes as read and does not regenerate.
-    #[serde(default)]
-    #[tsify(optional)]
-    pub cached: Vec<IndexedMove>,
 }
 
 /// The face move of each classified move, or none where the router draws
@@ -770,10 +765,7 @@ fn normalised(face: &face::FaceModel, mut mv: ModelMove) -> ModelMove {
 /// replays the link; the first move that board refuses, lists as another
 /// move, or ends as another position stops the indexing and is named, so
 /// a link only goes out as indices when the visitor regenerates the
-/// recorded game. Moves covered by `plan.cached` were regenerated when
-/// they were indexed; they are applied as recorded on both boards, so the
-/// fresh board carries the sharer's geometry for them and the replay by
-/// index starts at the first move without an index.
+/// recorded game.
 pub fn index_moves(plan: Classification) -> Result<Indexed, String> {
     let mut state = start(
         plan.initial_nodes,
@@ -792,18 +784,6 @@ pub fn index_moves(plan: Classification) -> Result<Indexed, String> {
     let mut moves = Vec::with_capacity(plan.moves.len());
     for (index, mov) in plan.moves.into_iter().enumerate() {
         let mov = enter(mov, &state).map_err(|e| format!("move {index}: {}", e.message))?;
-        if let Some(cached) = plan.cached.get(index) {
-            fresh
-                .apply_move(mov.clone())
-                .map_err(|e| format!("move {index}: {}", e.message))?;
-            settle::settle(&mut fresh);
-            state
-                .apply_move(mov)
-                .map_err(|e| format!("move {index}: {}", e.message))?;
-            settle::settle(&mut state);
-            moves.push(*cached);
-            continue;
-        }
         let face = topology(&state, &mov).map_err(|e| format!("move {index}: {}", e.message))?;
         let face = normalised(&state.face, face);
         let other = flipped(&state.face, &face);
@@ -1454,7 +1434,6 @@ mod tests {
             settle_version: SETTLE_VERSION,
             moves: vec![chord.clone(), reply.clone()],
             known,
-            cached: Vec::new(),
         };
         assert_eq!(
             classify(plan(vec![None, None])),
@@ -2608,7 +2587,6 @@ mod tests {
                 settle_version: fixture.settle_version,
                 moves: fixture.moves.iter().map(|m| m.wire()).collect(),
                 known: vec![None; fixture.moves.len()],
-                cached: Vec::new(),
             };
             let indexed = match index_moves(plan) {
                 Ok(Indexed {
@@ -2683,7 +2661,6 @@ mod tests {
             settle_version: SETTLE_VERSION,
             moves: record.clone(),
             known: vec![None; 3],
-            cached: Vec::new(),
         })
         .unwrap()
         .moves;
@@ -2742,7 +2719,6 @@ mod tests {
             settle_version: fixture.settle_version,
             moves: fixture.moves.iter().map(|m| m.wire()).collect(),
             known: vec![None; fixture.moves.len()],
-            cached: Vec::new(),
         };
         let indexed = index_moves(plan).unwrap().moves;
         assert_eq!(indexed.len(), 8);
@@ -2761,35 +2737,6 @@ mod tests {
             };
             apply(&mut recorded, m.wire());
         }
-    }
-
-    /// Indices already cached for the leading moves are taken as read and
-    /// the rest come out as a full indexing would give them.
-    #[test]
-    fn index_moves_takes_a_cached_prefix_as_read() {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("fixtures/saved/eight-moves-4n-1000.json");
-        let fixture = crate::replay::load(&path).unwrap();
-        let plan = |cached: Vec<IndexedMove>| Classification {
-            initial_nodes: fixture.initial_nodes,
-            board_size: fixture.board_size,
-            first_player: Player::Human,
-            nodes: None,
-            settle_version: fixture.settle_version,
-            moves: fixture.moves.iter().map(|m| m.wire()).collect(),
-            known: vec![None; fixture.moves.len()],
-            cached,
-        };
-        let whole = index_moves(plan(Vec::new())).unwrap();
-        assert_eq!(whole.refused, None);
-        let partial = index_moves(plan(whole.moves[..5].to_vec())).unwrap();
-        assert_eq!(partial, whole);
-        // The cache is trusted, so a wrong prefix comes back as given.
-        let mut wrong = whole.moves[..3].to_vec();
-        wrong[1].index += 1;
-        let trusted = index_moves(plan(wrong.clone())).unwrap();
-        assert_eq!(trusted.moves[..3], wrong[..]);
-        assert_eq!(trusted.moves[3..], whole.moves[3..]);
     }
 
     /// A record from a newer settle would replay through this one and show

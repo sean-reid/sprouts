@@ -860,7 +860,6 @@ async function seek(target: number): Promise<boolean> {
         return false;
       }
       timeline.cursor--;
-      timeline.invalidateFrom(timeline.cursor);
     }
     while (timeline.cursor < target) {
       const move = timeline.moves[timeline.cursor];

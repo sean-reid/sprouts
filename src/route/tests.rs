@@ -644,7 +644,6 @@ fn shared_game(nodes: usize, moves: usize, pick: usize) -> Result<SharedGame, St
         settle_version: fixture.settle_version,
         moves: fixture.moves.iter().map(|m| m.wire()).collect(),
         known: vec![None; fixture.moves.len()],
-        cached: Vec::new(),
     })
     .unwrap()
     .topology;
@@ -748,7 +747,6 @@ fn rehearse_shared_game(game: &SharedGame) -> Drift {
         settle_version: fixture.settle_version,
         moves: fixture.moves.iter().map(|m| m.wire()).collect(),
         known: vec![None; fixture.moves.len()],
-        cached: Vec::new(),
     });
     let (indexed, index_refused) = match indexed {
         Ok(protocol::Indexed {
@@ -2092,7 +2090,6 @@ fn probe_index_time() {
             settle_version: game.fixture.settle_version,
             moves: game.fixture.moves.iter().map(|m| m.wire()).collect(),
             known: vec![None; game.fixture.moves.len()],
-            cached: Vec::new(),
         };
         let start = std::time::Instant::now();
         let outcome = protocol::index_moves(plan());
