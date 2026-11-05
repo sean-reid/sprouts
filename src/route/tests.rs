@@ -2018,3 +2018,39 @@ fn a_chord_beside_a_straight_line_between_its_ends_leaves_the_line() {
         "{far_from_line} of {total} points off the line"
     );
 }
+
+/// How long indexing a game takes natively, which boot pays when a link
+/// is in the URL: `cargo test --release probe_index_time -- --ignored
+/// --nocapture`.
+#[test]
+#[ignore]
+fn probe_index_time() {
+    for (nodes, moves, pick) in [(12, 30, 4), (24, 10, 0), (24, 20, 0)] {
+        let game = match shared_game(nodes, moves, pick) {
+            Ok(game) => game,
+            Err(why) => {
+                eprintln!("PROBE {nodes}n {moves}m: {why}");
+                continue;
+            }
+        };
+        let plan = || protocol::Classification {
+            initial_nodes: game.fixture.initial_nodes,
+            board_size: game.fixture.board_size,
+            first_player: Player::Human,
+            nodes: None,
+            settle_version: game.fixture.settle_version,
+            moves: game.fixture.moves.iter().map(|m| m.wire()).collect(),
+            known: vec![None; game.fixture.moves.len()],
+        };
+        let start = std::time::Instant::now();
+        let outcome = protocol::index_moves(plan());
+        eprintln!(
+            "PROBE {nodes}n {moves}m: index_moves {:?} in {} ms",
+            outcome
+                .as_ref()
+                .map(|i| i.moves.len())
+                .map_err(|e| e.clone()),
+            start.elapsed().as_millis()
+        );
+    }
+}
