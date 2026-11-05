@@ -1,16 +1,17 @@
 import { expect, test, type Page } from "@playwright/test";
-import { LOUPE_RING } from "../../web/loupe";
+import { LOUPE_FOLLOW } from "../../web/loupe";
 import {
   alongLine,
   boardNodes,
-  colourCentroid,
   expectNodeDrawnAt,
   frameOf,
+  nextFrame,
   nodeOnScreen,
   openBoard,
   playExchange,
   ringPixels,
   shot,
+  startGame,
   touchDrag,
   type Client,
   type Frame,
@@ -19,19 +20,103 @@ import {
 const LIFT = 90;
 const RADIUS = 60;
 
-// Mirrors the lens placement in web/loupe.ts: LOUPE_LIFT above the finger,
-// swinging to the given side as the finger nears the top, clamped so the disc
-// stays on the canvas.
-function lensCentre(frame: Frame, finger: Client, side: 1 | -1 = 1): Client {
+// The lens for a finger clear of the edges: LIFT straight above it. Where the
+// top edge makes it swing, the tests read the ring off the canvas instead.
+function lensCentre(finger: Client): Client {
+  return { x: finger.x, y: finger.y - LIFT };
+}
+
+// Where the ring is drawn, in canvas-local px: the midpoint of the amber
+// pixels sideways, and the ring's bottom edge less the radius, since the top
+// of the ring can touch the canvas edge.
+function lensBox(): Client | null {
+  const canvas = document.getElementById("canvas") as HTMLCanvasElement;
+  const ctx = canvas.getContext("2d")!;
+  const rect = canvas.getBoundingClientRect();
+  const dpr = canvas.width / rect.width;
+  const { data, width } = ctx.getImageData(0, 0, canvas.width, canvas.height);
+  let minX = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  for (let i = 0; i < data.length; i += 4) {
+    if (Math.hypot(data[i]! - 0xfb, data[i + 1]! - 0xbf, data[i + 2]! - 0x24) >= 40) continue;
+    const x = (i / 4) % width;
+    const y = Math.floor(i / 4 / width);
+    minX = Math.min(minX, x);
+    maxX = Math.max(maxX, x);
+    maxY = Math.max(maxY, y);
+  }
+  if (maxY < 0) return null;
+  return { x: (minX + maxX) / 2 / dpr, y: maxY / dpr - 61 };
+}
+
+async function ringCentre(page: Page): Promise<Client> {
+  const at = await page.evaluate(lensBox);
+  expect(at).not.toBeNull();
+  return at!;
+}
+
+// The ring once it has stopped sliding: two frames in a row at one spot.
+async function settledLens(page: Page): Promise<Client> {
+  let last = await ringCentre(page);
+  for (let i = 0; i < 60; i++) {
+    await nextFrame(page);
+    const now = await ringCentre(page);
+    if (Math.hypot(now.x - last.x, now.y - last.y) < 0.5) return now;
+    last = now;
+  }
+  throw new Error("the lens did not settle");
+}
+
+// Reads the ring's position every frame until stopped, so a jump between two
+// touch samples shows up as one large frame-to-frame move.
+function startLensRecorder(page: Page): Promise<void> {
+  return page.evaluate((read) => {
+    const w = window as unknown as { lensFrames: (Client | null)[]; lensStop: boolean };
+    w.lensFrames = [];
+    w.lensStop = false;
+    const box = new Function(`return (${read})()`) as () => Client | null;
+    const tick = (): void => {
+      if (w.lensStop) return;
+      w.lensFrames.push(box());
+      requestAnimationFrame(tick);
+    };
+    requestAnimationFrame(tick);
+  }, lensBox.toString());
+}
+
+function stopLensRecorder(page: Page): Promise<(Client | null)[]> {
+  return page.evaluate(() => {
+    const w = window as unknown as { lensFrames: (Client | null)[]; lensStop: boolean };
+    w.lensStop = true;
+    return w.lensFrames;
+  });
+}
+
+// No frame moves the lens further than the follower allows for an 8 px
+// touch sample, so a flip of the lens to the other side of the finger fails here.
+function expectNoJump(frames: (Client | null)[]): number {
+  let largest = 0;
+  for (let i = 1; i < frames.length; i++) {
+    const a = frames[i - 1];
+    const b = frames[i];
+    if (!a || !b) continue;
+    largest = Math.max(largest, Math.hypot(b.x - a.x, b.y - a.y));
+  }
+  expect(largest).toBeLessThanOrEqual(8 * LOUPE_FOLLOW + 1);
+  return largest;
+}
+
+// A settled lens keeps its lift from the finger and the whole disc on the canvas.
+function expectLensPlaced(frame: Frame, lens: Client, finger: Client): void {
   const local = { x: finger.x - frame.left, y: finger.y - frame.top };
-  const y = Math.max(local.y - LIFT, RADIUS);
-  const dy = local.y - y;
-  const dx = Math.sqrt(Math.max(0, LIFT * LIFT - dy * dy));
-  const clamp = (v: number, low: number, high: number) => Math.max(low, Math.min(high, v));
-  return {
-    x: frame.left + clamp(local.x + side * dx, RADIUS, frame.width - RADIUS),
-    y: frame.top + clamp(y, RADIUS, frame.height - RADIUS),
-  };
+  const lift = Math.hypot(lens.x - local.x, lens.y - local.y);
+  expect(lift).toBeGreaterThan(LIFT - 4);
+  expect(lift).toBeLessThan(LIFT + 4);
+  expect(lens.x).toBeGreaterThanOrEqual(RADIUS - 2);
+  expect(lens.x).toBeLessThanOrEqual(frame.width - RADIUS + 2);
+  expect(lens.y).toBeGreaterThanOrEqual(RADIUS - 2);
+  expect(lens.y).toBeLessThanOrEqual(frame.height - RADIUS + 2);
 }
 
 // Counts ring-amber samples on the lens circumference around a client point.
@@ -139,9 +224,7 @@ test("a touch stroke near an existing line shows the loupe and clears away from 
     touchPoints: [{ ...start, id: 0 }],
   });
   await touchDrag(cdp, start, near);
-  await expect
-    .poll(() => ringSamplesAround(page, lensCentre(frame, near)))
-    .toBeGreaterThanOrEqual(6);
+  await expect.poll(() => ringSamplesAround(page, lensCentre(near))).toBeGreaterThanOrEqual(6);
   await shot(page, "loupe-near-line");
 
   await touchDrag(cdp, near, clear);
@@ -149,9 +232,7 @@ test("a touch stroke near an existing line shows the loupe and clears away from 
   await shot(page, "loupe-clear");
 
   await touchDrag(cdp, clear, near);
-  await expect
-    .poll(() => ringSamplesAround(page, lensCentre(frame, near)))
-    .toBeGreaterThanOrEqual(6);
+  await expect.poll(() => ringSamplesAround(page, lensCentre(near))).toBeGreaterThanOrEqual(6);
   await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
   await expect.poll(() => ringPixels(page)).toBe(0);
 });
@@ -196,7 +277,6 @@ test("a stroke from a node with a line opens no lens until the finger is clear o
   page,
 }) => {
   test.skip(!test.info().project.use.hasTouch, "touch only");
-  const frame = await frameOf(page);
   const start = await nodeOnScreen(page, 0, 4);
   const out = (px: number): Client => ({ x: start.x + px, y: start.y });
   const near = await besideFirstChord(page);
@@ -215,9 +295,7 @@ test("a stroke from a node with a line opens no lens until the finger is clear o
   expect(await ringPixels(page)).toBe(0);
 
   await touchDrag(cdp, out(60), near);
-  await expect
-    .poll(() => ringSamplesAround(page, lensCentre(frame, near)))
-    .toBeGreaterThanOrEqual(6);
+  await expect.poll(() => ringSamplesAround(page, lensCentre(near))).toBeGreaterThanOrEqual(6);
   await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
 });
 
@@ -233,7 +311,6 @@ test("the lens slides beside the finger across the top edge without a jump", asy
   );
   const top = await nodeOnScreen(page, highest[0], nodes.size);
   await expectNodeDrawnAt(page, top);
-  const side: 1 | -1 = top.x < frame.left + frame.width / 2 ? 1 : -1;
   const cdp = await page.context().newCDPSession(page);
 
   const start = await nodeOnScreen(page, highest[0] === 0 ? 3 : 0, nodes.size);
@@ -244,31 +321,96 @@ test("the lens slides beside the finger across the top edge without a jump", asy
   });
   await touchDrag(cdp, start, below);
 
-  // The finger climbs 8 px at a time to 12 px above the node. At every step
-  // the ring sits where the placement says, the lens keeps its lift from the
-  // finger, and the measured centre moves no further than the finger did
-  // plus the swing, never a flip.
+  // The finger climbs 8 px at a time to 12 px above the node.
+  await startLensRecorder(page);
   let finger = below;
-  let last: Client | null = null;
+  let lens: Client | null = null;
   const steps: string[] = [];
   while (finger.y > top.y - 12) {
     const next = { x: finger.x, y: Math.max(finger.y - 8, top.y - 12) };
     await touchDrag(cdp, finger, next, 0, 2);
     finger = next;
-    const want = lensCentre(frame, finger, side);
-    await expect.poll(() => ringSamplesAround(page, want)).toBeGreaterThanOrEqual(6);
-    const { at } = await colourCentroid(page, LOUPE_RING);
-    if (last) expect(Math.hypot(at.x - last.x, at.y - last.y)).toBeLessThan(8 + 2 * 8);
-    const lift = Math.hypot(at.x - finger.x, at.y - finger.y);
-    expect(lift).toBeGreaterThan(LIFT - 4);
-    expect(lift).toBeLessThan(LIFT + 4);
-    steps.push(
-      `${Math.round(finger.y - frame.top)}:${Math.round(at.x - frame.left)},${Math.round(at.y - frame.top)}`,
-    );
-    last = at;
+    await expect.poll(() => ringPixels(page)).toBeGreaterThan(0);
+    lens = await settledLens(page);
+    expectLensPlaced(frame, lens, finger);
+    steps.push(`${Math.round(finger.y - frame.top)}:${Math.round(lens.x)},${Math.round(lens.y)}`);
   }
-  test.info().annotations.push({ type: "lens-centres", description: steps.join(" ") });
-  expect(lensCentre(frame, finger, side).x).not.toBe(finger.x);
+  const largest = expectNoJump(await stopLensRecorder(page));
+  test.info().annotations.push({
+    type: "lens-centres",
+    description: `${steps.join(" ")} largest frame move ${largest.toFixed(1)}`,
+  });
+  expect(Math.abs(lens!.x - (finger.x - frame.left))).toBeGreaterThan(RADIUS);
   await shot(page, "loupe-top-slide");
+  await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+});
+
+test("the lens keeps its lift and stays on the canvas along the whole top edge", async ({
+  page,
+}) => {
+  test.skip(!test.info().project.use.hasTouch, "touch only");
+  await startGame(page, 4);
+  await expect(page.locator("#status")).toHaveText("Draw a line between two nodes");
+  const frame = await frameOf(page);
+  const cdp = await page.context().newCDPSession(page);
+
+  // A human line that runs along the top edge, so a finger tracing it keeps
+  // the lens open from one side of the board to the other.
+  const nodes = await boardNodes(page);
+  const ids = [...nodes.keys()];
+  const screen = new Map<number, Client>();
+  for (const id of ids) screen.set(id, await nodeOnScreen(page, id, ids.length));
+  const leftmost = ids.reduce((a, b) => (screen.get(a)!.x < screen.get(b)!.x ? a : b));
+  const rightmost = ids.reduce((a, b) => (screen.get(a)!.x > screen.get(b)!.x ? a : b));
+  const a = screen.get(leftmost)!;
+  const b = screen.get(rightmost)!;
+  const high = frame.top + 20;
+  await page.mouse.move(a.x, a.y);
+  await page.mouse.down();
+  await page.mouse.move(a.x, high, { steps: 10 });
+  await page.mouse.move(b.x, high, { steps: 20 });
+  await page.mouse.move(b.x, b.y, { steps: 10 });
+  await page.mouse.up();
+  await expect(page.locator("#status")).toHaveText(/Drag the dot/);
+  await page.mouse.click(frame.left + frame.width / 2, frame.top + frame.height - 20);
+  await expect(page.locator("#status")).toHaveText("Your turn!", { timeout: 60_000 });
+
+  // The run of that line within 70 px of the top, resampled every 8 px,
+  // traced 12 px below it from left to right.
+  const run: Client[] = [];
+  for (let i = 0; i <= 300; i++) {
+    const { at } = await alongLine(page, 0, i / 300);
+    if (at.y - frame.top < 70) run.push({ x: at.x, y: at.y + 12 });
+  }
+  run.sort((p, q) => p.x - q.x);
+  const path: Client[] = [run[0]!];
+  for (const p of run) {
+    const prev = path[path.length - 1]!;
+    if (Math.hypot(p.x - prev.x, p.y - prev.y) >= 8) path.push(p);
+  }
+  expect(path.length).toBeGreaterThan(20);
+
+  const bottom = [...(await boardNodes(page)).keys()].reduce((best, id) => {
+    const p = nodes.get(id);
+    return p && p.y > (nodes.get(best)?.y ?? -Infinity) ? id : best;
+  }, ids[0]!);
+  const start = await nodeOnScreen(page, bottom, (await boardNodes(page)).size);
+  await cdp.send("Input.dispatchTouchEvent", {
+    type: "touchStart",
+    touchPoints: [{ ...start, id: 0 }],
+  });
+  await touchDrag(cdp, start, path[0]!);
+  await startLensRecorder(page);
+  let finger = path[0]!;
+  for (const [i, next] of path.entries()) {
+    await touchDrag(cdp, finger, next, 0, 2);
+    finger = next;
+    await expect.poll(() => ringPixels(page)).toBeGreaterThan(0);
+    expectLensPlaced(frame, await settledLens(page), finger);
+    if (i === 1) await shot(page, "loupe-top-edge-left");
+  }
+  const largest = expectNoJump(await stopLensRecorder(page));
+  test.info().annotations.push({ type: "largest-frame-move", description: largest.toFixed(1) });
+  await shot(page, "loupe-top-edge-right");
   await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
 });
