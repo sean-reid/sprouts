@@ -51,7 +51,11 @@ describe("the wasm router", () => {
       });
       // Recorded positions replay with no settle.
       const game = new SproutsGame(4, 1000, "human", undefined, 0);
-      expect(game.hashRoutes({ plans })).toBe(golden);
+      const hash = game.hashRoutes({ plans });
+      // On a mismatch the per-move hashes name the move that parted from
+      // the native build, against the native print_route_hashes test.
+      const perMove = () => game.routeHashes({ plans }).join("\n");
+      expect(hash, hash === golden ? "" : perMove()).toBe(golden);
     },
     ROUTE_HASH_TIMEOUT_MS,
   );

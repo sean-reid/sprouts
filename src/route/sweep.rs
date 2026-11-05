@@ -32,17 +32,19 @@ pub(crate) fn kind_name(why: &Unroutable) -> String {
 }
 
 /// The game so far in the bench fixture shape, for pasting under
-/// fixtures/routing when a route fails.
+/// fixtures/routing when a route fails. Lines and nodes are written where
+/// the board holds them, so a settled position replays to its board.
 pub(crate) fn fixture_json(state: &GameState) -> String {
     let moves: Vec<serde_json::Value> = state
-        .move_history
+        .lines
         .iter()
-        .map(|m| {
+        .zip(&state.nodes[state.initial_node_count..])
+        .map(|(line, node)| {
             serde_json::json!({
-                "from": m.from_node,
-                "to": m.to_node,
-                "polyline": m.polyline.iter().map(|q| [q.x, q.y]).collect::<Vec<_>>(),
-                "newNode": [m.new_node_pos.x, m.new_node_pos.y],
+                "from": line.from_node,
+                "to": line.to_node,
+                "polyline": line.polyline.iter().map(|q| [q.x, q.y]).collect::<Vec<_>>(),
+                "newNode": [node.position.x, node.position.y],
             })
         })
         .collect();

@@ -506,25 +506,47 @@ pub struct RouteHashPlan {
 pub fn route_hash(plan: RouteHashPlan) -> Result<String, String> {
     let mut fnv = crate::exact::Fnv::default();
     for plan in plan.plans {
-        // Recorded positions, replayed as drawn with no settle.
-        let mut state = start(
-            plan.initial_nodes,
-            plan.board_size,
-            Player::AI,
-            plan.nodes,
-            0,
-        )?;
-        for (index, mov) in plan.moves.into_iter().enumerate() {
-            state.current_player = Player::AI;
-            let mov = enter(mov, &state).map_err(|e| format!("move {index}: {}", e.message))?;
-            state
-                .apply_move(mov)
-                .map_err(|e| format!("move {index}: {}", e.message))?;
-        }
-        state.current_player = Player::AI;
-        route::hash_routes(&mut fnv, &state);
+        route::hash_routes(&mut fnv, &hashed_position(plan)?);
     }
     Ok(fnv.hex())
+}
+
+/// One hash per routed search move of each plan, "plan/move hex" in
+/// order, for finding the move two platforms route apart; the native
+/// `print_route_hashes` test prints the same lines.
+#[cfg(feature = "hash")]
+pub fn route_hashes(plan: RouteHashPlan) -> Result<Vec<String>, String> {
+    let mut out = Vec::new();
+    for (index, plan) in plan.plans.into_iter().enumerate() {
+        let state = hashed_position(plan)?;
+        for (at, mv) in state.face.search_moves().iter().enumerate() {
+            let mut fnv = crate::exact::Fnv::default();
+            route::hash_route(&mut fnv, &state, mv);
+            out.push(format!("{index}/{at} {}", fnv.hex()));
+        }
+    }
+    Ok(out)
+}
+
+/// A recorded position replayed as drawn with no settle, the AI to move.
+#[cfg(feature = "hash")]
+fn hashed_position(plan: Classification) -> Result<GameState, String> {
+    let mut state = start(
+        plan.initial_nodes,
+        plan.board_size,
+        Player::AI,
+        plan.nodes,
+        0,
+    )?;
+    for (index, mov) in plan.moves.into_iter().enumerate() {
+        state.current_player = Player::AI;
+        let mov = enter(mov, &state).map_err(|e| format!("move {index}: {}", e.message))?;
+        state
+            .apply_move(mov)
+            .map_err(|e| format!("move {index}: {}", e.message))?;
+    }
+    state.current_player = Player::AI;
+    Ok(state)
 }
 
 /// A move as a share link carries it: drawn, or routed from its face move

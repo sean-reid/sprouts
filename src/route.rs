@@ -526,22 +526,28 @@ fn relax(
 #[cfg(any(test, feature = "hash"))]
 pub fn hash_routes(fnv: &mut Fnv, state: &GameState) {
     for mv in state.face.search_moves() {
-        match route(state, &mv) {
-            Ok(drawn) => {
-                fnv.points(&drawn.flatten(curve::tolerance(state.board_size)));
-                fnv.points(&[drawn.new_node_pos]);
-            }
-            // A refusal is part of the output too: a platform that turns
-            // one into a route, or the other way, has to show.
-            Err(why) => fnv.feed(match why {
-                Unroutable::Room => 1.0,
-                Unroutable::NoSpot => 2.0,
-                Unroutable::Shape(_) => 3.0,
-                Unroutable::Topology => 4.0,
-                Unroutable::Bug(_) => 5.0,
-                Unroutable::Sides => 6.0,
-            }),
+        hash_route(fnv, state, &mv);
+    }
+}
+
+/// Feeds the flattening and node of `mv` routed in `state` into `fnv`.
+#[cfg(any(test, feature = "hash"))]
+pub fn hash_route(fnv: &mut Fnv, state: &GameState, mv: &FaceMove) {
+    match route(state, mv) {
+        Ok(drawn) => {
+            fnv.points(&drawn.flatten(curve::tolerance(state.board_size)));
+            fnv.points(&[drawn.new_node_pos]);
         }
+        // A refusal is part of the output too: a platform that turns
+        // one into a route, or the other way, has to show.
+        Err(why) => fnv.feed(match why {
+            Unroutable::Room => 1.0,
+            Unroutable::NoSpot => 2.0,
+            Unroutable::Shape(_) => 3.0,
+            Unroutable::Topology => 4.0,
+            Unroutable::Bug(_) => 5.0,
+            Unroutable::Sides => 6.0,
+        }),
     }
 }
 
