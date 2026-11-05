@@ -2880,13 +2880,7 @@ fn probe_relaxed_fallbacks() {
                 .filter(|n| n.id != mv.a && n.id != mv.b)
                 .map(|n| n.position)
                 .collect();
-            let room = (NODE_ROOM * want.spacing).max(want.node_clearance + want.clearance);
-            let rooms = clearance::Rooms {
-                clearance: super::eroded_by(&state, &want),
-                node_clearance: want.node_clearance + curve::tolerance(state.board_size),
-                node_room: room,
-                end_room: want.spacing,
-            };
+            let rooms = relax_rooms(&state, &want);
             let obstacles = clearance::Obstacles::new(arena.walls(), nodes, ends, rooms, &taut);
             match clearance::push(taut.clone(), &obstacles) {
                 None => pushed_none += 1,

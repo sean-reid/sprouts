@@ -772,19 +772,7 @@ fn relax(
         .filter(|n| n.id != mv.a && n.id != mv.b)
         .map(|n| n.position)
         .collect();
-    // The relaxation settles a little short of its room, so the room sits a
-    // line clearance above what the validator demands.
-    let room = (NODE_ROOM * want.spacing).max(want.node_clearance + want.clearance);
-    // The fit may move the curve a tolerance toward a node, and a settling
-    // game's grid a half diagonal more.
-    let rooms = clearance::Rooms {
-        clearance: eroded_by(state, want),
-        node_clearance: want.node_clearance
-            + curve::tolerance(state.board_size)
-            + erode::grid_snap(state),
-        node_room: room,
-        end_room: want.spacing,
-    };
+    let rooms = relax_rooms(state, want);
     let obstacles = clearance::Obstacles::new(arena.walls(), nodes, ends, rooms, path);
     let relaxed = clearance::push(path.to_vec(), &obstacles)?;
     // The pushes move points, so two clear points can leave a segment
@@ -801,6 +789,23 @@ fn relax(
         .iter()
         .all(|q| arena.keeps_validity(*q, margin, node_clearance))
         .then_some(relaxed)
+}
+
+/// The distances the relaxation keeps for `want`.
+fn relax_rooms(state: &GameState, want: &Rules) -> clearance::Rooms {
+    // The relaxation settles a little short of its room, so the room sits a
+    // line clearance above what the validator demands.
+    let room = (NODE_ROOM * want.spacing).max(want.node_clearance + want.clearance);
+    // The fit may move the curve a tolerance toward a node, and a settling
+    // game's grid a half diagonal more.
+    clearance::Rooms {
+        clearance: eroded_by(state, want),
+        node_clearance: want.node_clearance
+            + curve::tolerance(state.board_size)
+            + erode::grid_snap(state),
+        node_room: room,
+        end_room: want.spacing,
+    }
 }
 
 /// Feeds the flattening and node of every routed search move of `state`
