@@ -45,17 +45,70 @@ export function nearestFeature(world: Point, state: GameState, view: View): numb
   return best * view.scale;
 }
 
-// Lens centre for a finger at a screen point: above it, below it when the top
-// edge is too close, and shifted inward so the whole disc stays on the canvas.
-export function loupeCentre(finger: Point, width: number, height: number): Point {
-  const above = finger.y - LOUPE_LIFT;
-  const y = above - RADIUS >= 0 ? above : finger.y + LOUPE_LIFT;
-  return { x: clamp(finger.x, RADIUS, width - RADIUS), y: clamp(y, RADIUS, height - RADIUS) };
+export type LoupeSide = 1 | -1;
+// When the target moves to another spot the lens swings round the finger
+// toward it: LOUPE_FOLLOW px of arc per px the finger moves, at least
+// LOUPE_SETTLE px a frame with the finger still, and LOUPE_CROSS px a frame
+// while it changes sides, so the pass under the finger is short.
+export const LOUPE_FOLLOW = 1.5;
+export const LOUPE_SETTLE = 6;
+export const LOUPE_CROSS = 12;
+
+const DEGREE = Math.PI / 180;
+
+export function lensAt(finger: Point, angle: number): Point {
+  return { x: finger.x + LOUPE_LIFT * Math.sin(angle), y: finger.y - LOUPE_LIFT * Math.cos(angle) };
+}
+
+// Degrees the current side is preferred by. The side follows the chosen spot,
+// so switching back needs the old side to win by the same margin: a finger
+// at the crossover does not flip the lens on a pixel of jitter.
+const SIDE_PREFERENCE = 10;
+
+// The angle round the finger, zero straight above, of the spot LOUPE_LIFT
+// away that keeps the whole disc on the canvas: the highest one, on the
+// current side when the sides are close, so the lens drops below the finger
+// only when neither side has a higher spot, which is the top corners.
+export function loupeAngle(finger: Point, width: number, height: number, side: LoupeSide): number {
+  let best = 0;
+  let bestCost = Infinity;
+  for (let degrees = -180; degrees <= 180; degrees++) {
+    const p = lensAt(finger, degrees * DEGREE);
+    if (p.x < RADIUS || p.x > width - RADIUS || p.y < RADIUS || p.y > height - RADIUS) continue;
+    const wrongSide = degrees !== 0 && Math.sign(degrees) !== side;
+    const cost = Math.abs(degrees) + (wrongSide ? SIDE_PREFERENCE : 0);
+    if (cost < bestCost) {
+      bestCost = cost;
+      best = degrees * DEGREE;
+    }
+  }
+  return best;
+}
+
+// Turns the lens from one angle toward another the short way round, by at
+// most the arc the finger's travel allows, or LOUPE_CROSS when the target is
+// on the other side of the finger.
+export function loupeStep(from: number, target: number, travel: number): number {
+  let delta = target - from;
+  while (delta > Math.PI) delta -= Math.PI * 2;
+  while (delta < -Math.PI) delta += Math.PI * 2;
+  const crossing = Math.sign(from) !== Math.sign(target) && Math.abs(delta) > Math.PI / 2;
+  const limit =
+    (crossing ? LOUPE_CROSS : Math.max(LOUPE_SETTLE, travel * LOUPE_FOLLOW)) / LOUPE_LIFT;
+  if (Math.abs(delta) <= limit) return target;
+  return from + Math.sign(delta) * limit;
+}
+
+export function loupeSwings(finger: Point): boolean {
+  return finger.y - LOUPE_LIFT < RADIUS;
 }
 
 export class Loupe {
   private world: Point | null = null;
   private armed = false;
+  private side: LoupeSide | null = null;
+  private angle: number | null = null;
+  private finger: Point | null = null;
 
   // Arms once the finger has cleared the node the stroke started on, then
   // follows it while it stays near a feature; returns whether the frame needs
@@ -82,20 +135,36 @@ export class Loupe {
   hide(): boolean {
     const shown = this.world !== null;
     this.world = null;
+    this.angle = null;
+    this.finger = null;
     return shown;
   }
 
   // The stroke is over; the next one has to clear its start node again.
   release(): boolean {
     this.armed = false;
+    this.side = null;
     return this.hide();
   }
 
-  draw(ctx: CanvasRenderingContext2D, state: GameState, view: View): void {
-    if (!this.world) return;
+  // Returns whether the lens is still sliding toward its spot and needs
+  // another frame.
+  draw(ctx: CanvasRenderingContext2D, state: GameState, view: View): boolean {
+    if (!this.world) return false;
     setCssPixelTransform(ctx, view);
     const finger = view.toScreen(this.world);
-    const centre = loupeCentre(finger, view.width, view.height);
+    // One side per stroke, so a finger crossing the middle does not flip the lens.
+    if (this.side === null && loupeSwings(finger)) {
+      this.side = finger.x < view.width / 2 ? 1 : -1;
+    }
+    const target = loupeAngle(finger, view.width, view.height, this.side ?? 1);
+    if (target !== 0) this.side = target > 0 ? 1 : -1;
+    const travel = this.finger ? Math.hypot(finger.x - this.finger.x, finger.y - this.finger.y) : 0;
+    const angle = this.angle === null ? target : loupeStep(this.angle, target, travel);
+    this.angle = angle;
+    this.finger = finger;
+    const centre = lensAt(finger, angle);
+    const settling = angle !== target;
     const project = (p: Point): Point => {
       const s = view.toScreen(p);
       return {
@@ -126,5 +195,6 @@ export class Loupe {
     ctx.beginPath();
     ctx.arc(centre.x, centre.y, RADIUS, 0, Math.PI * 2);
     ctx.stroke();
+    return settling;
   }
 }

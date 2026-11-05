@@ -1324,7 +1324,7 @@ function frame(): void {
   if (booted && (dirty || (state.thinking && !state.reducedMotion))) {
     dirty = false;
     draw(ctx, state, view);
-    loupe.draw(ctx, state, view);
+    if (loupe.draw(ctx, state, view)) invalidate();
   }
   requestAnimationFrame(frame);
 }
