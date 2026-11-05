@@ -1245,12 +1245,22 @@ function placeUndo(): void {
 }
 
 // An index link to the saved game: the engine indexes the saved record
-// and the indices are compared to the link's. The engine builds the
-// boards from the record, so no game need be loaded first; a failure
-// reads as another game, which the link then opens.
+// and the indices are compared to the link's. The worker answers every
+// call through a game instance, so one is built on the saved record's
+// header first; the indexing itself replays the record. A failure reads
+// as another game, which the link then opens.
 async function ownIndexedGame(saved: GameRecord, linked: GameRecord): Promise<boolean> {
   if (!linked.moves.every(isIndexed) || saved.moves.length < linked.moves.length) return false;
   try {
+    const layout = saved.nodes ? { nodes: saved.nodes.map(([x, y]) => ({ x, y })) } : undefined;
+    await engine.call(
+      "init",
+      saved.initialNodes,
+      saved.boardSize,
+      saved.firstPlayer,
+      layout,
+      saved.settleVersion,
+    );
     return await sameIndexedGame(saved, linked, (plan) => engine.call("indexMoves", plan));
   } catch {
     return false;
