@@ -990,7 +990,7 @@ const SWEEP_FIXTURE: &str = "fixtures/routing/sweep-6n-6m.json";
 /// The final routing hash a Mac records; the Linux runner and the wasm
 /// build (tests/unit/route-hash.test.ts) have to produce the same one,
 /// since a share link is redrawn on the visitor's device.
-const ROUTING_HASH: u64 = 0x24dc_b9f1_0097_5635;
+const ROUTING_HASH: u64 = 0x62b1_0ccf_f443_93f3;
 
 #[test]
 fn routing_hashes_the_same_on_every_platform() {
@@ -1541,63 +1541,130 @@ fn probe_end_pins() {
     );
 }
 
-const SPOKES_FIXTURE: &str = "fixtures/routing/spokes-4n-2m.json";
+/// Half-angles of the corner between node 0's spokes in the spokes
+/// fixtures, in degrees, with the rise of nodes 1 and 3 over their 200
+/// unit run (the tangent, rounded to whole units so no platform's trig
+/// reaches the position).
+const SPOKES_CORNERS: [(usize, f64); 4] = [(20, 73.0), (30, 115.0), (40, 168.0), (50, 238.0)];
 
-/// Node 0 at the right with chords to nodes 1 and 3, which sit 100
-/// degrees apart on its left, so its last move, to node 2 in between,
-/// leaves through the corner between its two spokes.
-fn spokes_position() -> GameState {
+fn spokes_fixture(half_angle: usize) -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join(format!("fixtures/routing/spokes-{half_angle}-4n-2m.json"))
+}
+
+/// Node 0 at the right with straight lines to nodes 1 and 3, which sit
+/// `rise` above and below it 200 to its left, so its last move, to node 2
+/// in between, leaves through the corner between its two spokes. The
+/// lines are drawn straight rather than routed so the corner at node 0
+/// has the angle the rise names.
+fn spokes_position(rise: f64) -> GameState {
     let nodes = vec![
         p(700.0, 500.0),
-        p(500.0, 262.0),
+        p(500.0, 500.0 - rise),
         p(250.0, 500.0),
-        p(500.0, 738.0),
+        p(500.0, 500.0 + rise),
     ];
     let mut state = GameState::with_nodes_at(nodes, 1000, 0);
     state.current_player = Player::AI;
     for b in [1, 3] {
-        let mov = listed(&state, 0, b)
-            .iter()
-            .find_map(|m| draws(&state, m).ok())
+        let (from, to) = (state.nodes[0].position, state.nodes[b].position);
+        let stroke = straight(from, to);
+        let mid = stroke[5];
+        state
+            .apply_move(Move::new(0, b, stroke, mid, Player::AI, 1000))
             .unwrap();
-        state.apply_move(mov).unwrap();
         state.current_player = Player::AI;
     }
     state
 }
 
-/// Writes `SPOKES_FIXTURE`: `cargo test --release record_spokes_position
+/// Writes the spokes fixtures: `cargo test --release record_spokes_positions
 /// -- --ignored`.
 #[test]
 #[ignore]
-fn record_spokes_position() {
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(SPOKES_FIXTURE);
-    std::fs::write(path, sweep::fixture_json(&spokes_position())).unwrap();
+fn record_spokes_positions() {
+    for (half_angle, rise) in SPOKES_CORNERS {
+        std::fs::write(
+            spokes_fixture(half_angle),
+            sweep::fixture_json(&spokes_position(rise)),
+        )
+        .unwrap();
+    }
 }
 
-/// The move of `SPOKES_FIXTURE` that leaves node 0 between its spokes,
-/// with the recorded position, the rules and the test for a point inside
-/// that corner: heading left, within 50 degrees of the chord to node 2.
-fn spokes_case() -> (GameState, FaceMove, Rules, impl Fn(&Point) -> bool) {
-    let state = position(&std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(SPOKES_FIXTURE));
-    let live = spokes_position();
-    assert_eq!(
-        bits_of(&live),
-        bits_of(&state),
-        "the fixture is the recorded position"
-    );
-    let want = rules(&state);
-    assert_eq!(spokes_at(&state, 0).len(), 2);
+/// The chord from node 0 to node 2 through the corner between node 0's
+/// spokes in `state`, the spokes fixture with `rise`, and the test for a
+/// point inside that corner: heading left, within the corner's half-angle
+/// of the chord to node 2. The chord is told from the one round the back
+/// by where its taut path leaves at the human clearances.
+fn corner_chord(state: &GameState, rise: f64) -> (FaceMove, impl Fn(&Point) -> bool) {
+    assert_eq!(spokes_at(state, 0).len(), 2);
     let end = state.nodes[0].position;
-    let between = move |q: &Point| q.x < end.x && (q.y - end.y).abs() < (end.x - q.x) * 1.19;
-    let mv = listed(&state, 0, 2)
-        .into_iter()
-        .find(|m| {
-            plan(&mut Router::new(), &state, m, &want, Parity::Search)
-                .is_ok_and(|(_, taut)| between(&taut[1]))
-        })
-        .expect("a move leaving between the spokes");
+    let between =
+        move |q: &Point| q.x < end.x && (q.y - end.y).abs() < (end.x - q.x) * rise / 200.0;
+    let mut human = state.clone();
+    human.current_player = Player::Human;
+    let want = rules(&human);
+    let mut moves = listed(state, 0, 2);
+    moves.retain(|m| {
+        plan(&mut Router::new(), &human, m, &want, Parity::Search)
+            .is_ok_and(|(_, taut)| between(&taut[1]))
+    });
+    assert_eq!(moves.len(), 1, "one chord through the corner: {moves:?}");
+    (moves.remove(0), between)
+}
+
+/// The chord through the corner between node 0's spokes draws down to
+/// the corner the fit margin allows at the forgiven radius: the AI draws
+/// it at 30 degrees and refuses it at 20 as Room (its floor is 22, where
+/// the margin fits between the spokes 8 units out), and the human draws
+/// every one (its floor is 17.5, the margin 10 units out). Each drawn
+/// curve stays in the corner over the first node room and is a clearance
+/// off both spokes at the end of it.
+#[test]
+fn a_chord_into_a_narrow_corner_draws_down_to_the_margin_floor() {
+    let ai_draws = [false, true, true, true];
+    for ((half_angle, rise), ai) in SPOKES_CORNERS.into_iter().zip(ai_draws) {
+        let mut state = recorded_spokes_position(half_angle, rise);
+        let (mv, between) = corner_chord(&state, rise);
+        for (player, drawable) in [(Player::AI, ai), (Player::Human, true)] {
+            state.current_player = player;
+            let want = rules(&state);
+            let verdict = route(&state, &mv);
+            assert_eq!(
+                verdict.is_ok(),
+                drawable,
+                "{half_angle} degrees as {player:?}: {verdict:?}"
+            );
+            if drawable {
+                assert_curve_leaves_spokes(&state, &mv, &want, &between, true);
+            } else {
+                assert_eq!(verdict.unwrap_err(), Unroutable::Room);
+            }
+        }
+    }
+}
+
+/// The 50 degree spokes fixture's chord through the corner, with the
+/// recorded position, the rules and the test for a point in the corner.
+fn spokes_case() -> (GameState, FaceMove, Rules, impl Fn(&Point) -> bool) {
+    let (half_angle, rise) = SPOKES_CORNERS[3];
+    let state = recorded_spokes_position(half_angle, rise);
+    let want = rules(&state);
+    let (mv, between) = corner_chord(&state, rise);
     (state, mv, want, between)
+}
+
+/// The spokes fixture for `half_angle`, checked against the position it
+/// was recorded from.
+fn recorded_spokes_position(half_angle: usize, rise: f64) -> GameState {
+    let state = position(&spokes_fixture(half_angle));
+    assert_eq!(
+        bits_of(&spokes_position(rise)),
+        bits_of(&state),
+        "the {half_angle} degree fixture is the recorded position"
+    );
+    state
 }
 
 /// Least distance from `q` to a spoke of node 0.
