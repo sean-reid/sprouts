@@ -990,7 +990,7 @@ const SWEEP_FIXTURE: &str = "fixtures/routing/sweep-6n-6m.json";
 /// The final routing hash a Mac records; the Linux runner and the wasm
 /// build (tests/unit/route-hash.test.ts) have to produce the same one,
 /// since a share link is redrawn on the visitor's device.
-const ROUTING_HASH: u64 = 0x24dc_b9f1_0097_5635;
+const ROUTING_HASH: u64 = 0x62b1_0ccf_f443_93f3;
 
 #[test]
 fn routing_hashes_the_same_on_every_platform() {
@@ -1541,63 +1541,130 @@ fn probe_end_pins() {
     );
 }
 
-const SPOKES_FIXTURE: &str = "fixtures/routing/spokes-4n-2m.json";
+/// Half-angles of the corner between node 0's spokes in the spokes
+/// fixtures, in degrees, with the rise of nodes 1 and 3 over their 200
+/// unit run (the tangent, rounded to whole units so no platform's trig
+/// reaches the position).
+const SPOKES_CORNERS: [(usize, f64); 4] = [(20, 73.0), (30, 115.0), (40, 168.0), (50, 238.0)];
 
-/// Node 0 at the right with chords to nodes 1 and 3, which sit 100
-/// degrees apart on its left, so its last move, to node 2 in between,
-/// leaves through the corner between its two spokes.
-fn spokes_position() -> GameState {
+fn spokes_fixture(half_angle: usize) -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join(format!("fixtures/routing/spokes-{half_angle}-4n-2m.json"))
+}
+
+/// Node 0 at the right with straight lines to nodes 1 and 3, which sit
+/// `rise` above and below it 200 to its left, so its last move, to node 2
+/// in between, leaves through the corner between its two spokes. The
+/// lines are drawn straight rather than routed so the corner at node 0
+/// has the angle the rise names.
+fn spokes_position(rise: f64) -> GameState {
     let nodes = vec![
         p(700.0, 500.0),
-        p(500.0, 262.0),
+        p(500.0, 500.0 - rise),
         p(250.0, 500.0),
-        p(500.0, 738.0),
+        p(500.0, 500.0 + rise),
     ];
     let mut state = GameState::with_nodes_at(nodes, 1000, 0);
     state.current_player = Player::AI;
     for b in [1, 3] {
-        let mov = listed(&state, 0, b)
-            .iter()
-            .find_map(|m| draws(&state, m).ok())
+        let (from, to) = (state.nodes[0].position, state.nodes[b].position);
+        let stroke = straight(from, to);
+        let mid = stroke[5];
+        state
+            .apply_move(Move::new(0, b, stroke, mid, Player::AI, 1000))
             .unwrap();
-        state.apply_move(mov).unwrap();
         state.current_player = Player::AI;
     }
     state
 }
 
-/// Writes `SPOKES_FIXTURE`: `cargo test --release record_spokes_position
+/// Writes the spokes fixtures: `cargo test --release record_spokes_positions
 /// -- --ignored`.
 #[test]
 #[ignore]
-fn record_spokes_position() {
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(SPOKES_FIXTURE);
-    std::fs::write(path, sweep::fixture_json(&spokes_position())).unwrap();
+fn record_spokes_positions() {
+    for (half_angle, rise) in SPOKES_CORNERS {
+        std::fs::write(
+            spokes_fixture(half_angle),
+            sweep::fixture_json(&spokes_position(rise)),
+        )
+        .unwrap();
+    }
 }
 
-/// The move of `SPOKES_FIXTURE` that leaves node 0 between its spokes,
-/// with the recorded position, the rules and the test for a point inside
-/// that corner: heading left, within 50 degrees of the chord to node 2.
-fn spokes_case() -> (GameState, FaceMove, Rules, impl Fn(&Point) -> bool) {
-    let state = position(&std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(SPOKES_FIXTURE));
-    let live = spokes_position();
-    assert_eq!(
-        bits_of(&live),
-        bits_of(&state),
-        "the fixture is the recorded position"
-    );
-    let want = rules(&state);
-    assert_eq!(spokes_at(&state, 0).len(), 2);
+/// The chord from node 0 to node 2 through the corner between node 0's
+/// spokes in `state`, the spokes fixture with `rise`, and the test for a
+/// point inside that corner: heading left, within the corner's half-angle
+/// of the chord to node 2. The chord is told from the one round the back
+/// by where its taut path leaves at the human clearances.
+fn corner_chord(state: &GameState, rise: f64) -> (FaceMove, impl Fn(&Point) -> bool) {
+    assert_eq!(spokes_at(state, 0).len(), 2);
     let end = state.nodes[0].position;
-    let between = move |q: &Point| q.x < end.x && (q.y - end.y).abs() < (end.x - q.x) * 1.19;
-    let mv = listed(&state, 0, 2)
-        .into_iter()
-        .find(|m| {
-            plan(&mut Router::new(), &state, m, &want, Parity::Search)
-                .is_ok_and(|(_, taut)| between(&taut[1]))
-        })
-        .expect("a move leaving between the spokes");
+    let between =
+        move |q: &Point| q.x < end.x && (q.y - end.y).abs() < (end.x - q.x) * rise / 200.0;
+    let mut human = state.clone();
+    human.current_player = Player::Human;
+    let want = rules(&human);
+    let mut moves = listed(state, 0, 2);
+    moves.retain(|m| {
+        plan(&mut Router::new(), &human, m, &want, Parity::Search)
+            .is_ok_and(|(_, taut)| between(&taut[1]))
+    });
+    assert_eq!(moves.len(), 1, "one chord through the corner: {moves:?}");
+    (moves.remove(0), between)
+}
+
+/// The chord through the corner between node 0's spokes draws down to
+/// the corner the fit margin allows at the forgiven radius: the AI draws
+/// it at 30 degrees and refuses it at 20 as Room (its floor is 22, where
+/// the margin fits between the spokes 8 units out), and the human draws
+/// every one (its floor is 17.5, the margin 10 units out). Each drawn
+/// curve stays in the corner over the first node room and is a clearance
+/// off both spokes at the end of it.
+#[test]
+fn a_chord_into_a_narrow_corner_draws_down_to_the_margin_floor() {
+    let ai_draws = [false, true, true, true];
+    for ((half_angle, rise), ai) in SPOKES_CORNERS.into_iter().zip(ai_draws) {
+        let mut state = recorded_spokes_position(half_angle, rise);
+        let (mv, between) = corner_chord(&state, rise);
+        for (player, drawable) in [(Player::AI, ai), (Player::Human, true)] {
+            state.current_player = player;
+            let want = rules(&state);
+            let verdict = route(&state, &mv);
+            assert_eq!(
+                verdict.is_ok(),
+                drawable,
+                "{half_angle} degrees as {player:?}: {verdict:?}"
+            );
+            if drawable {
+                assert_curve_leaves_spokes(&state, &mv, &want, &between, true);
+            } else {
+                assert_eq!(verdict.unwrap_err(), Unroutable::Room);
+            }
+        }
+    }
+}
+
+/// The 50 degree spokes fixture's chord through the corner, with the
+/// recorded position, the rules and the test for a point in the corner.
+fn spokes_case() -> (GameState, FaceMove, Rules, impl Fn(&Point) -> bool) {
+    let (half_angle, rise) = SPOKES_CORNERS[3];
+    let state = recorded_spokes_position(half_angle, rise);
+    let want = rules(&state);
+    let (mv, between) = corner_chord(&state, rise);
     (state, mv, want, between)
+}
+
+/// The spokes fixture for `half_angle`, checked against the position it
+/// was recorded from.
+fn recorded_spokes_position(half_angle: usize, rise: f64) -> GameState {
+    let state = position(&spokes_fixture(half_angle));
+    assert_eq!(
+        bits_of(&spokes_position(rise)),
+        bits_of(&state),
+        "the {half_angle} degree fixture is the recorded position"
+    );
+    state
 }
 
 /// Least distance from `q` to a spoke of node 0.
@@ -1748,4 +1815,136 @@ fn probe_shared_game_picks() {
         }
         eprintln!("{nodes} nodes: {yes} of {of} AI moves redraw over {games} games");
     }
+}
+
+/// The far runs of `path` for ends at `ends` and radius 8: every point
+/// of a run lies outside the radius, and every cut (a run end that is
+/// not an end of the path) lies on it within 1e-6.
+fn far_runs(path: &[Point], ends: &[Point]) -> Vec<Vec<Point>> {
+    let runs = erode::beyond(path, ends, 8.0);
+    let nearest = |q: &Point| {
+        ends.iter()
+            .map(|e| e.distance_to(q))
+            .fold(f64::INFINITY, f64::min)
+    };
+    for run in &runs {
+        assert!(run.len() >= 2, "a run has two points: {run:?}");
+        for q in run {
+            assert!(nearest(q) >= 8.0 - 1e-6, "{q:?} lies inside the radius");
+        }
+        for cut in [run[0], run[run.len() - 1]] {
+            if Some(&cut) != path.first() && Some(&cut) != path.last() {
+                assert!(
+                    (nearest(&cut) - 8.0).abs() < 1e-6,
+                    "cut {cut:?} is {} from the radius",
+                    nearest(&cut) - 8.0
+                );
+            }
+        }
+    }
+    runs
+}
+
+/// A straight spoke between the move's two ends has no far part when
+/// the two forgiven discs cover it, and a 17 unit one keeps the unit
+/// between them, cut on the segment since both vertices lie inside.
+#[test]
+fn a_spoke_between_the_ends_is_cut_on_its_segment() {
+    let a = p(100.0, 100.0);
+    assert!(far_runs(&[a, p(115.0, 100.0)], &[a, p(115.0, 100.0)]).is_empty());
+    let b = p(117.0, 100.0);
+    assert_eq!(
+        far_runs(&[a, b], &[a, b]),
+        vec![vec![p(108.0, 100.0), p(109.0, 100.0)]]
+    );
+}
+
+/// A loop back to its own node is cut at both ends by the one owner.
+#[test]
+fn a_loop_spoke_is_cut_where_it_leaves_and_where_it_returns() {
+    let a = p(100.0, 100.0);
+    let path = [a, p(120.0, 100.0), p(120.0, 120.0), p(100.0, 120.0), a];
+    let runs = far_runs(&path, &[a]);
+    assert_eq!(runs.len(), 1);
+    let run = &runs[0];
+    assert_eq!(run.len(), 5);
+    assert!(run[0].distance_to(&p(108.0, 100.0)) < 1e-6);
+    assert_eq!(&run[1..4], &path[1..4]);
+    assert!(run[4].distance_to(&p(100.0, 108.0)) < 1e-6);
+}
+
+/// A spoke that leaves the radius, bends back inside it and leaves again
+/// gives two runs, so the stretch inside carries no margin, as the
+/// validator forgives a crossing there.
+#[test]
+fn a_spoke_that_comes_back_inside_gives_two_far_runs() {
+    let a = p(100.0, 100.0);
+    let path = [
+        a,
+        p(120.0, 100.0),
+        p(120.0, 106.0),
+        p(102.0, 106.0),
+        p(102.0, 130.0),
+    ];
+    let runs = far_runs(&path, &[a]);
+    assert_eq!(runs.len(), 2);
+    assert!(runs[0][0].distance_to(&p(108.0, 100.0)) < 1e-6);
+    assert_eq!(&runs[0][1..3], &path[1..3]);
+    // The y = 106 segment meets the radius where x - 100 = sqrt(64 - 36),
+    // the x = 102 segment where y - 100 = sqrt(64 - 4).
+    let back_in = runs[0].last().unwrap();
+    assert!(
+        back_in.distance_to(&p(100.0 + 28f64.sqrt(), 106.0)) < 1e-6,
+        "{back_in:?}"
+    );
+    let out_again = runs[1][0];
+    assert!(
+        out_again.distance_to(&p(102.0, 100.0 + 60f64.sqrt())) < 1e-6,
+        "{out_again:?}"
+    );
+    assert_eq!(runs[1][1], path[4]);
+}
+
+/// A spoke to another node is cut once, at its own end, and keeps that
+/// node's end.
+#[test]
+fn a_spoke_to_another_node_keeps_its_far_end() {
+    let a = p(100.0, 100.0);
+    let path = [a, p(150.0, 100.0), p(200.0, 140.0)];
+    let runs = far_runs(&path, &[a]);
+    assert_eq!(runs.len(), 1);
+    assert!(runs[0][0].distance_to(&p(108.0, 100.0)) < 1e-6);
+    assert_eq!(&runs[0][1..], &path[1..]);
+}
+
+/// A chord drawn alongside a straight line between its own two ends: the
+/// shared spoke is a two point polyline with both vertices inside the
+/// ends' forgiven radius, and a cut that looked at vertices alone left it
+/// with no far part, so the path ran along it and the read-back refused
+/// the heading as PathAlongLine.
+#[test]
+fn a_chord_beside_a_straight_line_between_its_ends_leaves_the_line() {
+    let state = position(
+        &std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("fixtures/routing/corridor-4n-2m.json"),
+    );
+    let mv = FaceMove {
+        a: 0,
+        at_a: Some(4),
+        b: 5,
+        at_b: Some(6),
+        enclosed: Vec::new(),
+    };
+    let line = crate::embedding::half_edge_path(&state, 4);
+    assert_eq!(line.len(), 2, "the spoke between the ends is straight");
+    let drawn = route(&state, &mv).unwrap();
+    let flat = drawn.flatten(curve::tolerance(state.board_size));
+    let (far_from_line, total) = flat.iter().fold((0usize, 0usize), |(far, n), q| {
+        let gap = closest_point_on_polyline(&line, q).1;
+        (far + usize::from(gap > curve::tolerance(1000)), n + 1)
+    });
+    assert!(
+        far_from_line * 2 > total,
+        "{far_from_line} of {total} points off the line"
+    );
 }

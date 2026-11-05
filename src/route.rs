@@ -124,6 +124,8 @@ struct Rules {
     /// Within this distance of a node a crossing of that node's own spoke
     /// changes nothing: the validator forgives it and the embedding reads
     /// the corner from where the curve leaves the MIN_PATH_CLEARANCE circle.
+    /// A corner between two spokes is drawable while the fit margin fits
+    /// between them at this radius.
     forgiven: f64,
     /// Node clearance to fall back to when the wanted one cannot be drawn.
     fallback: f64,
@@ -136,14 +138,14 @@ fn rules(state: &GameState) -> Rules {
         Player::AI => Rules {
             clearance: MIN_PATH_CLEARANCE_AI * s,
             node_clearance: ai_node_clearance(state.board_size),
-            forgiven: (AI_INTERSECTION_TOLERANCE / 2.0).min(MIN_PATH_CLEARANCE) * s,
+            forgiven: AI_INTERSECTION_TOLERANCE.min(MIN_PATH_CLEARANCE) * s,
             fallback: MIN_PATH_CLEARANCE * s,
             spacing: MIN_NODE_SPACING_AI * s,
         },
         Player::Human => Rules {
             clearance: MIN_PATH_CLEARANCE * s,
             node_clearance: MIN_PATH_CLEARANCE * s,
-            forgiven: (HUMAN_INTERSECTION_TOLERANCE / 2.0).min(MIN_PATH_CLEARANCE) * s,
+            forgiven: HUMAN_INTERSECTION_TOLERANCE.min(MIN_PATH_CLEARANCE) * s,
             fallback: MIN_PATH_CLEARANCE * s,
             spacing: MIN_NODE_SPACING * s,
         },

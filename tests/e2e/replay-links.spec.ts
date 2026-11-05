@@ -34,14 +34,14 @@ const fixtures = [
 // face moves and human moves as geometry. Per game: the payload budget in
 // characters and how many of the AI's moves go as topology. The budget
 // belongs to the recording: it is the payload measured when the game was
-// recorded (726 and 1186) with about 10 percent headroom, and a new
+// recorded (828 and 1335) with about 10 percent headroom, and a new
 // recording brings its own. A settled record sends each human stroke as
 // its exact cubics, 13 to 19 per stroke at twice the human clearance.
 // Every AI move of both games is the router's own line, so all of them
 // travel as topology.
 const routed: [string, number, number][] = [
-  ["fixtures/saved/eight-moves-4n-1000.json", 800, 4],
-  ["fixtures/saved/ten-moves-9n-1000.json", 1305, 5],
+  ["fixtures/saved/eight-moves-4n-1000.json", 910, 4],
+  ["fixtures/saved/ten-moves-9n-1000.json", 1470, 5],
 ];
 
 const entries = (page: Page) => page.locator("#moveList li");
