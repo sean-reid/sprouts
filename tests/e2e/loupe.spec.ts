@@ -106,29 +106,61 @@ function stopLensRecorder(page: Page): Promise<LensFrame[]> {
   });
 }
 
+// Which side of the finger the lens is on, or 0 while it passes above or below.
+function sideOf(lens: Client, finger: Client): -1 | 0 | 1 {
+  const dx = lens.x - finger.x;
+  return Math.abs(dx) < RADIUS / 2 ? 0 : dx > 0 ? 1 : -1;
+}
+
+// True when the lens is within 30 degrees of straight below the finger.
+function isUnder(lens: Client, finger: Client): boolean {
+  const angle = Math.atan2(lens.x - finger.x, finger.y - lens.y);
+  return Math.abs(angle) > (Math.PI * 5) / 6;
+}
+
+interface Recording {
+  largest: number;
+  slides: number;
+  flips: number;
+  longestUnder: number;
+}
+
 // No frame moves the lens further than the finger's 8 px sample plus the arc
 // the follower allows for it, so a flip to the other side of the finger fails
-// here, and the disc never reaches the finger while it slides.
-function expectNoJump(frames: LensFrame[]): { largest: number; slides: number } {
+// here. While a side fits the lens never rests under the finger, and a pass
+// under it on the way to the other side lasts a few frames at most.
+function expectNoJump(frame: Frame, frames: LensFrame[]): Recording {
   let largest = 0;
   let slides = 0;
+  let flips = 0;
+  let longestUnder = 0;
+  let under = 0;
+  let side: -1 | 0 | 1 = 0;
   for (let i = 1; i < frames.length; i++) {
     const a = frames[i - 1]!;
     const b = frames[i]!;
     if (!a.lens || !b.lens) continue;
     const moved = Math.hypot(b.lens.x - a.lens.x, b.lens.y - a.lens.y);
     largest = Math.max(largest, moved);
-    if (b.finger) {
-      expect(Math.hypot(b.lens.x - b.finger.x, b.lens.y - b.finger.y)).toBeGreaterThanOrEqual(
-        RADIUS,
-      );
-    }
     const fingerMoved =
       a.finger && b.finger ? Math.hypot(b.finger.x - a.finger.x, b.finger.y - a.finger.y) : 0;
     if (fingerMoved < 0.5 && moved > 2) slides++;
+    if (!b.finger) continue;
+    const now = sideOf(b.lens, b.finger);
+    if (now !== 0 && side !== 0 && now !== side) flips++;
+    if (now !== 0) side = now;
+    if (isUnder(b.lens, b.finger) && aSideFits(frame, b.finger)) {
+      under++;
+      longestUnder = Math.max(longestUnder, under);
+      if (fingerMoved < 0.5 && moved < 0.5)
+        throw new Error(`the lens rested under the finger at frame ${i}`);
+    } else {
+      under = 0;
+    }
   }
   expect(largest).toBeLessThanOrEqual(8 + 8 * LOUPE_FOLLOW + 1);
-  return { largest, slides };
+  expect(longestUnder).toBeLessThanOrEqual(18);
+  return { largest, slides, flips, longestUnder };
 }
 
 // Whether a lens beside the finger fits on either side at the finger's height.
@@ -372,7 +404,7 @@ test("the lens slides beside the finger across the top edge without a jump", asy
     expectLensPlaced(frame, lens, finger);
     steps.push(`${Math.round(finger.y - frame.top)}:${Math.round(lens.x)},${Math.round(lens.y)}`);
   }
-  const { largest } = expectNoJump(await stopLensRecorder(page));
+  const { largest } = expectNoJump(frame, await stopLensRecorder(page));
   test.info().annotations.push({
     type: "lens-centres",
     description: `${steps.join(" ")} largest frame move ${largest.toFixed(1)}`,
@@ -447,13 +479,36 @@ test("the lens keeps its lift and stays on the canvas along the whole top edge",
     if (i === 1) await shot(page, "loupe-top-edge-left");
   }
   // Past the side limit the spot crosses to the other side of the finger,
-  // and the lens gets there over frames with the finger still.
-  const { largest, slides } = expectNoJump(await stopLensRecorder(page));
+  // once, and the lens gets there over frames with the finger still.
+  const frames = await stopLensRecorder(page);
+  const { largest, slides, flips, longestUnder } = expectNoJump(frame, frames);
   expect(slides).toBeGreaterThanOrEqual(3);
+  expect(flips).toBe(1);
   test.info().annotations.push({
     type: "largest-frame-move",
-    description: `${largest.toFixed(1)} px, ${slides} frames sliding with the finger still`,
+    description: `${largest.toFixed(1)} px, ${slides} frames sliding with the finger still, ${longestUnder} frames passing under`,
   });
   await shot(page, "loupe-top-edge-right");
+
+  // The lens does not flip back on a pixel of jitter here, nor when the
+  // finger retraces 80 px of the line: the side it chose holds until an
+  // edge forces the other.
+  await startLensRecorder(page);
+  for (let i = 0; i < 10; i++) {
+    const jitter = { x: finger.x + (i % 2 ? 1 : -1), y: finger.y };
+    await touchDrag(cdp, finger, jitter, 0, 1);
+    finger = jitter;
+    await nextFrame(page);
+  }
+  await settledLens(page);
+  for (const next of path.slice(-11, -1).reverse()) {
+    await touchDrag(cdp, finger, next, 0, 2);
+    finger = next;
+    await nextFrame(page);
+  }
+  await settledLens(page);
+  for (const f of await stopLensRecorder(page)) {
+    if (f.lens && f.finger) expect(sideOf(f.lens, f.finger)).not.toBe(1);
+  }
   await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
 });

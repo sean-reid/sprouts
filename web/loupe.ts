@@ -47,10 +47,12 @@ export function nearestFeature(world: Point, state: GameState, view: View): numb
 
 export type LoupeSide = 1 | -1;
 // When the target moves to another spot the lens swings round the finger
-// toward it: LOUPE_FOLLOW px of arc per px the finger moves, and at least
-// LOUPE_SETTLE px a frame with the finger still.
+// toward it: LOUPE_FOLLOW px of arc per px the finger moves, at least
+// LOUPE_SETTLE px a frame with the finger still, and LOUPE_CROSS px a frame
+// while it changes sides, so the pass under the finger is short.
 export const LOUPE_FOLLOW = 1.5;
 export const LOUPE_SETTLE = 6;
+export const LOUPE_CROSS = 12;
 
 const DEGREE = Math.PI / 180;
 
@@ -58,13 +60,14 @@ export function lensAt(finger: Point, angle: number): Point {
   return { x: finger.x + LOUPE_LIFT * Math.sin(angle), y: finger.y - LOUPE_LIFT * Math.cos(angle) };
 }
 
-// Degrees the stroke's side is preferred by, so a symmetric choice keeps the
-// side and an edge that forces the lens lower than that swings it across.
+// Degrees the current side is preferred by. The side follows the chosen spot,
+// so switching back needs the old side to win by the same margin: a finger
+// at the crossover does not flip the lens on a pixel of jitter.
 const SIDE_PREFERENCE = 10;
 
 // The angle round the finger, zero straight above, of the spot LOUPE_LIFT
 // away that keeps the whole disc on the canvas: the highest one, on the
-// stroke's side when the sides are close, so the lens drops below the finger
+// current side when the sides are close, so the lens drops below the finger
 // only when neither side has a higher spot, which is the top corners.
 export function loupeAngle(finger: Point, width: number, height: number, side: LoupeSide): number {
   let best = 0;
@@ -83,12 +86,15 @@ export function loupeAngle(finger: Point, width: number, height: number, side: L
 }
 
 // Turns the lens from one angle toward another the short way round, by at
-// most the arc the finger's travel allows.
+// most the arc the finger's travel allows, or LOUPE_CROSS when the target is
+// on the other side of the finger.
 export function loupeStep(from: number, target: number, travel: number): number {
   let delta = target - from;
   while (delta > Math.PI) delta -= Math.PI * 2;
   while (delta < -Math.PI) delta += Math.PI * 2;
-  const limit = Math.max(LOUPE_SETTLE, travel * LOUPE_FOLLOW) / LOUPE_LIFT;
+  const crossing = Math.sign(from) !== Math.sign(target) && Math.abs(delta) > Math.PI / 2;
+  const limit =
+    (crossing ? LOUPE_CROSS : Math.max(LOUPE_SETTLE, travel * LOUPE_FOLLOW)) / LOUPE_LIFT;
   if (Math.abs(delta) <= limit) return target;
   return from + Math.sign(delta) * limit;
 }
@@ -152,6 +158,7 @@ export class Loupe {
       this.side = finger.x < view.width / 2 ? 1 : -1;
     }
     const target = loupeAngle(finger, view.width, view.height, this.side ?? 1);
+    if (target !== 0) this.side = target > 0 ? 1 : -1;
     const travel = this.finger ? Math.hypot(finger.x - this.finger.x, finger.y - this.finger.y) : 0;
     const angle = this.angle === null ? target : loupeStep(this.angle, target, travel);
     this.angle = angle;
