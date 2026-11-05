@@ -49,9 +49,9 @@ pub const VERSION_2_SEEDED_GAME: &[u64] = &[
     0x8f113bc531349297,
     0xaa4214946ea76a11,
     0xff07eba13dd0bbd2,
-    0x999ff7acc122dfaf,
-    0x86ac3c630da9a16c,
-    0x8b35768b288cf498,
+    0x08cbae768f7e2e7e,
+    0x87c6765291b02c09,
+    0x2d6887abe3690e82,
 ];
 
 /// Picks for a random game from a small multiplicative generator, so the

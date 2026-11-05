@@ -724,7 +724,7 @@ fn the_leximin_ends_within_its_rounds_and_work() {
             let (before, _) = least_clearance(&copy);
             let report = settle_reported(&mut copy);
             let (after, at) = least_clearance(&copy);
-            assert!(report.rounds <= ROUNDS_V2, "{report:?}");
+            assert!(report.rounds <= ROUNDS_V2 + SHAPE_ROUNDS, "{report:?}");
             assert!(report.work <= WORK_CAP + 400_000, "{report:?}");
             assert!(
                 after + 1e-9 >= before,
@@ -748,8 +748,8 @@ fn the_leximin_ends_within_its_rounds_and_work() {
 
 /// The issue 98 game, whose fifth line hooked into node 11 with a corner
 /// of radius 2.9 units under version 1, replayed as topology under version
-/// 2: the hook ends at the target or wider, and no more lines are left
-/// under it than version 1 left.
+/// 2: the hook ends at the target or wider, and no line ends sharper than
+/// the sharpest version 1 left.
 #[test]
 fn the_hook_of_the_issue_98_game_is_straightened() {
     let fixture = replay::load(
@@ -765,11 +765,16 @@ fn the_hook_of_the_issue_98_game_is_straightened() {
         given.apply_move(mov).unwrap();
         settle(&mut given);
     }
+    // A line whose samples read straight has no bend entry, which is a
+    // bend at or above the target.
     let bends = |state: &GameState| -> Vec<f64> {
-        ratios(state)
-            .into_iter()
-            .filter(|(at, _)| matches!(at, Tightest::Bend(_)))
-            .map(|(_, r)| r)
+        let all = ratios(state);
+        (0..state.lines.len())
+            .map(|k| {
+                all.get(&Tightest::Bend(k))
+                    .copied()
+                    .unwrap_or(f64::INFINITY)
+            })
             .collect()
     };
     let hooked = bends(&given);
@@ -808,12 +813,54 @@ fn the_hook_of_the_issue_98_game_is_straightened() {
     let straightened = bends(&state);
     assert_eq!(straightened.len(), 9);
     assert!(straightened[4] >= 1.0, "{hooked:?} -> {straightened:?}");
-    let under = |bends: &[f64]| bends.iter().filter(|r| **r < 1.0).count();
+    let sharpest = |bends: &[f64]| bends.iter().copied().fold(f64::INFINITY, f64::min);
     assert!(
-        under(&straightened) <= under(&hooked),
+        sharpest(&straightened) + 1e-9 >= sharpest(&hooked),
         "{hooked:?} -> {straightened:?}"
     );
     assert!(same_face_model(&state));
+}
+
+/// The shape phase runs after the distance pairs are done, so a board
+/// carrying a kink settles its distances exactly as it would with shape
+/// off: the same pairs freeze and the least ends no lower.
+#[test]
+fn shape_costs_the_distance_pairs_nothing() {
+    let mut kinked = 0;
+    for fixture in all_fixtures() {
+        let mut drawn = fixture.start();
+        for recorded in &fixture.moves {
+            let mov = fixture_move(&drawn, recorded);
+            drawn.apply_move(mov).unwrap();
+            let mut with = drawn.clone();
+            with.settle_version = SETTLE_VERSION;
+            let mut without = with.clone();
+            let shaped = settle_reported(&mut with);
+            let plain = settle_without_shape(&mut without);
+            assert_eq!(
+                shaped.frozen, plain.frozen,
+                "{} nodes",
+                fixture.initial_nodes
+            );
+            let (a, _) = least_clearance(&with);
+            let (b, _) = least_clearance(&without);
+            assert!(
+                a + 1e-9 >= b,
+                "{} nodes: shape left the least at {a} against {b}",
+                fixture.initial_nodes
+            );
+            if ratios(&without)
+                .iter()
+                .any(|(at, r)| matches!(at, Tightest::Bend(_) | Tightest::Spokes(..)) && *r < 1.0)
+            {
+                kinked += 1;
+            }
+        }
+    }
+    assert!(
+        kinked > 0,
+        "no fixture position carries a kink to straighten"
+    );
 }
 
 /// Two chords leaving a node a few degrees apart: the settle turns their
@@ -849,7 +896,9 @@ fn close_spokes_at_a_node_are_turned_apart() {
 
 /// Version 1 on the 24-node fixture, where the work cap binds: the rounds,
 /// the work and the settled geometry over the game, as recorded on macOS.
+/// Release only, since it runs 68 million pair tests.
 #[test]
+#[cfg(not(debug_assertions))]
 fn version_1_settles_the_24_node_fixture_as_recorded() {
     const ROUNDS_24: usize = 918;
     const WORK_24: usize = 68_494_272;
@@ -1097,7 +1146,13 @@ fn report_game(name: &str, fixture: &replay::Fixture) {
     for (index, recorded) in fixture.moves.iter().enumerate() {
         let mov = fixture_move(&state, recorded);
         state.apply_move(mov).unwrap();
-        let report = if state.settle_version == 0 {
+        // A game recorded with no settle, or any game with SPROUTS_RESETTLE
+        // set, has a copy of each position settled at the env version.
+        let again = std::env::var("SPROUTS_RESETTLE").is_ok();
+        let report = if state.settle_version == 0 || again {
+            if state.settle_version != 0 {
+                settle_reported(&mut state);
+            }
             let mut copy = state.clone();
             copy.settle_version = std::env::var("SPROUTS_SETTLE")
                 .ok()

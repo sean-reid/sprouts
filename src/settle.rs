@@ -17,10 +17,9 @@
 //! pairs still free, so the rest of the board spreads round a crowded
 //! corner. Version 2 also measures shape: the radius a line bends at
 //! against half the line clearance, and the angle between two spokes at a
-//! node against 10 degrees. Shape comes second: a kink or a closed pair
-//! of spokes is pushed up to its target and no further, never sets the
-//! band the distance pairs spread in, and once at its target it may not
-//! drop back below it.
+//! node against 10 degrees. Shape comes second: once the distance pairs
+//! are done, the rounds left push kinks and closed spokes up to their
+//! targets and no further, while the least distance holds.
 
 use crate::curve::{self, Cubic};
 use crate::embedding;
@@ -37,6 +36,8 @@ pub const ROUNDS: usize = 64;
 /// Rounds per settle at version 2, where the stride collapsing on a stuck
 /// pair freezes it and the rounds go on.
 pub const ROUNDS_V2: usize = 128;
+/// Rounds the shape phase has to itself after the distance pairs are done.
+pub const SHAPE_ROUNDS: usize = 32;
 /// The chord between two unit tangents 10 degrees apart, twice the sine
 /// of half the angle, written out so no platform's sine is involved: two
 /// spokes that close at a node are as cramped as two lines one line
@@ -607,7 +608,8 @@ impl Layout {
     /// an infinite level measures every pair and skips none. `collect`
     /// takes the least ratio of every pair measured. A frozen pair is
     /// measured against its own ratio and neither pushed nor counted in
-    /// the least.
+    /// the least. Shape pairs are measured always and pushed only when
+    /// `shaping`, when the distance pairs are measured and not pushed.
     fn survey(
         &self,
         targets: &Targets,
@@ -615,6 +617,7 @@ impl Layout {
         mut push: Option<&mut Push>,
         mut collect: Option<&mut BTreeMap<Tightest, f64>>,
         frozen: &Frozen,
+        shaping: bool,
     ) -> Survey {
         let mut least = (f64::INFINITY, Tightest::Nothing);
         let mut energy = 0.0;
@@ -623,17 +626,19 @@ impl Layout {
         let mut held = f64::INFINITY;
         let mut shape = f64::INFINITY;
         let mut short = |d: f64, at: Tightest| -> Option<f64> {
-            tests += 1;
             let target = targets.of(at);
             let ratio = d / target;
             if let Some(collect) = collect.as_deref_mut() {
                 let slot = collect.entry(at).or_insert(f64::INFINITY);
                 *slot = slot.min(ratio);
             }
+            // Shape is read off the samples already taken and costs the
+            // work cap nothing, so it leaves the distance rounds as they are.
             if matches!(at, Tightest::Bend(_) | Tightest::Spokes(..)) {
                 shape = shape.min(ratio.min(1.0));
-                return (ratio < 1.0).then(|| STEP * (target - d) / 2.0);
+                return (shaping && ratio < 1.0).then(|| STEP * (target - d) / 2.0);
             }
+            tests += 1;
             if let Some((_, floor)) = frozen.iter().find(|(pair, _)| *pair == at) {
                 broken |= ratio < floor - EPS;
                 held = held.min(ratio);
@@ -646,7 +651,7 @@ impl Layout {
                 if level.is_finite() {
                     energy += (level - ratio) * (level - ratio);
                 }
-                Some(STEP * (level * target - d) / 2.0)
+                (!shaping).then(|| STEP * (level * target - d) / 2.0)
             } else {
                 None
             }
@@ -1125,7 +1130,7 @@ fn targets_of(state: &GameState) -> Targets {
 pub fn least_clearance(state: &GameState) -> (f64, Tightest) {
     let targets = targets_of(state);
     Layout::from_state(state, &targets).map_or((f64::INFINITY, Tightest::Nothing), |layout| {
-        let survey = layout.survey(&targets, f64::INFINITY, None, None, &[]);
+        let survey = layout.survey(&targets, f64::INFINITY, None, None, &[], false);
         (survey.least, survey.at)
     })
 }
@@ -1140,7 +1145,7 @@ pub fn ratios(state: &GameState) -> BTreeMap<Tightest, f64> {
     };
     let mut out = BTreeMap::new();
     if let Some(layout) = Layout::from_state(state, &targets) {
-        layout.survey(&targets, f64::INFINITY, None, Some(&mut out), &[]);
+        layout.survey(&targets, f64::INFINITY, None, Some(&mut out), &[], false);
     }
     out
 }
@@ -1241,8 +1246,16 @@ pub fn settle_reported(state: &mut GameState) -> Report {
             Report::nothing(),
         )
     } else {
-        relax(state, None)
+        relax(state, None, true)
     };
+    state.settles.push(undo);
+    report
+}
+
+/// Settles with the shape phase left out, for measuring what it costs.
+#[cfg(test)]
+pub(crate) fn settle_without_shape(state: &mut GameState) -> Report {
+    let (undo, report) = relax(state, None, false);
     state.settles.push(undo);
     report
 }
@@ -1252,7 +1265,7 @@ pub fn settle_reported(state: &mut GameState) -> Report {
 #[cfg(test)]
 pub(crate) fn settle_traced(state: &mut GameState) -> Vec<u64> {
     let mut trace = Vec::new();
-    let (undo, _) = relax(state, Some(&mut trace));
+    let (undo, _) = relax(state, Some(&mut trace), true);
     state.settles.push(undo);
     trace
 }
@@ -1278,6 +1291,7 @@ fn layout_hash(layout: &Layout) -> u64 {
 fn relax(
     state: &mut GameState,
     #[allow(unused_mut, unused_variables)] mut trace: Option<&mut Vec<u64>>,
+    shape: bool,
 ) -> (Undo, Report) {
     let mut undo = Undo {
         board: state.lines.len(),
@@ -1288,7 +1302,8 @@ fn relax(
         return (undo, report);
     }
     let version = state.settle_version;
-    let targets = Targets::for_version(version, state.board_size);
+    let mut targets = Targets::for_version(version, state.board_size);
+    targets.shape &= shape;
     let Some(origin) = Layout::from_state(state, &targets) else {
         return (undo, report);
     };
@@ -1306,14 +1321,14 @@ fn relax(
     // its nodes already; a board from an unsettled record is put there
     // first, when that keeps its model, so no round is judged against a
     // start the grid then moves and a held line is never off its node.
-    let mut first = layout.survey(&targets, f64::INFINITY, None, None, &[]);
+    let mut first = layout.survey(&targets, f64::INFINITY, None, None, &[], false);
     if version >= 2 {
         let mut start = layout.clone();
         start.quantise(grid(state.board_size), &targets);
         start.rebuild(&targets, &origin, &still);
         start.quantise(grid(state.board_size), &targets);
         let crossed = start.crossings(tolerance);
-        let survey = start.survey(&targets, f64::INFINITY, None, None, &[]);
+        let survey = start.survey(&targets, f64::INFINITY, None, None, &[], false);
         if survey.least + EPS >= first.least && start.keeps(state, &original, crossings, crossed) {
             layout = start;
             crossings = crossed;
@@ -1362,7 +1377,7 @@ fn relax(
             }
             None => {
                 let mut push = Push::empty(&layout);
-                let now = layout.survey(&targets, level, Some(&mut push), None, &frozen);
+                let now = layout.survey(&targets, level, Some(&mut push), None, &frozen, false);
                 work += now.tests;
                 (now, push)
             }
@@ -1381,6 +1396,7 @@ fn relax(
             (version >= 2).then_some(&mut push_after),
             None,
             &frozen,
+            false,
         );
         work += after.tests + state.lines.len();
         let roomier = after.least > least + EPS;
@@ -1393,7 +1409,6 @@ fn relax(
         let stood = moved > 0.0
             && (roomier || evener)
             && !after.broken
-            && after.shape + EPS >= now.shape
             && next.keeps(state, &original, crossings, crossed);
         if stood {
             layout = next;
@@ -1432,7 +1447,7 @@ fn relax(
         frozen.push((at, least));
         still.pair(&layout, at);
         cached = None;
-        let rest = layout.survey(&targets, f64::INFINITY, None, None, &frozen);
+        let rest = layout.survey(&targets, f64::INFINITY, None, None, &frozen, false);
         work += rest.tests;
         if !rest.least.is_finite() {
             report.stop = Stop::Stuck;
@@ -1442,6 +1457,55 @@ fn relax(
         at = rest.at;
         held = rest.held;
         stride = STRIDE_START * unit;
+    }
+    // The rounds left straighten kinks and part closed spokes, each round
+    // standing while the least shape ratio rises, no frozen pair breaks
+    // and the least distance holds.
+    if targets.shape {
+        let mut stride = STRIDE_START * unit;
+        let until = report.rounds + SHAPE_ROUNDS;
+        while report.rounds < until && work < WORK_CAP {
+            let mut push = Push::empty(&layout);
+            let now = layout.survey(
+                &targets,
+                f64::INFINITY,
+                Some(&mut push),
+                None,
+                &frozen,
+                true,
+            );
+            work += now.tests;
+            if now.shape + EPS >= 1.0 {
+                break;
+            }
+            report.rounds += 1;
+            let mut next = layout.clone();
+            next.apply(&push, stride, &still);
+            next.rebuild(&targets, &origin, &still);
+            next.quantise(grid(state.board_size), &targets);
+            let moved = next.farthest_from(&layout);
+            let after = next.survey(&targets, f64::INFINITY, None, None, &frozen, true);
+            work += after.tests + state.lines.len();
+            let crossed = next.crossings(tolerance);
+            let stood = moved > 0.0
+                && after.shape > now.shape + EPS
+                && !after.broken
+                && after.least + EPS >= now.least
+                && next.keeps(state, &original, crossings, crossed);
+            if stood {
+                layout = next;
+                crossings = crossed;
+                least = after.least;
+                at = after.at;
+                held = after.held;
+                stride = (stride * STRIDE_GROW).min(STRIDE_MAX * unit);
+            } else {
+                stride = if moved > 0.0 { stride / 2.0 } else { 0.0 };
+                if stride < floor {
+                    break;
+                }
+            }
+        }
     }
     report.work = work;
     report.held_nodes = still.nodes.iter().filter(|h| **h).count();

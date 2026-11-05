@@ -448,8 +448,10 @@ test("the lens keeps its lift and stays on the canvas along the whole top edge",
   const frame = await frameOf(page);
   const cdp = await page.context().newCDPSession(page);
 
-  // A human line that runs along the top edge, so a finger tracing it keeps
-  // the lens open from one side of the board to the other.
+  // A human line that runs along the top edge from near the left side to
+  // near the right, so a finger tracing it keeps the lens open from the
+  // zone where only its right side fits to the zone where only its left
+  // side fits, and the lens has to change side once on the way.
   const nodes = await boardNodes(page);
   const ids = [...nodes.keys()];
   const screen = new Map<number, Client>();
@@ -459,10 +461,14 @@ test("the lens keeps its lift and stays on the canvas along the whole top edge",
   const a = screen.get(leftmost)!;
   const b = screen.get(rightmost)!;
   const high = frame.top + 20;
+  const left = frame.left + 30;
+  const right = frame.left + frame.width - 30;
   await page.mouse.move(a.x, a.y);
   await page.mouse.down();
-  await page.mouse.move(a.x, high, { steps: 10 });
-  await page.mouse.move(b.x, high, { steps: 20 });
+  await page.mouse.move(left, a.y, { steps: 10 });
+  await page.mouse.move(left, high, { steps: 10 });
+  await page.mouse.move(right, high, { steps: 30 });
+  await page.mouse.move(right, b.y, { steps: 10 });
   await page.mouse.move(b.x, b.y, { steps: 10 });
   await page.mouse.up();
   await expect(page.locator("#status")).toHaveText(/Drag the dot/);
@@ -486,6 +492,10 @@ test("the lens keeps its lift and stays on the canvas along the whole top edge",
     if (Math.hypot(p.x - prev.x, p.y - prev.y) >= 8) path.push(p);
   }
   expect(path.length).toBeGreaterThan(20);
+  // The run starts where only the lens's right side fits and ends where
+  // only its left side fits, so the sweep must change side.
+  expect(path[0]!.x - frame.left).toBeLessThan(RADIUS + LIFT - 10);
+  expect(path[path.length - 1]!.x - frame.left).toBeGreaterThan(frame.width - RADIUS - LIFT + 10);
 
   const bottom = [...(await boardNodes(page)).keys()].reduce((best, id) => {
     const p = nodes.get(id);
