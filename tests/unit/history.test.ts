@@ -13,6 +13,7 @@ import {
   History,
   indicesCached,
   isIndexed,
+  ownLinkDeferred,
   LINK_QUANTUM,
   MOVE_LIST_VERSION,
   pendingIndex,
@@ -1052,6 +1053,35 @@ describe("a link that names moves by index", () => {
       if (storage) Object.defineProperty(globalThis, "localStorage", storage);
       else delete (globalThis as { localStorage?: unknown }).localStorage;
     }
+  });
+
+  it("defers the own-link check for a long uncached game", () => {
+    const game = (moves: number) => {
+      const history = new History(24, 1000);
+      for (let i = 0; i < moves; i++) {
+        history.push({
+          fromNode: i,
+          toNode: i + 1,
+          polyline: [at(100 + i, 500), at(200 + i, 500)],
+          newNodePos: at(150 + i, 500),
+        });
+      }
+      return history;
+    };
+    const link = (history: History) => {
+      const copy = history.clone();
+      copy.moves.forEach((move, i) => (move.indexed = { index: i, along: 0 }));
+      return decodeRecord(encodeRecord(copy))!;
+    };
+    const long = game(15);
+    expect(ownLinkDeferred(long.record(), link(long))).toBe(true);
+    const short = game(14);
+    expect(ownLinkDeferred(short.record(), link(short))).toBe(false);
+    const cached = game(15);
+    cached.moves.forEach((move, i) => (move.indexed = { index: i, along: 0 }));
+    expect(ownLinkDeferred(cached.record(), link(cached))).toBe(false);
+    expect(ownLinkDeferred({ ...long.record(), firstPlayer: "ai" }, link(long))).toBe(false);
+    expect(ownLinkDeferred(long.record(), decodeRecord(encodeRecord(long))!)).toBe(false);
   });
 
   it("knows when the saved record's indices cover a link's moves", () => {

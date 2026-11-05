@@ -11,6 +11,10 @@ import {
   interceptWorkerMessages,
   recordNodesOnScreen,
   colourPixelsNear,
+  clickAway,
+  drawBetween,
+  expectDotAt,
+  holdNext,
   lastRequestArgs,
   openBoard,
   playExchange,
@@ -254,6 +258,24 @@ test("a share after an undo and a new move indexes the whole game again", async 
   expect(await requestCount(page, "indexMoves")).toBe(2);
   const [plan] = (await lastRequestArgs(page, "indexMoves")) as [{ moves: unknown[] }];
   expect(plan.moves).toHaveLength(2);
+});
+
+// A share while the AI is thinking would queue its replays ahead of the
+// AI's move in the worker, so the button is disabled and the click does
+// nothing; the AI's move lands.
+test("Share is refused during the AI's turn and the move still lands", async ({ page }) => {
+  await openBoard(page);
+  await holdNext(page, "aiMove", 3_000);
+  const mid = await drawBetween(page, 0, 1, 4);
+  await expectDotAt(page, mid);
+  await clickAway(page);
+  await expect(page.locator("#status")).toHaveText(/AI is thinking/);
+  await expect(page.locator("#shareBtn")).toBeDisabled();
+  await page.locator("#shareBtn").click({ force: true });
+  await expect(page.locator("#status")).toHaveText("Your turn!", { timeout: 60_000 });
+  await expect(page.locator("#moveList li")).toHaveCount(2);
+  expect(await requestCount(page, "indexMoves")).toBe(0);
+  await expect(page.locator("#shareBtn")).toBeEnabled();
 });
 
 // A version 4 link of two moves, the second a face move, with its router

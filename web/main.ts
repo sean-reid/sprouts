@@ -17,8 +17,8 @@ import {
   loadSaved,
   pendingFace,
   drawn,
-  indicesCached,
   isIndexed,
+  ownLinkDeferred,
   pendingIndex,
   prepareLink,
   recordFromHash,
@@ -264,6 +264,7 @@ function busy(): boolean {
 
 function updateControls(): void {
   const idle = !busy();
+  shareBtn.disabled = !idle;
   undoBtn.disabled = !idle || timeline.atStart;
   backBtn.disabled = !idle || timeline.atStart;
   forwardBtn.disabled = !idle || timeline.atEnd;
@@ -1024,9 +1025,8 @@ async function copyLater(text: Promise<string>): Promise<boolean> {
 // goes out with a note when a visitor's replay would stop short.
 let sharing = false;
 async function share(): Promise<void> {
-  if (sharing) return;
+  if (sharing || busy()) return;
   sharing = true;
-  shareBtn.disabled = true;
   setStatus("Checking the link. A long game can take a while.");
   updateControls();
   try {
@@ -1076,7 +1076,6 @@ async function share(): Promise<void> {
     setStatus("Could not make the link: " + describe(error), "lose");
   } finally {
     sharing = false;
-    shareBtn.disabled = false;
     updateControls();
   }
 }
@@ -1261,21 +1260,12 @@ function placeUndo(): void {
   else gameControls.append(undoBtn);
 }
 
-// Indexing a saved game routes every move again, so boot only asks the
-// engine for a game this short; a longer uncached game's link opens in
-// review instead.
-const SHORT_GAME = 15;
-
 // An index link to the saved game: the cached indices are compared to the
-// link's, or for a short game without them the engine indexes the saved
-// record. The worker answers every call through a game instance, so one
-// is built on the saved record's header first. A failure reads as another
-// game, which the link then opens.
+// link's, or the engine indexes the saved record. The worker answers every
+// call through a game instance, so one is built on the saved record's
+// header first. A failure reads as another game, which the link then opens.
 async function ownIndexedGame(saved: GameRecord, linked: GameRecord): Promise<boolean> {
   if (!linked.moves.every(isIndexed) || saved.moves.length < linked.moves.length) return false;
-  if (!indicesCached(saved, linked.moves.length) && linked.moves.length >= SHORT_GAME) {
-    return false;
-  }
   try {
     const layout = saved.nodes ? { nodes: saved.nodes.map(([x, y]) => ({ x, y })) } : undefined;
     await engine.call(
@@ -1289,6 +1279,27 @@ async function ownIndexedGame(saved: GameRecord, linked: GameRecord): Promise<bo
     return await sameIndexedGame(saved, linked, (plan) => engine.call("indexMoves", plan));
   } catch {
     return false;
+  }
+}
+
+// A long uncached game opens in review first, then the engine indexes the
+// saved record while the page is held as during a share; when the indices
+// match the link, the saved game resumes live.
+async function verifyOwnLink(saved: GameRecord, linked: GameRecord): Promise<void> {
+  const epoch = gameEpoch;
+  sharing = true;
+  setStatus("Checking whether this is your saved game. A long game can take a while.");
+  updateControls();
+  const own = await ownIndexedGame(saved, linked).finally(() => {
+    sharing = false;
+    updateControls();
+  });
+  if (epoch !== gameEpoch) return;
+  if (own) {
+    dropHash();
+    await restore(saved, false);
+  } else {
+    settleAfterSeek();
   }
 }
 
@@ -1308,11 +1319,17 @@ async function boot(): Promise<void> {
   const epoch = gameEpoch;
   try {
     if (linked) {
-      if (saved && (sameGame(saved, linked) || (await ownIndexedGame(saved, linked)))) {
+      const deferred = saved !== null && ownLinkDeferred(saved, linked);
+      if (
+        saved &&
+        !deferred &&
+        (sameGame(saved, linked) || (await ownIndexedGame(saved, linked)))
+      ) {
         dropHash();
         await restore(saved, false);
       } else {
         await restore(linked, true);
+        if (saved && deferred && epoch + 1 === gameEpoch) await verifyOwnLink(saved, linked);
       }
     } else if (saved) {
       await restore(saved, false);

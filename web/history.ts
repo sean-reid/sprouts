@@ -1060,6 +1060,28 @@ export function indicesCached(saved: GameRecord, count: number): boolean {
   );
 }
 
+// Indexing a saved game routes every move again, so a page opening an
+// own link indexes a game this short at once and a longer uncached one
+// only after the link has opened.
+export const SHORT_GAME = 15;
+
+// Whether an index link could be the saved game but the check has to wait
+// for the engine: the headers match, the record's cache does not cover
+// the link's moves, and the game is SHORT_GAME moves or longer.
+export function ownLinkDeferred(saved: GameRecord, linked: GameRecord): boolean {
+  const count = linked.moves.length;
+  return (
+    count >= SHORT_GAME &&
+    linked.moves.every(isIndexed) &&
+    saved.moves.length >= count &&
+    saved.initialNodes === linked.initialNodes &&
+    saved.boardSize === linked.boardSize &&
+    saved.firstPlayer === linked.firstPlayer &&
+    saved.settleVersion === linked.settleVersion &&
+    !indicesCached(saved, count)
+  );
+}
+
 // Whether an index link names the saved game: the two carry the same
 // header and the engine indexes the saved record's first moves to the
 // link's, so a game played on past the link still reopens live. A link
