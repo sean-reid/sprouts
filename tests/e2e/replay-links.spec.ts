@@ -40,7 +40,7 @@ const fixtures = [
 // when the engine regenerates the whole game on a fresh board, and shapes
 // when the regenerated board refuses a move, as the nine-node,
 // thirty-move and 24-node games do. The budget belongs to the recording: the payload
-// measured when the game was recorded (34, 1486 and 2047) plus 10
+// measured when the game was recorded (34, 1486, 2047 and 691) plus 10
 // percent, rounded up. The nine-node game went from 1335 to 1486 when
 // the bare loop's circle points moved a quarter step off the heading
 // grid and its human strokes refit around them; the thirty-move game
@@ -50,7 +50,7 @@ const routed: [string, number, "indices" | "shapes", number][] = [
   ["fixtures/saved/eight-moves-4n-1000.json", 38, "indices", 4],
   ["fixtures/saved/ten-moves-9n-1000.json", 1635, "shapes", 5],
   ["fixtures/saved/thirty-moves-12n-1000.json", 2252, "shapes", 15],
-  ["fixtures/saved/ten-moves-24n-1000.json", 777, "shapes", 5],
+  ["fixtures/saved/ten-moves-24n-1000.json", 761, "shapes", 5],
 ];
 
 // A share replays the game up to three times in the engine, routing
