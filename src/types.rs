@@ -362,14 +362,20 @@ impl GameState {
         new_node.connection_count = 2;
         self.nodes.push(new_node);
 
-        // Add line
+        // A settling board's line is its spline, which both ends of a link
+        // hold exactly; the stroke it was drawn with stays with the move.
+        let flat = mov.flatten(curve::tolerance(self.board_size));
         let line = Line {
             id: self.next_line_id,
             from_node: mov.from_node,
             to_node: mov.to_node,
-            polyline: mov.polyline.clone(),
+            polyline: if self.settle_version > 0 {
+                flat.clone()
+            } else {
+                mov.polyline.clone()
+            },
             segments: mov.segments.clone(),
-            flat: mov.flatten(curve::tolerance(self.board_size)),
+            flat,
             new_node_pos: mov.new_node_pos,
             player: mov.player,
         };
@@ -445,6 +451,52 @@ mod tests {
             Player::Human,
             BOARD_SIZE,
         )
+    }
+
+    /// A hand stroke wobbles off its spline, and only the spline reaches a
+    /// visitor through a link, so a settling board keeps the flattening as
+    /// the line's polyline; an unsettled board keeps the stroke as drawn.
+    #[test]
+    fn a_settling_board_stores_a_line_as_the_flattening_of_its_spline() {
+        let stroke: Vec<Point> = (0..=40)
+            .map(|i| {
+                let t = i as f64 / 40.0;
+                let wobble = (t * 50.0).sin() * 1.5;
+                Point::new(
+                    300.0 + 400.0 * t,
+                    500.0 - 150.0 * (t * std::f64::consts::PI).sin() + wobble,
+                )
+            })
+            .collect();
+        let entered = |state: &GameState| {
+            state.entering(Move::new(
+                0,
+                1,
+                stroke.clone(),
+                Point::new(500.0, 350.0),
+                Player::Human,
+                1000,
+            ))
+        };
+        let mut settling = GameState::with_nodes(
+            vec![Point::new(300.0, 500.0), Point::new(700.0, 500.0)],
+            1000,
+        );
+        let mov = entered(&settling);
+        assert_ne!(mov.polyline, mov.flatten(curve::tolerance(1000)));
+        settling.apply_move(mov).unwrap();
+        let line = &settling.lines[0];
+        assert_eq!(line.polyline, line.flat);
+        assert_eq!(line.polyline, line.flatten(curve::tolerance(1000)));
+
+        let mut unsettled = GameState::with_nodes_at(
+            vec![Point::new(300.0, 500.0), Point::new(700.0, 500.0)],
+            1000,
+            0,
+        );
+        let mov = entered(&unsettled);
+        unsettled.apply_move(mov).unwrap();
+        assert_eq!(unsettled.lines[0].polyline, stroke);
     }
 
     /// Placing a node on a curve and placing it again where it landed
