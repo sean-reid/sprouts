@@ -908,7 +908,7 @@ fn record_shared_games() {
     record_shared_game(
         12,
         30,
-        pick("SPROUTS_PICK_12", 4),
+        pick("SPROUTS_PICK_12", 1),
         &dir.join("thirty-moves-12n-1000.json"),
     );
 }
@@ -2025,7 +2025,7 @@ fn a_chord_beside_a_straight_line_between_its_ends_leaves_the_line() {
 #[test]
 #[ignore]
 fn probe_index_time() {
-    for (nodes, moves, pick) in [(12, 30, 4), (24, 10, 0), (24, 20, 0)] {
+    for (nodes, moves, pick) in [(12, 30, 1), (24, 10, 0), (24, 20, 0)] {
         let game = match shared_game(nodes, moves, pick) {
             Ok(game) => game,
             Err(why) => {
