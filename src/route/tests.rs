@@ -703,14 +703,29 @@ struct SharedGame {
     fixture: crate::replay::Fixture,
     topology: Vec<Option<protocol::FaceMove>>,
     board: Vec<Point>,
+    human: HumanPaths,
+}
+
+/// How many human moves of a shared game each path of the selector
+/// played: a move at twice the human clearances, a chord at the human's
+/// own clearances once no doubled move exists, a chord at the AI's
+/// clearances once no chord exists at the human's, and a loop on either
+/// fallback once no chord exists at all.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct HumanPaths {
+    doubled: usize,
+    plain: usize,
+    tight: usize,
+    looped: usize,
 }
 
 /// Plays a game of `moves` moves on `nodes` nodes at the current settle,
 /// the human moving first: human lines are routed at twice the human
-/// clearances, so the rounded strokes of a link still pass, and then
-/// kinked by more than the redraw tolerance, so they travel as geometry;
-/// AI lines are the first search move the router draws. Every move goes
-/// in the way the page sends it. A game the AI cannot finish is an error
+/// clearances, so the rounded strokes of a link still pass, falling back
+/// to the human's own clearances, then the AI's, and then kinked by
+/// more than the redraw tolerance, so they travel as geometry; AI lines
+/// are the first search move the router draws. Every move goes in the
+/// way the page sends it. A game neither side can continue is an error
 /// naming the move.
 fn shared_game(nodes: usize, moves: usize, pick: usize) -> Result<SharedGame, String> {
     let mut state = GameState::with_board_size(nodes, 1000);
@@ -730,7 +745,11 @@ fn shared_game(nodes: usize, moves: usize, pick: usize) -> Result<SharedGame, St
         fallback: 2.0 * human.fallback,
         ..human
     };
+    state.current_player = Player::AI;
+    let tight = rules(&state);
+    state.current_player = Player::Human;
     let mut record = Vec::new();
+    let mut paths = HumanPaths::default();
     for index in 0..moves {
         let wire = if state.current_player == Player::Human {
             // Long chords first, as a hand plays across a fresh board; a
@@ -747,49 +766,82 @@ fn shared_game(nodes: usize, moves: usize, pick: usize) -> Result<SharedGame, St
                     .then(span(y).total_cmp(&span(x)))
             });
             let n = listed.len();
-            listed
-                .iter()
-                .cycle()
-                .skip(pick % n)
-                .take(n)
-                .find_map(|face| {
-                    let routed = Router::new()
-                        .route_at(&state, face, &slack, Parity::Search)
-                        .ok()?;
-                    // One smooth bulge along the length, so the stroke
-                    // still fits in a few cubics and differs from the
-                    // router's line.
-                    let mut along = vec![0.0];
-                    for pair in routed.polyline.windows(2) {
-                        along.push(along.last().unwrap() + pair[0].distance_to(&pair[1]));
+            if n == 0 {
+                return Err(format!("game over at move {index}"));
+            }
+            let order = || listed.iter().cycle().skip(pick % n).take(n);
+            let admissible = |face: &FaceMove, want: &Rules| {
+                let routed = Router::new()
+                    .route_at(&state, face, want, Parity::Search)
+                    .ok()?;
+                // One smooth bulge along the length, so the stroke
+                // still fits in a few cubics and differs from the
+                // router's line.
+                let mut along = vec![0.0];
+                for pair in routed.polyline.windows(2) {
+                    along.push(along.last().unwrap() + pair[0].distance_to(&pair[1]));
+                }
+                let length = *along.last().unwrap();
+                let bent: Vec<Point> = routed
+                    .polyline
+                    .iter()
+                    .zip(&along)
+                    .map(|(q, s)| {
+                        let t = (std::f64::consts::PI * s / length).sin();
+                        Point::new(q.x + kink * t, q.y + kink * t)
+                    })
+                    .collect();
+                let wire = protocol::Move {
+                    from_node: face.a,
+                    to_node: face.b,
+                    polyline: bent,
+                    new_node_pos: routed.new_node_pos,
+                    segments: None,
+                };
+                let mov = protocol::enter(wire.clone(), &state).ok()?;
+                protocol::check(&state, &mov).ok()?;
+                let drawn = crate::embedding::embed(&state, &mov).ok()?;
+                // A stroke the router happens to redraw would travel
+                // as topology, so the game takes the next chord.
+                (drawn.enclosed.len() == face.enclosed.len()
+                    && !protocol::redraws(&state, face, &mov))
+                .then_some(wire)
+            };
+            let tiers = [
+                (&slack, &mut paths.doubled),
+                (&human, &mut paths.plain),
+                (&tight, &mut paths.tight),
+            ];
+            let mut found = None;
+            for (tier, (want, count)) in tiers.into_iter().enumerate() {
+                if let Some((face, wire)) =
+                    order().find_map(|face| Some((face, admissible(face, want)?)))
+                {
+                    if tier > 0 && face.a == face.b {
+                        paths.looped += 1;
+                    } else {
+                        *count += 1;
                     }
-                    let length = *along.last().unwrap();
-                    let bent: Vec<Point> = routed
-                        .polyline
-                        .iter()
-                        .zip(&along)
-                        .map(|(q, s)| {
-                            let t = (std::f64::consts::PI * s / length).sin();
-                            Point::new(q.x + kink * t, q.y + kink * t)
-                        })
-                        .collect();
-                    let wire = protocol::Move {
-                        from_node: face.a,
-                        to_node: face.b,
-                        polyline: bent,
-                        new_node_pos: routed.new_node_pos,
-                        segments: None,
-                    };
-                    let mov = protocol::enter(wire.clone(), &state).ok()?;
-                    protocol::check(&state, &mov).ok()?;
-                    let drawn = crate::embedding::embed(&state, &mov).ok()?;
-                    // A stroke the router happens to redraw would travel
-                    // as topology, so the game takes the next chord.
-                    (drawn.enclosed.len() == face.enclosed.len()
-                        && !protocol::redraws(&state, face, &mov))
-                    .then_some(wire)
-                })
-                .ok_or_else(|| format!("no human move at move {index}"))?
+                    found = Some(wire);
+                    break;
+                }
+            }
+            // A stop with no route at the AI's clearances is the router's,
+            // one with a route the bent stroke cannot take is the selector's.
+            found.ok_or_else(|| {
+                let routed = order()
+                    .filter(|face| {
+                        Router::new()
+                            .route_at(&state, face, &tight, Parity::Search)
+                            .is_ok()
+                    })
+                    .count();
+                if routed == 0 {
+                    format!("no human route at move {index}: none of {n} listed moves draws")
+                } else {
+                    format!("no human stroke at move {index}: {routed} of {n} listed moves draw")
+                }
+            })?
         } else {
             // The first search move that draws, routed without a clock, so
             // the record is the same on every run under any load.
@@ -838,6 +890,7 @@ fn shared_game(nodes: usize, moves: usize, pick: usize) -> Result<SharedGame, St
         fixture,
         topology,
         board: state.nodes.iter().map(|n| n.position).collect(),
+        human: paths,
     })
 }
 
@@ -1031,12 +1084,38 @@ fn a_shared_game_replays_to_the_same_board() {
     }
 }
 
+/// The recorder's default pick for the 12-node game.
+const PICK_12: usize = 0;
+
+/// The human selector keeps a 12-node game going when no chord routes at
+/// twice the human clearances: picks 3, 21 and 24 stopped between moves
+/// 26 and 28 with one tier and now play every move, one on each fallback
+/// path, and the default pick plays its thirty at the doubled clearances.
+#[test]
+#[cfg(not(debug_assertions))]
+fn the_selector_plays_a_twelve_node_game_past_a_doubled_clearance_stop() {
+    for pick in [3, 21, 24] {
+        let game = shared_game(12, 30, pick).unwrap();
+        assert_eq!(game.fixture.moves.len(), 30, "pick {pick}");
+        assert!(
+            game.human.plain + game.human.tight + game.human.looped > 0,
+            "pick {pick}: {:?}",
+            game.human
+        );
+    }
+    let game = shared_game(12, 30, PICK_12).unwrap();
+    assert_eq!(game.fixture.moves.len(), 30);
+    assert_eq!(game.human.doubled, 15, "{:?}", game.human);
+}
+
 /// The drift table over the 21 picks the recorder can play:
 /// `cargo test --release measure_shared_game_drift -- --ignored --nocapture`.
 #[test]
 #[ignore]
 fn measure_shared_game_drift() {
-    eprintln!("pick nodes moves topology refused node_drift board_drift index_refused index_bytes");
+    eprintln!(
+        "pick nodes moves topology refused node_drift board_drift index_refused index_bytes doubled plain tight looped"
+    );
     for pick in 0..21 {
         let game = match shared_game_at(pick) {
             Ok(game) => game,
@@ -1047,7 +1126,7 @@ fn measure_shared_game_drift() {
         };
         let drift = rehearse_shared_game(&game);
         eprintln!(
-            "{pick} {} {} {} {} {:.3} {:.3} {} {}",
+            "{pick} {} {} {} {} {:.3} {:.3} {} {} {} {} {} {}",
             game.fixture.initial_nodes,
             game.fixture.moves.len(),
             drift.topology,
@@ -1057,7 +1136,11 @@ fn measure_shared_game_drift() {
             drift
                 .index_refused
                 .map_or("none".to_string(), |i| i.to_string()),
-            drift.index_bytes
+            drift.index_bytes,
+            game.human.doubled,
+            game.human.plain,
+            game.human.tight,
+            game.human.looped
         );
     }
 }
@@ -1094,7 +1177,7 @@ fn record_shared_games() {
     record_shared_game(
         12,
         30,
-        pick("SPROUTS_PICK_12", 0),
+        pick("SPROUTS_PICK_12", PICK_12),
         &dir.join("thirty-moves-12n-1000.json"),
     );
     record_shared_game(
@@ -2200,6 +2283,59 @@ fn bits_of(state: &GameState) -> Vec<u64> {
     crate::settle::golden::bits(state)
 }
 
+/// How the recorder's 12-node game ends at each of the first 30 picks,
+/// recorded live, over at or before the last move, stopped by the human
+/// selector (a move routes but no bent stroke passes), stopped by the
+/// router (no move draws for the side to play), or refused by apply, and
+/// how many human moves of the recorded games took each selector path:
+/// `cargo test --release probe_twelve_node_picks -- --ignored --nocapture`.
+#[test]
+#[ignore]
+fn probe_twelve_node_picks() {
+    let (mut live, mut over, mut human, mut router, mut refused) = (0, 0, 0, 0, 0);
+    let mut paths = HumanPaths::default();
+    for pick in 0..30 {
+        match shared_game(12, 30, pick) {
+            Ok(game) => {
+                let state = crate::replay::play_as(&game.fixture, Player::Human);
+                let ended = state.face.search_moves().is_empty();
+                if ended {
+                    over += 1;
+                } else {
+                    live += 1;
+                }
+                paths.doubled += game.human.doubled;
+                paths.plain += game.human.plain;
+                paths.tight += game.human.tight;
+                paths.looped += game.human.looped;
+                eprintln!(
+                    "pick {pick}: recorded, game over {ended}, human moves doubled {} plain {} tight {} looped {}",
+                    game.human.doubled, game.human.plain, game.human.tight, game.human.looped
+                );
+            }
+            Err(why) => {
+                if why.contains("game over") {
+                    over += 1;
+                } else if why.contains("no human stroke") {
+                    human += 1;
+                } else if why.contains("rejected") {
+                    refused += 1;
+                } else {
+                    router += 1;
+                }
+                eprintln!("pick {pick}: {why}");
+            }
+        }
+    }
+    eprintln!(
+        "TABLE live {live} over {over} human-selector {human} router {router} apply-refused {refused}"
+    );
+    eprintln!(
+        "PATHS doubled {} plain {} tight {} looped {}",
+        paths.doubled, paths.plain, paths.tight, paths.looped
+    );
+}
+
 /// Records forty picks of each shared game and prints how many AI moves
 /// of each classify as topology, the first thing
 /// tests/e2e/replay-links.spec.ts needs of a recording:
@@ -2957,41 +3093,4 @@ fn probe_relaxed_fallbacks() {
     eprintln!(
         "relaxed paths kept {kept}, refused by push {pushed_none}, refused by the segment check {failed_segments}"
     );
-}
-
-/// How the recorder's 12-node game ends at each of the first 30 picks:
-/// recorded live, recorded but over, stopped by the human selector, or
-/// stopped by the router: `cargo test --release probe_twelve_node_picks
-/// -- --ignored --nocapture`.
-#[test]
-#[ignore]
-fn probe_twelve_node_picks() {
-    let (mut live, mut over, mut human, mut router, mut refused) = (0, 0, 0, 0, 0);
-    for pick in 0..30 {
-        match shared_game(12, 30, pick) {
-            Ok(game) => {
-                let state = crate::replay::play_as(&game.fixture, Player::Human);
-                if state.face.search_moves().is_empty() {
-                    over += 1;
-                } else {
-                    live += 1;
-                }
-                eprintln!(
-                    "pick {pick}: recorded, game over {}",
-                    state.face.search_moves().is_empty()
-                );
-            }
-            Err(why) => {
-                if why.contains("no human move") {
-                    human += 1;
-                } else if why.contains("rejected") {
-                    refused += 1;
-                } else {
-                    router += 1;
-                }
-                eprintln!("pick {pick}: {why}");
-            }
-        }
-    }
-    eprintln!("TABLE live {live} over {over} human-selector {human} router {router} apply-refused {refused}");
 }
