@@ -97,6 +97,11 @@ pub enum Outcome {
         snapshot: Snapshot,
         cut_off: usize,
         mov: Move,
+        /// The move's index and place in the move list, filled in by the
+        /// shadow board while a visitor's regeneration of the game holds.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        #[tsify(optional)]
+        indexed: Option<IndexedMove>,
     },
     Rejected {
         rejection: Rejection,
@@ -113,6 +118,95 @@ fn applied(state: &GameState) -> Outcome {
         snapshot: snapshot(state),
         cut_off: cut_off(&state.face),
         mov: Move::from(last.clone()),
+        indexed: None,
+    }
+}
+
+/// The board a visitor's engine would regenerate from the game's indices,
+/// kept alongside the live game and advanced as moves are applied, so
+/// each applied move learns its index and whether the regeneration still
+/// holds without replaying the game. Once a move is refused or the
+/// regenerated position differs the shadow stops following until an undo
+/// takes the live game back to where it stands.
+pub struct Shadow {
+    board: GameState,
+    refused: bool,
+}
+
+impl Shadow {
+    /// A fresh board on the live game's header, before any move.
+    pub fn new(state: &GameState) -> Self {
+        let positions = state.nodes[..state.initial_node_count]
+            .iter()
+            .map(|n| n.position)
+            .collect();
+        let mut board = GameState::with_nodes_at(positions, state.board_size, state.settle_version);
+        board.current_player = state.current_player;
+        Self {
+            board,
+            refused: false,
+        }
+    }
+
+    /// Follows the move `state` just applied, filling in `indexed` when the
+    /// regenerated board lists and draws it to the same position.
+    pub fn follow(&mut self, state: &GameState, outcome: &mut Outcome) {
+        let Outcome::Applied { indexed, .. } = outcome else {
+            return;
+        };
+        if self.refused || self.board.lines.len() + 1 != state.lines.len() {
+            self.refused = true;
+            return;
+        }
+        let Some(applied) = state.face.last_move() else {
+            self.refused = true;
+            return;
+        };
+        let Some(line) = state.move_history.last() else {
+            self.refused = true;
+            return;
+        };
+        let face = normalised(&self.board.face, applied.clone());
+        let other = flipped(&self.board.face, &face);
+        let same = |mv: &ModelMove| *mv == face || other.as_ref() == Some(mv);
+        let Some((index, listed)) = move_list(&self.board)
+            .into_iter()
+            .enumerate()
+            .find(|(_, mv)| same(mv))
+        else {
+            self.refused = true;
+            return;
+        };
+        let along = if line.player == Player::AI {
+            0
+        } else {
+            along_of(&line.segments, line.new_node_pos)
+        };
+        let spot = if along == 0 {
+            Spot::Router
+        } else {
+            Spot::Along(along)
+        };
+        if matches!(
+            apply_listed(&mut self.board, listed, spot),
+            Outcome::Rejected { .. }
+        ) || face::canonical_form(&state.face) != face::canonical_form(&self.board.face)
+        {
+            self.refused = true;
+            return;
+        }
+        *indexed = Some(IndexedMove { index, along });
+    }
+
+    /// Takes the shadow back to the live game's length after an undo; a
+    /// refusal at a move the undo removed is forgotten.
+    pub fn undo_to(&mut self, state: &GameState) {
+        while self.board.lines.len() > state.lines.len() {
+            undo(&mut self.board);
+        }
+        if self.board.lines.len() == state.lines.len() {
+            self.refused = false;
+        }
     }
 }
 
@@ -690,10 +784,13 @@ pub struct IndexedMove {
     pub along: u8,
 }
 
-/// Every move of a game by index, in the order played.
+/// Every move of a game by index, in the order played, up to the first
+/// move a regenerated board refuses or lists differently, which is named
+/// in `refused`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Tsify)]
 pub struct Indexed {
     pub moves: Vec<IndexedMove>,
+    pub refused: Option<usize>,
 }
 
 /// Every legal move of the position in the order a share link's indices
@@ -759,9 +856,10 @@ fn normalised(face: &face::FaceModel, mut mv: ModelMove) -> ModelMove {
 /// index in the position's move list, with the human's node as its place
 /// along the curve and the AI's left to the router. Alongside, the moves
 /// are replayed by index on a fresh board the way a visitor's engine
-/// replays the link; a move that board refuses, or that lists as another
-/// move there, is an error, so a link only goes out as indices when the
-/// visitor regenerates the recorded game.
+/// replays the link; the first move that board refuses, lists as another
+/// move, or ends as another position stops the indexing and is named, so
+/// a link only goes out as indices when the visitor regenerates the
+/// recorded game.
 pub fn index_moves(plan: Classification) -> Result<Indexed, String> {
     let mut state = start(
         plan.initial_nodes,
@@ -793,37 +891,45 @@ pub fn index_moves(plan: Classification) -> Result<Indexed, String> {
         } else {
             along_of(&mov.segments, mov.new_node_pos)
         };
-        let regenerated = move_list(&fresh)
-            .into_iter()
-            .nth(listed)
-            .filter(same)
-            .ok_or_else(|| format!("move {index}: the regenerated board lists another move"))?;
+        let Some(regenerated) = move_list(&fresh).into_iter().nth(listed).filter(same) else {
+            return Ok(Indexed {
+                moves,
+                refused: Some(index),
+            });
+        };
         let spot = if along == 0 {
             Spot::Router
         } else {
             Spot::Along(along)
         };
-        if let Outcome::Rejected { rejection } = apply_listed(&mut fresh, regenerated, spot) {
-            return Err(format!(
-                "move {index}: the regenerated board refuses it: {}",
-                rejection.message
-            ));
+        if matches!(
+            apply_listed(&mut fresh, regenerated, spot),
+            Outcome::Rejected { .. }
+        ) {
+            return Ok(Indexed {
+                moves,
+                refused: Some(index),
+            });
         }
-        moves.push(IndexedMove {
-            index: listed,
-            along,
-        });
         state
             .apply_move(mov)
             .map_err(|e| format!("move {index}: {}", e.message))?;
         settle::settle(&mut state);
         if face::canonical_form(&state.face) != face::canonical_form(&fresh.face) {
-            return Err(format!(
-                "move {index}: the regenerated board is another position"
-            ));
+            return Ok(Indexed {
+                moves,
+                refused: Some(index),
+            });
         }
+        moves.push(IndexedMove {
+            index: listed,
+            along,
+        });
     }
-    Ok(Indexed { moves })
+    Ok(Indexed {
+        moves,
+        refused: None,
+    })
 }
 
 /// Where a point sits along a curve, as a byte: 1 at the start, 255 at the
@@ -2577,11 +2683,13 @@ mod tests {
                 known: vec![None; fixture.moves.len()],
             };
             let indexed = match index_moves(plan) {
-                Ok(indexed) => indexed.moves,
-                Err(why) if why.contains("regenerated board") => {
-                    eprintln!("{name}: {why}");
+                Ok(Indexed {
+                    refused: Some(at), ..
+                }) => {
+                    eprintln!("{name}: the regenerated board refuses move {at}");
                     continue;
                 }
+                Ok(indexed) => indexed.moves,
                 Err(why) => panic!("{name}: {why}"),
             };
             indexed_games += 1;
@@ -2723,6 +2831,95 @@ mod tests {
             };
             apply(&mut recorded, m.wire());
         }
+    }
+
+    /// The shadow gives every applied move the index index_moves would,
+    /// and an undo lets it follow again.
+    #[test]
+    fn the_shadow_indexes_moves_as_they_are_applied() {
+        let mut state = GameState::new(5);
+        let mut shadow = Shadow::new(&state);
+        let mut record = Vec::new();
+        let mut shadowed = Vec::new();
+        for face in [
+            face_move(0, 0, vec![1, 2]),
+            face_move(3, 4, vec![]),
+            face_move(1, 2, vec![]),
+        ] {
+            let RouteReply::Routed { mov, .. } = route_move(&state, face) else {
+                panic!("the move did not route");
+            };
+            let mut outcome = apply(&mut state, mov);
+            shadow.follow(&state, &mut outcome);
+            let Outcome::Applied { mov, indexed, .. } = outcome else {
+                panic!("the move was refused");
+            };
+            record.push(mov);
+            shadowed.push(indexed.expect("the shadow indexed the move"));
+        }
+        let whole = index_moves(Classification {
+            initial_nodes: 5,
+            board_size: 1000,
+            first_player: Player::Human,
+            nodes: None,
+            settle_version: SETTLE_VERSION,
+            moves: record,
+            known: vec![None; 3],
+        })
+        .unwrap();
+        assert_eq!(whole.refused, None);
+        assert_eq!(shadowed, whole.moves);
+
+        assert!(undo(&mut state));
+        shadow.undo_to(&state);
+        let RouteReply::Routed { mov, .. } = route_move(&state, face_move(1, 2, vec![])) else {
+            panic!("the move did not route again");
+        };
+        let mut outcome = apply(&mut state, mov);
+        shadow.follow(&state, &mut outcome);
+        let Outcome::Applied { indexed, .. } = outcome else {
+            panic!("the move was refused");
+        };
+        assert_eq!(indexed, Some(shadowed[2]));
+    }
+
+    /// Once the regenerated board refuses a move the shadow stops indexing,
+    /// and follows again after an undo past the refusal.
+    #[test]
+    fn the_shadow_stops_at_a_refused_move_and_resumes_after_undo() {
+        let mut state = GameState::new(4);
+        let mut shadow = Shadow::new(&state);
+        let RouteReply::Routed { mov, .. } = route_move(&state, face_move(0, 1, vec![])) else {
+            panic!("the chord did not route");
+        };
+        let mut outcome = apply(&mut state, mov);
+        shadow.follow(&state, &mut outcome);
+        let Outcome::Applied { indexed, .. } = outcome else {
+            panic!("the chord was refused");
+        };
+        assert!(indexed.is_some());
+        shadow.refused = true;
+        let RouteReply::Routed { mov, .. } = route_move(&state, face_move(2, 3, vec![])) else {
+            panic!("the second chord did not route");
+        };
+        let mut outcome = apply(&mut state, mov);
+        shadow.follow(&state, &mut outcome);
+        let Outcome::Applied { indexed, .. } = outcome else {
+            panic!("the second chord was refused");
+        };
+        assert_eq!(indexed, None);
+        assert!(undo(&mut state));
+        shadow.undo_to(&state);
+        assert!(!shadow.refused);
+        let RouteReply::Routed { mov, .. } = route_move(&state, face_move(2, 3, vec![])) else {
+            panic!("the chord did not route again");
+        };
+        let mut outcome = apply(&mut state, mov);
+        shadow.follow(&state, &mut outcome);
+        let Outcome::Applied { indexed, .. } = outcome else {
+            panic!("the chord was refused again");
+        };
+        assert!(indexed.is_some());
     }
 
     /// A record from a newer settle would replay through this one and show
