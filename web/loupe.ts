@@ -46,48 +46,51 @@ export function nearestFeature(world: Point, state: GameState, view: View): numb
 }
 
 export type LoupeSide = 1 | -1;
-// When the target jumps, the lens slides after it: LOUPE_FOLLOW px per px
-// the finger moves, and at least LOUPE_SETTLE px a frame with the finger still.
-export const LOUPE_FOLLOW = 2.5;
+// When the target moves to another spot the lens swings round the finger
+// toward it: LOUPE_FOLLOW px of arc per px the finger moves, and at least
+// LOUPE_SETTLE px a frame with the finger still.
+export const LOUPE_FOLLOW = 1.5;
 export const LOUPE_SETTLE = 6;
 
 const DEGREE = Math.PI / 180;
 
-// The spot LOUPE_LIFT from the finger nearest to straight above it that keeps
-// the whole disc on the canvas, swinging round on the given side and under
-// the finger only at a corner where nothing else fits.
-export function loupeTarget(finger: Point, width: number, height: number, side: LoupeSide): Point {
-  let best: Point | null = null;
-  let bestCost = Infinity;
-  for (let degrees = -180; degrees <= 180; degrees++) {
-    const angle = degrees * DEGREE;
-    const p = {
-      x: finger.x + LOUPE_LIFT * Math.sin(angle),
-      y: finger.y - LOUPE_LIFT * Math.cos(angle),
-    };
-    if (p.x < RADIUS || p.x > width - RADIUS || p.y < RADIUS || p.y > height - RADIUS) continue;
-    const wrongSide = degrees !== 0 && Math.sign(degrees) !== side;
-    const cost = Math.abs(degrees) + (wrongSide ? 360 : 0);
-    if (cost < bestCost) {
-      bestCost = cost;
-      best = p;
-    }
-  }
-  return (
-    best ?? {
-      x: clamp(finger.x, RADIUS, width - RADIUS),
-      y: clamp(finger.y - LOUPE_LIFT, RADIUS, height - RADIUS),
-    }
-  );
+export function lensAt(finger: Point, angle: number): Point {
+  return { x: finger.x + LOUPE_LIFT * Math.sin(angle), y: finger.y - LOUPE_LIFT * Math.cos(angle) };
 }
 
-export function loupeStep(from: Point, target: Point, travel: number): Point {
-  const dx = target.x - from.x;
-  const dy = target.y - from.y;
-  const distance = Math.hypot(dx, dy);
-  const limit = Math.max(LOUPE_SETTLE, travel * LOUPE_FOLLOW);
-  if (distance <= limit) return target;
-  return { x: from.x + (dx * limit) / distance, y: from.y + (dy * limit) / distance };
+// Degrees the stroke's side is preferred by, so a symmetric choice keeps the
+// side and an edge that forces the lens lower than that swings it across.
+const SIDE_PREFERENCE = 10;
+
+// The angle round the finger, zero straight above, of the spot LOUPE_LIFT
+// away that keeps the whole disc on the canvas: the highest one, on the
+// stroke's side when the sides are close, so the lens drops below the finger
+// only when neither side has a higher spot, which is the top corners.
+export function loupeAngle(finger: Point, width: number, height: number, side: LoupeSide): number {
+  let best = 0;
+  let bestCost = Infinity;
+  for (let degrees = -180; degrees <= 180; degrees++) {
+    const p = lensAt(finger, degrees * DEGREE);
+    if (p.x < RADIUS || p.x > width - RADIUS || p.y < RADIUS || p.y > height - RADIUS) continue;
+    const wrongSide = degrees !== 0 && Math.sign(degrees) !== side;
+    const cost = Math.abs(degrees) + (wrongSide ? SIDE_PREFERENCE : 0);
+    if (cost < bestCost) {
+      bestCost = cost;
+      best = degrees * DEGREE;
+    }
+  }
+  return best;
+}
+
+// Turns the lens from one angle toward another the short way round, by at
+// most the arc the finger's travel allows.
+export function loupeStep(from: number, target: number, travel: number): number {
+  let delta = target - from;
+  while (delta > Math.PI) delta -= Math.PI * 2;
+  while (delta < -Math.PI) delta += Math.PI * 2;
+  const limit = Math.max(LOUPE_SETTLE, travel * LOUPE_FOLLOW) / LOUPE_LIFT;
+  if (Math.abs(delta) <= limit) return target;
+  return from + Math.sign(delta) * limit;
 }
 
 export function loupeSwings(finger: Point): boolean {
@@ -98,7 +101,7 @@ export class Loupe {
   private world: Point | null = null;
   private armed = false;
   private side: LoupeSide | null = null;
-  private centre: Point | null = null;
+  private angle: number | null = null;
   private finger: Point | null = null;
 
   // Arms once the finger has cleared the node the stroke started on, then
@@ -126,7 +129,7 @@ export class Loupe {
   hide(): boolean {
     const shown = this.world !== null;
     this.world = null;
-    this.centre = null;
+    this.angle = null;
     this.finger = null;
     return shown;
   }
@@ -148,12 +151,13 @@ export class Loupe {
     if (this.side === null && loupeSwings(finger)) {
       this.side = finger.x < view.width / 2 ? 1 : -1;
     }
-    const target = loupeTarget(finger, view.width, view.height, this.side ?? 1);
+    const target = loupeAngle(finger, view.width, view.height, this.side ?? 1);
     const travel = this.finger ? Math.hypot(finger.x - this.finger.x, finger.y - this.finger.y) : 0;
-    const centre = this.centre ? loupeStep(this.centre, target, travel) : target;
-    this.centre = centre;
+    const angle = this.angle === null ? target : loupeStep(this.angle, target, travel);
+    this.angle = angle;
     this.finger = finger;
-    const settling = centre.x !== target.x || centre.y !== target.y;
+    const centre = lensAt(finger, angle);
+    const settling = angle !== target;
     const project = (p: Point): Point => {
       const s = view.toScreen(p);
       return {

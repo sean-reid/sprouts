@@ -59,7 +59,7 @@ async function ringCentre(page: Page): Promise<Client> {
 // The ring once it has stopped sliding: two frames in a row at one spot.
 async function settledLens(page: Page): Promise<Client> {
   let last = await ringCentre(page);
-  for (let i = 0; i < 60; i++) {
+  for (let i = 0; i < 150; i++) {
     await nextFrame(page);
     const now = await ringCentre(page);
     if (Math.hypot(now.x - last.x, now.y - last.y) < 0.5) return now;
@@ -68,51 +68,88 @@ async function settledLens(page: Page): Promise<Client> {
   throw new Error("the lens did not settle");
 }
 
-// Reads the ring's position every frame until stopped, so a jump between two
-// touch samples shows up as one large frame-to-frame move.
+// One frame of the recording: the ring and the finger, canvas-local.
+interface LensFrame {
+  lens: Client | null;
+  finger: Client | null;
+}
+
+// Reads the ring's position every frame until stopped, with the finger's last
+// pointer position, so a jump between two touch samples shows up as one
+// large frame-to-frame move.
 function startLensRecorder(page: Page): Promise<void> {
   return page.evaluate((read) => {
-    const w = window as unknown as { lensFrames: (Client | null)[]; lensStop: boolean };
+    const w = window as unknown as { lensFrames: LensFrame[]; lensStop: boolean };
     w.lensFrames = [];
     w.lensStop = false;
     const box = new Function(`return (${read})()`) as () => Client | null;
+    const canvas = document.getElementById("canvas")!;
+    let finger: Client | null = null;
+    canvas.addEventListener("pointermove", (e) => {
+      const rect = canvas.getBoundingClientRect();
+      finger = { x: e.clientX - rect.left, y: e.clientY - rect.top };
+    });
     const tick = (): void => {
       if (w.lensStop) return;
-      w.lensFrames.push(box());
+      w.lensFrames.push({ lens: box(), finger });
       requestAnimationFrame(tick);
     };
     requestAnimationFrame(tick);
   }, lensBox.toString());
 }
 
-function stopLensRecorder(page: Page): Promise<(Client | null)[]> {
+function stopLensRecorder(page: Page): Promise<LensFrame[]> {
   return page.evaluate(() => {
-    const w = window as unknown as { lensFrames: (Client | null)[]; lensStop: boolean };
+    const w = window as unknown as { lensFrames: LensFrame[]; lensStop: boolean };
     w.lensStop = true;
     return w.lensFrames;
   });
 }
 
-// No frame moves the lens further than the follower allows for an 8 px
-// touch sample, so a flip of the lens to the other side of the finger fails here.
-function expectNoJump(frames: (Client | null)[]): number {
+// No frame moves the lens further than the finger's 8 px sample plus the arc
+// the follower allows for it, so a flip to the other side of the finger fails
+// here, and the disc never reaches the finger while it slides.
+function expectNoJump(frames: LensFrame[]): { largest: number; slides: number } {
   let largest = 0;
+  let slides = 0;
   for (let i = 1; i < frames.length; i++) {
-    const a = frames[i - 1];
-    const b = frames[i];
-    if (!a || !b) continue;
-    largest = Math.max(largest, Math.hypot(b.x - a.x, b.y - a.y));
+    const a = frames[i - 1]!;
+    const b = frames[i]!;
+    if (!a.lens || !b.lens) continue;
+    const moved = Math.hypot(b.lens.x - a.lens.x, b.lens.y - a.lens.y);
+    largest = Math.max(largest, moved);
+    if (b.finger) {
+      expect(Math.hypot(b.lens.x - b.finger.x, b.lens.y - b.finger.y)).toBeGreaterThanOrEqual(
+        RADIUS,
+      );
+    }
+    const fingerMoved =
+      a.finger && b.finger ? Math.hypot(b.finger.x - a.finger.x, b.finger.y - a.finger.y) : 0;
+    if (fingerMoved < 0.5 && moved > 2) slides++;
   }
-  expect(largest).toBeLessThanOrEqual(8 * LOUPE_FOLLOW + 1);
-  return largest;
+  expect(largest).toBeLessThanOrEqual(8 + 8 * LOUPE_FOLLOW + 1);
+  return { largest, slides };
 }
 
-// A settled lens keeps its lift from the finger and the whole disc on the canvas.
+// Whether a lens beside the finger fits on either side at the finger's height.
+function aSideFits(frame: Frame, local: Client): boolean {
+  const c = Math.max(-1, Math.min(1, (local.y - RADIUS) / LIFT));
+  const span = LIFT * Math.sqrt(1 - c * c);
+  return local.x + span <= frame.width - RADIUS + 1 || local.x - span >= RADIUS - 1;
+}
+
+// A settled lens keeps its lift from the finger, the whole disc on the canvas,
+// and near the top edge sits beside the finger, not under the hand, whenever
+// a side fits.
 function expectLensPlaced(frame: Frame, lens: Client, finger: Client): void {
   const local = { x: finger.x - frame.left, y: finger.y - frame.top };
   const lift = Math.hypot(lens.x - local.x, lens.y - local.y);
   expect(lift).toBeGreaterThan(LIFT - 4);
   expect(lift).toBeLessThan(LIFT + 4);
+  // The 10 degree side preference can hold the lens 16 px below the highest spot.
+  if (local.y < LIFT + RADIUS && aSideFits(frame, local)) {
+    expect(lens.y).toBeLessThanOrEqual(Math.max(local.y + RADIUS / 2, RADIUS + 16));
+  }
   expect(lens.x).toBeGreaterThanOrEqual(RADIUS - 2);
   expect(lens.x).toBeLessThanOrEqual(frame.width - RADIUS + 2);
   expect(lens.y).toBeGreaterThanOrEqual(RADIUS - 2);
@@ -335,7 +372,7 @@ test("the lens slides beside the finger across the top edge without a jump", asy
     expectLensPlaced(frame, lens, finger);
     steps.push(`${Math.round(finger.y - frame.top)}:${Math.round(lens.x)},${Math.round(lens.y)}`);
   }
-  const largest = expectNoJump(await stopLensRecorder(page));
+  const { largest } = expectNoJump(await stopLensRecorder(page));
   test.info().annotations.push({
     type: "lens-centres",
     description: `${steps.join(" ")} largest frame move ${largest.toFixed(1)}`,
@@ -409,8 +446,14 @@ test("the lens keeps its lift and stays on the canvas along the whole top edge",
     expectLensPlaced(frame, await settledLens(page), finger);
     if (i === 1) await shot(page, "loupe-top-edge-left");
   }
-  const largest = expectNoJump(await stopLensRecorder(page));
-  test.info().annotations.push({ type: "largest-frame-move", description: largest.toFixed(1) });
+  // Past the side limit the spot crosses to the other side of the finger,
+  // and the lens gets there over frames with the finger still.
+  const { largest, slides } = expectNoJump(await stopLensRecorder(page));
+  expect(slides).toBeGreaterThanOrEqual(3);
+  test.info().annotations.push({
+    type: "largest-frame-move",
+    description: `${largest.toFixed(1)} px, ${slides} frames sliding with the finger still`,
+  });
   await shot(page, "loupe-top-edge-right");
   await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
 });
