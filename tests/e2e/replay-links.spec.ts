@@ -307,9 +307,13 @@ test("a long index link that is not the saved game opens in review and steps", a
   await page.addInitScript(interceptWorkerMessages);
   await page.addInitScript((s) => localStorage.setItem("sprouts.game", s), JSON.stringify(saved));
   await page.goto("/" + HASH_PREFIX + encodeRecord(other));
-  await expect(page.locator("#status")).toHaveText(/Checking whether this is your saved game/, {
+  // The check may finish before the status can be read, so the end state
+  // is what is asserted: the link stays open and one indexMoves request
+  // went to the checker's worker.
+  await expect(page.locator("#status")).toHaveText(/^Reviewing: move \d+ of \d+|^Replay stopped/, {
     timeout: 240_000,
   });
+  await expect.poll(() => requestCount(page, "indexMoves"), { timeout: 240_000 }).toBe(1);
   await expect(page.locator("#status")).toHaveText(/^Reviewing: move \d+ of \d+|^Replay stopped/, {
     timeout: 240_000,
   });
