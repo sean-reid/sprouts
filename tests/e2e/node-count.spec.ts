@@ -134,6 +134,8 @@ test("once a move is played the count waits on the start button", async ({ page 
   await boardSettled(page);
   const before = await strokeCells(page);
   const canvas = await page.locator("#canvas").boundingBox();
+  const plus = await page.locator("#moreBtn").boundingBox();
+  const row = await page.locator(".controls.game").boundingBox();
   await page.locator("#moreBtn").click();
   await expect(page.locator("#nodeCount")).toHaveValue("5");
   await expect(page.locator("#status")).toHaveText("Your turn!");
@@ -145,6 +147,19 @@ test("once a move is played the count waits on the start button", async ({ page 
   expect(await page.locator("#canvas").boundingBox()).toEqual(canvas);
   await expectOneLine(page, "#startBtn");
   await shot(page, "stepper-pending");
+  if (test.info().project.name === "mobile") {
+    const pending = await page.locator("#moreBtn").boundingBox();
+    const pendingRow = await page.locator(".controls.game").boundingBox();
+    await mkdir("test-results/fixtures", { recursive: true });
+    await writeFile(
+      "test-results/fixtures/mobile-pending-row.txt",
+      `plus ${JSON.stringify(plus)} -> ${JSON.stringify(pending)}\nrow ${JSON.stringify(row)} -> ${JSON.stringify(pendingRow)}\n`,
+    );
+    expect(pending).toEqual(plus);
+    expect(pendingRow).toEqual(row);
+    expect(pendingRow?.x).toBeGreaterThanOrEqual(10);
+    expect((pendingRow?.x ?? 0) + (pendingRow?.width ?? 0)).toBeLessThanOrEqual(365);
+  }
 
   await page.locator("#fewerBtn").click();
   await expect(page.locator("#status")).toHaveText("Your turn!");
