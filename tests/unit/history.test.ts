@@ -11,6 +11,7 @@ import {
   encodeRecord,
   hasStroke,
   History,
+  indicesCached,
   isIndexed,
   LINK_QUANTUM,
   MOVE_LIST_VERSION,
@@ -1029,6 +1030,7 @@ describe("a link that names moves by index", () => {
       ...saved,
       moves: [{ ...saved.moves[0]!, cache }, saved.moves[1]!],
     });
+    const storage = Object.getOwnPropertyDescriptor(globalThis, "localStorage");
     const load = (record: unknown) => {
       Object.defineProperty(globalThis, "localStorage", {
         value: { getItem: () => JSON.stringify(record) },
@@ -1036,15 +1038,37 @@ describe("a link that names moves by index", () => {
       });
       return loadSaved();
     };
-    expect(load(withCache({ index: 3, along: 128 }))?.moves[0]).toMatchObject({
-      cache: { index: 3, along: 128 },
-    });
-    expect(load(withCache({ refused: true }))?.moves[0]).toMatchObject({
-      cache: { refused: true },
-    });
-    expect(load(withCache({ refused: false }))).toBeNull();
-    expect(load(withCache({ index: 3, along: 300 }))).toBeNull();
-    expect(load(withCache({ index: -1, along: 0 }))).toBeNull();
+    try {
+      expect(load(withCache({ index: 3, along: 128 }))?.moves[0]).toMatchObject({
+        cache: { index: 3, along: 128 },
+      });
+      expect(load(withCache({ refused: true }))?.moves[0]).toMatchObject({
+        cache: { refused: true },
+      });
+      expect(load(withCache({ refused: false }))).toBeNull();
+      expect(load(withCache({ index: 3, along: 300 }))).toBeNull();
+      expect(load(withCache({ index: -1, along: 0 }))).toBeNull();
+    } finally {
+      if (storage) Object.defineProperty(globalThis, "localStorage", storage);
+      else delete (globalThis as { localStorage?: unknown }).localStorage;
+    }
+  });
+
+  it("knows when the saved record's indices cover a link's moves", () => {
+    const history = twoMoves();
+    expect(indicesCached(history.record(), 2)).toBe(false);
+    history.moves[0]!.indexed = { index: 3, along: 128 };
+    expect(indicesCached(history.record(), 1)).toBe(true);
+    expect(indicesCached(history.record(), 2)).toBe(false);
+    history.moves[1]!.indexed = { index: 200, along: 0 };
+    const saved = history.record();
+    expect(indicesCached(saved, 2)).toBe(true);
+    expect(indicesCached(saved, 3)).toBe(false);
+    const stale = {
+      ...saved,
+      cacheVersions: { ...saved.cacheVersions!, router: ROUTER_VERSION + 1 },
+    };
+    expect(indicesCached(stale, 2)).toBe(false);
   });
 
   it("indexes a record from before the cache once and keeps the result", async () => {

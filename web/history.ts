@@ -1050,6 +1050,16 @@ export async function prepareLink(
   }
 }
 
+// Whether the saved record carries an index for each of its first `count`
+// moves, so a comparison with a link needs no engine.
+export function indicesCached(saved: GameRecord, count: number): boolean {
+  return (
+    saved.moves.length >= count &&
+    currentVersions(saved.cacheVersions) &&
+    saved.moves.slice(0, count).every((move) => hasStroke(move) && move.cache?.index !== undefined)
+  );
+}
+
 // Whether an index link names the saved game: the two carry the same
 // header and the engine indexes the saved record's first moves to the
 // link's, so a game played on past the link still reopens live. A link

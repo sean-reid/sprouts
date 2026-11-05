@@ -39,13 +39,11 @@ const fixtures = [
 // shapes link how many AI moves go as topology. The link carries indices
 // when the engine regenerates the whole game on a fresh board, and shapes
 // when the regenerated board refuses a move, as the nine-node,
-// thirty-move and 24-node games do. The budget belongs to the recording: the payload
-// measured when the game was recorded (34, 1486, 2047 and 691) plus 10
-// percent, rounded up. The nine-node game went from 1335 to 1486 when
-// the bare loop's circle points moved a quarter step off the heading
-// grid and its human strokes refit around them; the thirty-move game
-// went from 2907 to 2047 with its new pick and all 15 AI moves as
-// topology.
+// thirty-move and 24-node games do. The budget belongs to the recording:
+// the payload measured on router version 5 with the recorder's default
+// picks (34, 1486, 2047 and 691) plus 10 percent, rounded up. A payload
+// depends on the router version, the pick and the recorder, so a new
+// recording brings its own budget.
 const routed: [string, number, "indices" | "shapes", number][] = [
   ["fixtures/saved/eight-moves-4n-1000.json", 38, "indices", 4],
   ["fixtures/saved/ten-moves-9n-1000.json", 1635, "shapes", 5],

@@ -17,6 +17,7 @@ import {
   loadSaved,
   pendingFace,
   drawn,
+  indicesCached,
   isIndexed,
   pendingIndex,
   prepareLink,
@@ -258,7 +259,7 @@ function stopThinking(): void {
 }
 
 function busy(): boolean {
-  return state.mode !== "idle" || state.thinking || submitting || seeking;
+  return state.mode !== "idle" || state.thinking || submitting || seeking || sharing;
 }
 
 function updateControls(): void {
@@ -639,7 +640,7 @@ function recordMove(outcome: Applied, drawn?: Drawn, topology?: FaceMove): void 
 // an idle board or with a routed candidate up and nothing else pending.
 function canPlay(): boolean {
   const free = state.mode === "idle" || (state.mode === "placing" && state.routed);
-  const settled = !state.thinking && !submitting && !seeking && state.settling === null;
+  const settled = !state.thinking && !submitting && !seeking && !sharing && state.settling === null;
   return free && settled && !state.gameOver && !state.reviewing && state.currentPlayer === "human";
 }
 
@@ -1026,7 +1027,8 @@ async function share(): Promise<void> {
   if (sharing) return;
   sharing = true;
   shareBtn.disabled = true;
-  setStatus("Checking the link");
+  setStatus("Checking the link. A long game can take a while.");
+  updateControls();
   try {
     const prepared = prepareLink(
       timeline,
@@ -1075,6 +1077,7 @@ async function share(): Promise<void> {
   } finally {
     sharing = false;
     shareBtn.disabled = false;
+    updateControls();
   }
 }
 
@@ -1258,13 +1261,21 @@ function placeUndo(): void {
   else gameControls.append(undoBtn);
 }
 
-// An index link to the saved game: the engine indexes the saved record
-// and the indices are compared to the link's. The worker answers every
-// call through a game instance, so one is built on the saved record's
-// header first; the indexing itself replays the record. A failure reads
-// as another game, which the link then opens.
+// Indexing a saved game routes every move again, so boot only asks the
+// engine for a game this short; a longer uncached game's link opens in
+// review instead.
+const SHORT_GAME = 15;
+
+// An index link to the saved game: the cached indices are compared to the
+// link's, or for a short game without them the engine indexes the saved
+// record. The worker answers every call through a game instance, so one
+// is built on the saved record's header first. A failure reads as another
+// game, which the link then opens.
 async function ownIndexedGame(saved: GameRecord, linked: GameRecord): Promise<boolean> {
   if (!linked.moves.every(isIndexed) || saved.moves.length < linked.moves.length) return false;
+  if (!indicesCached(saved, linked.moves.length) && linked.moves.length >= SHORT_GAME) {
+    return false;
+  }
   try {
     const layout = saved.nodes ? { nodes: saved.nodes.map(([x, y]) => ({ x, y })) } : undefined;
     await engine.call(
