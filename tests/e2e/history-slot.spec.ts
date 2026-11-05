@@ -67,7 +67,7 @@ test("a tall phone shows more of the move list without the board moving mid game
   const slot = await slotOf(page);
   expectBoardAndPanelToShareTheHeight(slot);
   // 844 tall leaves more than the width, so the board is width bound and
-  // the list gets what a fixed slot gave to blank space: three full rows.
+  // the list holds three full rows under it.
   expect(slot.canvas.width).toBeCloseTo(slot.play.width, 0);
   expect(slot.list.height).toBeGreaterThanOrEqual(3 * ROW + 2 * GAP);
   expect(slot.list.fullRows).toBeGreaterThanOrEqual(3);
