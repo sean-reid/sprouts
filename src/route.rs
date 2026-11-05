@@ -65,6 +65,8 @@ pub(crate) mod stats {
         pub exact_hits: usize,
         /// Milliseconds by phase: parity searches, tighten, relax, finish.
         pub phase_ms: [f64; 4],
+        /// The move the last curve refused as Topology read back as.
+        pub last_read_back: Option<crate::face::Move>,
         pub refused: super::sweep::Tally,
     }
 
@@ -334,7 +336,9 @@ impl Router {
     ) -> Result<Move, Unroutable> {
         #[cfg(test)]
         let t = std::time::Instant::now();
-        let relaxed = relax(state, mv, want, arena, &path);
+        // The relaxation can carry the path past a node; the taut path is
+        // drawn instead when it has.
+        let relaxed = relax(state, mv, want, arena, &path).filter(|r| sides_match(state, mv, r));
         #[cfg(test)]
         stats::with(|s| s.phase_ms[2] += t.elapsed().as_secs_f64() * 1000.0);
         #[cfg(test)]
@@ -402,7 +406,34 @@ fn plan(
     let (arena, path, fenced) = taut_path(router, state, mv, want, parity, fencing)?;
     let path = split_pinches(path, eroded_by(state, want) / 4.0, |q| arena.free_at(q));
     let path = settle(path)?;
+    // Uncrossing a figure of eight joins its lobes, and a piece inside a
+    // lobe changes sides: that path is another move's, so the corridor
+    // has no drawing of this one.
+    if !sides_match(state, mv, &path) {
+        return Err(Unroutable::Shape("twisted"));
+    }
     Ok((arena, path, fenced))
+}
+
+/// Whether `path` puts every piece on the side `mv` names, read as the
+/// embedding reads it: a chord between two pieces encloses nothing, and
+/// a loop at a bare node may read as the other side.
+fn sides_match(state: &GameState, mv: &FaceMove, path: &[Point]) -> bool {
+    let (Ok(own), Ok(other)) = (
+        state.face.component_of(mv.a, mv.at_a),
+        state.face.component_of(mv.b, mv.at_b),
+    ) else {
+        return false;
+    };
+    if own != other {
+        return true;
+    }
+    let mut got = embedding::sides(state, mv.a, mv.at_a, mv.b, mv.at_b, own, path);
+    got.sort_unstable();
+    let mut want = mv.enclosed.clone();
+    want.sort_unstable();
+    let bare_loop = mv.a == mv.b && mv.at_a.is_none();
+    got == want || (bare_loop && got == other_side(state, mv))
 }
 
 /// The path with a doubled-back leg cut and its crossings undone, or
@@ -852,6 +883,8 @@ pub(crate) fn finish(
     if same_corners && sides_match {
         Ok(mov)
     } else {
+        #[cfg(test)]
+        stats::with(|s| s.last_read_back = Some(read.clone()));
         Err(Unroutable::Topology)
     }
 }
