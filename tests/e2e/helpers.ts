@@ -162,6 +162,14 @@ export async function latestCurve(page: Page): Promise<Cubic[]> {
   return page.evaluate(() => (window as unknown as { latestCurve?: Cubic[] }).latestCurve ?? []);
 }
 
+// The polyline of the last move the engine applied, in world units, as
+// the page drew it.
+export async function latestStroke(page: Page): Promise<Client[] | null> {
+  return page.evaluate(
+    () => (window as unknown as { latestStroke?: Client[] }).latestStroke ?? null,
+  );
+}
+
 // Where a starting node is drawn: where the engine's last board puts it,
 // else its layout spot, at the fitted view, once the board has settled.
 export async function nodeOnScreen(page: Page, index: number, count: number): Promise<Client> {
@@ -433,6 +441,7 @@ export function interceptWorkerMessages(): void {
     latestNodes?: BoardNode[];
     latestLines?: BoardLine[];
     latestCurve?: Cubic[];
+    latestStroke?: Client[];
     intercepted?: boolean;
   };
   if (hooks.intercepted) return;
@@ -446,13 +455,13 @@ export function interceptWorkerMessages(): void {
   hooks.answerNext = answerNext;
   // Every reply that carries a board leaves its nodes on the window, so a
   // test reads node positions from the engine rather than the layout; a
-  // fit reply leaves its curve.
+  // fit reply leaves its curve, an applied move the stroke it was drawn as.
   interface Reported {
     nodes?: { id: number; position: { x: number; y: number } }[];
     lines?: BoardLine[];
     snapshot?: Reported;
     segments?: Cubic[];
-    mov?: unknown;
+    mov?: { polyline?: Client[] };
   }
   const RealWorker = Worker;
   window.Worker = class extends RealWorker {
@@ -474,6 +483,7 @@ export function interceptWorkerMessages(): void {
           }));
         }
         if (result?.segments && !result.mov) hooks.latestCurve = result.segments;
+        if (result?.mov?.polyline) hooks.latestStroke = result.mov.polyline;
       });
     }
   };
