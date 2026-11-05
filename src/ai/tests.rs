@@ -796,7 +796,6 @@ fn the_live_pocket_position_lists_a_legal_move() {
 
 /// The AI draws the live 4-node position's one listed move.
 #[test]
-#[ignore = "the arena disconnects the ends in the corner at node 1, which is narrower than two fit margins between the forgiven radius and 5.3 units out"]
 fn the_live_pocket_position_draws() {
     let state = position_of_fixture("pocket-4n-1000.json");
     let candidates = state.face.search_moves();

@@ -53,6 +53,23 @@ test("a 24-node position with room draws, and the console says so", async ({ pag
   await expect(page.locator("#moveList li")).toHaveCount(4);
 });
 
+// A saved 4-node game from the live site where the AI answered Undrawn on
+// its one listed move, a chord out of a corner between two of its own
+// spokes. Loading it has the AI draw that chord, the last move of the game.
+test("a 4-node position with one chord out of a narrow corner draws", async ({ page }) => {
+  const record = await readFile("fixtures/undrawn/pocket-4n-1000.json", "utf8");
+  await page.addInitScript((saved) => localStorage.setItem("sprouts.game", saved), record);
+  const lines: string[] = [];
+  page.on("console", (message) => {
+    if (message.text().startsWith("aiMove:")) lines.push(message.text());
+  });
+  await page.goto("/");
+  await expect(page.locator("#status")).toHaveText("AI wins", { timeout: 60_000 });
+  expect(lines).toHaveLength(1);
+  expect(lines[0]).toMatch(/^aiMove: move in \d+ ms$/);
+  await expect(page.locator("#moveList li")).toHaveCount(10);
+});
+
 // A saved game where the only live node is sealed inside a loop too small
 // for any line the AI draws. Loading it hands the AI the move: it must say
 // so rather than end the game, and Undo must give the board back to the
