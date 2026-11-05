@@ -2415,3 +2415,21 @@ fn a_fence_across_the_straight_chord_sends_the_corridor_round_its_end() {
     assert!(length(&taut) < length(&detour));
     assert_eq!(detour.last().map(|q| (q.x, q.y)), Some((800.0, 500.0)));
 }
+
+/// Prints whether each saved recording's final position still has a
+/// legal move, which the share specs need to load into a live game:
+/// `cargo test saved_recordings_stay_live -- --ignored --nocapture`.
+#[test]
+#[ignore = "prints the saved recordings' liveness, run as needed"]
+fn saved_recordings_stay_live() {
+    for path in fixture_paths("fixtures/saved") {
+        let fixture = crate::replay::load(&path).unwrap();
+        let state = crate::replay::play_as(&fixture, Player::Human);
+        eprintln!(
+            "{}: {} legal moves after {} lines",
+            path.file_name().unwrap().to_string_lossy(),
+            state.face.search_moves().len(),
+            state.lines.len()
+        );
+    }
+}
