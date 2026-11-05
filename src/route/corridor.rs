@@ -20,7 +20,7 @@ use super::Unroutable;
 use crate::types::Point;
 
 /// States one corridor search may hold before it gives the move up.
-const SEARCH_STATES: usize = 400_000;
+pub(super) const SEARCH_STATES: usize = 400_000;
 
 type Portals = Vec<(Point, Point)>;
 
@@ -149,12 +149,21 @@ fn accepts(want: Want, parity: u64, all: u64) -> bool {
     }
 }
 
+/// What bounds a search: the fences it may not cross and the states it
+/// may hold before it gives the move up.
+#[derive(Clone, Copy)]
+pub(super) struct Limits<'a> {
+    pub fences: &'a Fences,
+    pub cap: usize,
+}
+
 /// Dijkstra over (triangle, parity) from the entry's triangles to an exit
 /// triangle whose parity the move accepts, never crossing a fence,
-/// returning the portals crossed as (left, right) pairs in travel order.
-/// A fence meets an edge at its midpoint, so a step across such an edge
-/// is on one half of it, and in a fenced triangle the half tells which
-/// side of the segment the path is on.
+/// returning the portals crossed as (left, right) pairs in travel order,
+/// or a bug once it holds more states than the limit. A fence meets an
+/// edge at its midpoint, so a step across such an edge is on one half of
+/// it, and in a fenced triangle the half tells which side of the segment
+/// the path is on.
 pub(super) fn search(
     arena: &Arena,
     cuts: &Cuts,
@@ -162,8 +171,9 @@ pub(super) fn search(
     exit: &Entry,
     want: Want,
     is_loop: bool,
-    fences: &Fences,
+    limits: Limits<'_>,
 ) -> Result<Corridor, Unroutable> {
+    let Limits { fences, cap } = limits;
     let goal: HashSet<usize, Fold> = exit.tris.iter().copied().collect();
     let mut heap = BinaryHeap::new();
     let mut best: HashMap<Key, f64, Fold> = HashMap::default();
@@ -208,7 +218,7 @@ pub(super) fn search(
                 parity: key.mask,
             });
         }
-        if best.len() > SEARCH_STATES {
+        if best.len() > cap {
             return Err(Unroutable::Bug("search states"));
         }
         let verts = arena.ccw_vertices(key.tri);

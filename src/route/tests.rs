@@ -301,20 +301,26 @@ const SEED: u64 = 7;
 /// human. The sweep is seeded and platform-exact, so these are the
 /// measured values, and a router change that moves them is recorded here.
 const AI_TOPOLOGY_CEILING: usize = 0;
-const HUMAN_TOPOLOGY_CEILING: usize = 1;
+const HUMAN_TOPOLOGY_CEILING: usize = 0;
 /// Most states a corridor search that found its path may hold over the
-/// sweeps: the fenced parity search peaks at 4,122 states as the AI and
-/// 4,927 as the human over the seeded bench games.
-const CORRIDOR_STATES_CEILING: usize = 50_000;
+/// sweeps. The fenced search peaks near 5,000; the search without fences,
+/// run again when a fenced corridor fails in the relaxation or the fit,
+/// reached 72,548 as the human.
+const CORRIDOR_STATES_CEILING: usize = 100_000;
+/// Parity searches the fences held back from their corridor over the
+/// sweeps, so the search without them ran: 2 as the AI, none as the
+/// human, as measured.
+const FENCE_MISSES_CEILING: usize = 2;
+/// Listed moves the sweeps refuse as Room, as the AI and as the human: the
+/// measured values. A corridor that hugs a node costs a later move its
+/// room, so these hold that cost where it was measured.
+const AI_ROOM_CEILING: usize = 773;
+const HUMAN_ROOM_CEILING: usize = 750;
 
 /// Whether a running count sits under its ceiling.
 fn within(count: usize, ceiling: usize) -> bool {
     count <= ceiling
 }
-
-/// Parity searches the fences may hold back from their corridor over the
-/// sweeps, so the search without them runs: none, as measured.
-const FENCE_MISSES_CEILING: usize = 0;
 
 /// The router's counters over one sweep game, checked against the
 /// ceilings above.
@@ -353,13 +359,19 @@ proptest! {
         stats::take();
         let tally = sweep::game(nodes, &picks, Player::AI);
         prop_assert!(tally.is_ok(), "{}", tally.as_ref().unwrap_err());
-        let held = sweep_stats_hold(&stats::take());
+        let s = stats::take();
+        eprintln!(
+            "states {} misses {} retries {} exact {}",
+            s.states_ok_max, s.fence_misses, s.fence_retries, s.exact_hits
+        );
+        let held = sweep_stats_hold(&s);
         prop_assert!(held.is_ok(), "{}", held.unwrap_err());
         let mut total = TALLY.lock().unwrap();
         total.add(&tally.unwrap());
         eprintln!("{total}");
         prop_assert_eq!(total.bug, 0);
         prop_assert!(within(total.topology, AI_TOPOLOGY_CEILING), "{}", total);
+        prop_assert!(within(total.room, AI_ROOM_CEILING), "{}", total);
     }
 
     /// The same games drawn at the human clearances, which routeMove and
@@ -369,13 +381,19 @@ proptest! {
         stats::take();
         let tally = sweep::game(nodes, &picks, Player::Human);
         prop_assert!(tally.is_ok(), "{}", tally.as_ref().unwrap_err());
-        let held = sweep_stats_hold(&stats::take());
+        let s = stats::take();
+        eprintln!(
+            "human states {} misses {} retries {} exact {}",
+            s.states_ok_max, s.fence_misses, s.fence_retries, s.exact_hits
+        );
+        let held = sweep_stats_hold(&s);
         prop_assert!(held.is_ok(), "{}", held.unwrap_err());
         let mut total = HUMAN_TALLY.lock().unwrap();
         total.add(&tally.unwrap());
         eprintln!("human {total}");
         prop_assert_eq!(total.bug, 0);
         prop_assert!(within(total.topology, HUMAN_TOPOLOGY_CEILING), "{}", total);
+        prop_assert!(within(total.room, HUMAN_ROOM_CEILING), "{}", total);
     }
 }
 
@@ -1068,9 +1086,14 @@ fn routing_hashes() -> [u64; 5] {
         let want = rules(&state);
         for mv in state.face.search_moves() {
             if mv.a != mv.b || !mv.enclosed.is_empty() {
-                if let Ok((arena, taut)) =
-                    plan(&mut Router::new(), &state, &mv, &want, Parity::Search)
-                {
+                if let Ok((arena, taut, _)) = plan(
+                    &mut Router::new(),
+                    &state,
+                    &mv,
+                    &want,
+                    Parity::Search,
+                    Fencing::Up,
+                ) {
                     stages[0].points(&arena.vertex_points());
                     stages[1].points(&taut);
                     if let Some(relaxed) = relax(&state, &mv, &want, &arena, &taut) {
@@ -1417,7 +1440,15 @@ fn a_pinch_left_coincident_still_routes_or_is_refused_as_a_shape() {
         enclosed: vec![3],
     };
     let want = rules(&state);
-    let (arena, taut) = taut_path(&mut Router::new(), &state, &mv, &want, Parity::Search).unwrap();
+    let (arena, taut, _) = taut_path(
+        &mut Router::new(),
+        &state,
+        &mv,
+        &want,
+        Parity::Search,
+        Fencing::Up,
+    )
+    .unwrap();
     let n = taut.len();
     assert!(
         (1..n - 1).any(|i| (i + 1..n - 1).any(|j| taut[i].distance_to(&taut[j]) < 1e-9)),
@@ -1648,8 +1679,14 @@ fn probe_end_pins() {
                 continue;
             }
             routes += 1;
-            let Ok((arena, taut)) = plan(&mut Router::new(), &state, &mv, &want, Parity::Search)
-            else {
+            let Ok((arena, taut, _)) = plan(
+                &mut Router::new(),
+                &state,
+                &mv,
+                &want,
+                Parity::Search,
+                Fencing::Up,
+            ) else {
                 continue;
             };
             let Some(relaxed) = relax(&state, &mv, &want, &arena, &taut) else {
@@ -1763,8 +1800,15 @@ fn corner_chord(state: &GameState, rise: f64) -> (FaceMove, impl Fn(&Point) -> b
     let want = rules(&human);
     let mut moves = listed(state, 0, 2);
     moves.retain(|m| {
-        plan(&mut Router::new(), &human, m, &want, Parity::Search)
-            .is_ok_and(|(_, taut)| between(&taut[1]))
+        plan(
+            &mut Router::new(),
+            &human,
+            m,
+            &want,
+            Parity::Search,
+            Fencing::Up,
+        )
+        .is_ok_and(|(_, taut, _)| between(&taut[1]))
     });
     assert_eq!(moves.len(), 1, "one chord through the corner: {moves:?}");
     (moves.remove(0), between)
@@ -1842,7 +1886,15 @@ fn assert_relaxed_point_leaves_spokes(
     at_start: bool,
 ) {
     let end = state.nodes[0].position;
-    let (arena, taut) = plan(&mut Router::new(), state, mv, want, Parity::Search).unwrap();
+    let (arena, taut, _) = plan(
+        &mut Router::new(),
+        state,
+        mv,
+        want,
+        Parity::Search,
+        Fencing::Up,
+    )
+    .unwrap();
     let relaxed = relax(state, mv, want, &arena, &taut).unwrap();
     let before = clearance::resample(&taut, clearance::SPACING * super::eroded_by(state, want));
     let n = relaxed.len();
@@ -2204,6 +2256,14 @@ fn a_chord_wrong_on_two_pieces_routes_round_them_through_the_fences() {
             "{mv:?}: {fenced} fenced triangles"
         );
     }
+    // Where the first path has pieces wrong, the filter and the exhaustive
+    // search both find the class reachable.
+    for mv in &chords {
+        assert_ne!(parity_unreachable(&state, mv, false), Some(true), "{mv:?}");
+    }
+    assert!(chords
+        .iter()
+        .any(|mv| parity_unreachable(&state, mv, false) == Some(false)));
     let mut wrong_counts = Vec::new();
     for mv in &chords {
         stats::take();
@@ -2248,8 +2308,10 @@ fn a_chord_splitting_two_glued_pieces_is_refused_as_room_without_a_search() {
                 s.parity.iter().all(|&(_, _, found)| !found),
                 "{mv:?} found a corridor"
             );
-            // The exhaustive search without fences says the same.
-            assert_eq!(parity_unreachable(&state, mv), Some(true), "{mv:?}");
+            // The exhaustive search without fences says the same, at both
+            // clearances.
+            assert_eq!(parity_unreachable(&state, mv, false), Some(true), "{mv:?}");
+            assert_eq!(parity_unreachable(&state, mv, true), Some(true), "{mv:?}");
         } else {
             assert!(drawn.is_ok(), "{mv:?}: {drawn:?}");
         }
@@ -2292,7 +2354,10 @@ fn a_fence_across_the_straight_chord_sends_the_corridor_round_its_end() {
             &exit,
             corridor::Want::Any,
             false,
-            fences,
+            corridor::Limits {
+                fences,
+                cap: corridor::SEARCH_STATES,
+            },
         )
         .unwrap();
         corridor::draw(&found, &entry, &exit)
@@ -2342,5 +2407,11 @@ fn a_fence_across_the_straight_chord_sends_the_corridor_round_its_end() {
     };
     assert!(crosses(&straight));
     assert!(!crosses(&detour), "{detour:?}");
+    // A fence shapes the search alone. Tightening keeps the cut parity,
+    // the class itself, and with no cut on this board it pulls the detour
+    // straight through the fence.
+    let taut = arena.tighten(&cuts, &detour, &entry, &exit);
+    assert!(crosses(&taut), "{taut:?}");
+    assert!(length(&taut) < length(&detour));
     assert_eq!(detour.last().map(|q| (q.x, q.y)), Some((800.0, 500.0)));
 }

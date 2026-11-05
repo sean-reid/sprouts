@@ -2903,11 +2903,12 @@ mod tests {
     fn a_node_behind_the_split_boundary_counts_for_neither_side() {
         let mut state = start(7, 1000, Player::Human, None, 0).unwrap();
         assert_eq!(routed(&mut state, bare(2, 2, vec![3])), 1);
-        // The loop round node 3 passes node 5 closer than the loop's band
-        // and the node's disc together, so node 5 sits on the loop's
-        // obstacle and no chord from 2 to 7 can leave it outside: the chord
-        // round 0 and 1 has no corridor at any length, which the exhaustive
-        // search confirms, and the chord round 5 and 6 counts the two.
+        // Which chords from 2 to 7 have a corridor depends on the loop the
+        // router drew round node 3: it runs close enough to node 5 that
+        // node 5 sits on the loop's obstacle and no chord can leave it
+        // outside, so the chord round 0 and 1 has no corridor at any
+        // clearance, as the exhaustive search confirms, and the chord round
+        // 5 and 6 counts the two.
         let chords: Vec<FaceMove> = moves_from(&state, 2)
             .moves
             .into_iter()
@@ -2920,21 +2921,18 @@ mod tests {
                 .cloned()
                 .expect("the chord is listed")
         };
-        let five = state.nodes[5].position;
-        let gap = state.lines[0]
-            .flat
-            .iter()
-            .map(|q| q.distance_to(&five))
-            .fold(f64::INFINITY, f64::min);
-        let band = types::MIN_PATH_CLEARANCE * scale(1000) + curve::tolerance(1000);
-        assert!(gap < 2.0 * band, "node 5 is {gap:.1} from the loop");
         let without_five = round(&[0, 1]);
         assert!(matches!(
             route::route(&state, &without_five.clone().into()),
             Err(route::Unroutable::Room)
         ));
+        let without_five: crate::face::Move = without_five.into();
         assert_eq!(
-            route::parity_unreachable(&state, &without_five.into()),
+            route::parity_unreachable(&state, &without_five, false),
+            Some(true)
+        );
+        assert_eq!(
+            route::parity_unreachable(&state, &without_five, true),
             Some(true)
         );
         assert_eq!(routed(&mut state, round(&[5, 6])), 2);

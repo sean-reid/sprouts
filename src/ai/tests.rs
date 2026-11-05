@@ -341,8 +341,7 @@ fn a_shared_router_answers_as_fresh_routers_do() {
 
 /// A chord whose ends the arena disconnects puts its corners in the no
 /// room memo, and the next chord between those corners is refused without
-/// another arena or search. The live record supplies the chord: its draw
-/// answers 108 of 113 attempts from the memo.
+/// another arena or search. The live record supplies the chord.
 #[test]
 fn a_second_chord_between_corners_without_room_is_refused_from_memory() {
     for state in [position_of_record("room-24n-1000.json")] {
@@ -701,11 +700,13 @@ fn probe_sweep_search_states() {
         }
         let s = stats::take();
         eprintln!(
-            "{label}: {tally}; most states in a corridor found {}, bugs {:?}; parity searches {}; fence misses {}",
+            "{label}: {tally}; most states in a corridor found {}, bugs {:?}; parity searches {}; exact hits {}, fence misses {}, fence retries {}",
             s.states_ok_max,
             s.refused.bugs,
             parity_summary(&s.parity),
-            s.fence_misses
+            s.exact_hits,
+            s.fence_misses,
+            s.fence_retries
         );
     }
 }
