@@ -482,8 +482,10 @@ test("the lens keeps its lift and stays on the canvas along the whole top edge",
   for (let i = 0; i <= 300; i++) samples.push((await alongLine(page, 0, i / 300)).at);
   const highest = Math.min(...samples.map((p) => p.y));
   expect(highest - frame.top).toBeLessThan(LIFT + RADIUS - 40);
+  // The top run only, not the legs down to the nodes, which sorting by x
+  // would interleave into jumps.
   const run: Client[] = samples
-    .filter((p) => p.y - frame.top < LIFT + RADIUS - 24)
+    .filter((p) => p.y < highest + 30)
     .map((p) => ({ x: p.x, y: p.y + 12 }));
   run.sort((p, q) => p.x - q.x);
   const path: Client[] = [run[0]!];
