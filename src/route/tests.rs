@@ -1817,18 +1817,29 @@ fn probe_shared_game_picks() {
     }
 }
 
-/// The far runs of `path` for ends at `ends` and radius 8, with every
-/// cut checked to sit on that radius.
+/// The far runs of `path` for ends at `ends` and radius 8: every point
+/// of a run lies outside the radius, and every cut (a run end that is
+/// not an end of the path) lies on it within 1e-6.
 fn far_runs(path: &[Point], ends: &[Point]) -> Vec<Vec<Point>> {
     let runs = erode::beyond(path, ends, 8.0);
+    let nearest = |q: &Point| {
+        ends.iter()
+            .map(|e| e.distance_to(q))
+            .fold(f64::INFINITY, f64::min)
+    };
     for run in &runs {
         assert!(run.len() >= 2, "a run has two points: {run:?}");
         for q in run {
-            let nearest = ends
-                .iter()
-                .map(|e| e.distance_to(q))
-                .fold(f64::INFINITY, f64::min);
-            assert!(nearest >= 8.0 - 1e-6, "{q:?} lies inside the radius");
+            assert!(nearest(q) >= 8.0 - 1e-6, "{q:?} lies inside the radius");
+        }
+        for cut in [run[0], run[run.len() - 1]] {
+            if Some(&cut) != path.first() && Some(&cut) != path.last() {
+                assert!(
+                    (nearest(&cut) - 8.0).abs() < 1e-6,
+                    "cut {cut:?} is {} from the radius",
+                    nearest(&cut) - 8.0
+                );
+            }
         }
     }
     runs
@@ -1879,10 +1890,18 @@ fn a_spoke_that_comes_back_inside_gives_two_far_runs() {
     assert_eq!(runs.len(), 2);
     assert!(runs[0][0].distance_to(&p(108.0, 100.0)) < 1e-6);
     assert_eq!(&runs[0][1..3], &path[1..3]);
+    // The y = 106 segment meets the radius where x - 100 = sqrt(64 - 36),
+    // the x = 102 segment where y - 100 = sqrt(64 - 4).
     let back_in = runs[0].last().unwrap();
-    assert!((back_in.y - 106.0).abs() < 1e-6 && back_in.x > 102.0 && back_in.x < 120.0);
+    assert!(
+        back_in.distance_to(&p(100.0 + 28f64.sqrt(), 106.0)) < 1e-6,
+        "{back_in:?}"
+    );
     let out_again = runs[1][0];
-    assert!((out_again.x - 102.0).abs() < 1e-6 && out_again.y > 106.0 && out_again.y < 130.0);
+    assert!(
+        out_again.distance_to(&p(102.0, 100.0 + 60f64.sqrt())) < 1e-6,
+        "{out_again:?}"
+    );
     assert_eq!(runs[1][1], path[4]);
 }
 
