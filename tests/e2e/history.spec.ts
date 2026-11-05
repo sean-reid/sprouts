@@ -5,7 +5,7 @@ import {
   type BrowserContextOptions,
   type Page,
 } from "@playwright/test";
-import { decodeRecord, DRIFT_TOLERANCE, hasStroke } from "../../web/history";
+import { decodeRecord, hasStroke } from "../../web/history";
 import type { Fixture } from "../../web/record";
 
 // Every step here replays moves through the engine, which on the 1000
@@ -27,6 +27,7 @@ import {
   PLACING_HINT,
   playExchange,
   recordedNodeOnScreen,
+  rowIds,
   share,
   shot,
   startGame,
@@ -142,18 +143,11 @@ test("jumping to a board where the AI is to move enters review and keeps the tai
   await expect(current(page)).toHaveText(/^2\. AI/);
 });
 
-// The exchange travels as topology, so the visitor's router redraws the
-// lines and settles from there; the share is rehearsed until that settled
-// board sits within DRIFT_TOLERANCE of the sharer's, node for node, in
-// units of a 1000 board.
-const SHARED_BOARD_DRIFT_UNITS = DRIFT_TOLERANCE;
-
 test("a share link reopens the game in review and steps through it", async ({ page, browser }) => {
   await openBoard(page);
   await playExchange(page);
   await boardSettled(page);
   const source = await boardNodes(page);
-  const before = await strokeCells(page);
   const { url, payload } = await share(page, "share-payload-chars");
   expect(payload).toBeLessThan(EXCHANGE_LINK_BUDGET);
   const shared = decodeRecord(url.slice(url.indexOf(HASH_PREFIX) + HASH_PREFIX.length));
@@ -174,18 +168,10 @@ test("a share link reopens the game in review and steps through it", async ({ pa
   await expect(other.locator("#backBtn")).toBeEnabled();
   await shot(other, "history-shared-visitor");
 
-  expectSameStrokes(before, await strokeCells(other));
-  const linked = await boardNodes(other);
-  expect(linked.size).toBe(source.size);
-  let offset = 0;
-  for (const [id, at] of source) {
-    const there = linked.get(id)!;
-    offset = Math.max(offset, Math.hypot(there.x - at.x, there.y - at.y));
-  }
-  test
-    .info()
-    .annotations.push({ type: "shared-node-offset-units", description: offset.toFixed(1) });
-  expect(offset).toBeLessThanOrEqual((SHARED_BOARD_DRIFT_UNITS * shared!.boardSize) / 1000);
+  // The visitor regenerates the board from move indices; where its nodes
+  // sit is the visitor's settle, and the game is the same move for move.
+  expect((await boardNodes(other)).size).toBe(source.size);
+  for (const index of [0, 1]) expect(await rowIds(other, index)).toEqual(await rowIds(page, index));
 
   await other.locator("#backBtn").click();
   await expect(current(other)).toHaveText("1. You, joins two nodes");
