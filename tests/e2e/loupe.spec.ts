@@ -1,7 +1,9 @@
 import { expect, test, type Page } from "@playwright/test";
+import { LOUPE_RING } from "../../web/loupe";
 import {
   alongLine,
   boardNodes,
+  colourCentroid,
   expectNodeDrawnAt,
   frameOf,
   nodeOnScreen,
@@ -17,15 +19,17 @@ import {
 const LIFT = 90;
 const RADIUS = 60;
 
-// Mirrors the lens placement in web/loupe.ts: above the finger unless the
-// top edge is too close, clamped so the disc stays on the canvas.
-function lensCentre(frame: Frame, finger: Client): Client {
+// Mirrors the lens placement in web/loupe.ts: LOUPE_LIFT above the finger,
+// swinging to the given side as the finger nears the top, clamped so the disc
+// stays on the canvas.
+function lensCentre(frame: Frame, finger: Client, side: 1 | -1 = 1): Client {
   const local = { x: finger.x - frame.left, y: finger.y - frame.top };
-  const above = local.y - LIFT;
-  const y = above - RADIUS >= 0 ? above : local.y + LIFT;
+  const y = Math.max(local.y - LIFT, RADIUS);
+  const dy = local.y - y;
+  const dx = Math.sqrt(Math.max(0, LIFT * LIFT - dy * dy));
   const clamp = (v: number, low: number, high: number) => Math.max(low, Math.min(high, v));
   return {
-    x: frame.left + clamp(local.x, RADIUS, frame.width - RADIUS),
+    x: frame.left + clamp(local.x + side * dx, RADIUS, frame.width - RADIUS),
     y: frame.top + clamp(y, RADIUS, frame.height - RADIUS),
   };
 }
@@ -217,29 +221,54 @@ test("a stroke from a node with a line opens no lens until the finger is clear o
   await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
 });
 
-test("the lens flips below the finger near the top edge", async ({ page }) => {
+test("the lens slides beside the finger across the top edge without a jump", async ({ page }) => {
   test.skip(!test.info().project.use.hasTouch, "touch only");
   const frame = await frameOf(page);
   // The highest node on the settled board sits within the lens's lift and
-  // radius of the top edge at the fitted view.
+  // radius of the top edge at the fitted view, so a stroke that climbs past
+  // it crosses the zone where the lens leaves its spot above the finger.
   const nodes = await boardNodes(page);
   const highest = [...nodes.entries()].reduce((best, entry) =>
     entry[1].y < best[1].y ? entry : best,
   );
   const top = await nodeOnScreen(page, highest[0], nodes.size);
   await expectNodeDrawnAt(page, top);
+  const side: 1 | -1 = top.x < frame.left + frame.width / 2 ? 1 : -1;
   const cdp = await page.context().newCDPSession(page);
 
   const start = await nodeOnScreen(page, highest[0] === 0 ? 3 : 0, nodes.size);
-  const near = { x: top.x, y: top.y - 12 };
-  const lens = lensCentre(frame, near);
-  expect(lens.y).toBeGreaterThan(near.y);
+  const below = { x: top.x, y: Math.min(top.y + 40, frame.top + frame.height - 20) };
   await cdp.send("Input.dispatchTouchEvent", {
     type: "touchStart",
     touchPoints: [{ ...start, id: 0 }],
   });
-  await touchDrag(cdp, start, near);
-  await expect.poll(() => ringSamplesAround(page, lens)).toBeGreaterThanOrEqual(6);
-  await shot(page, "loupe-flipped");
+  await touchDrag(cdp, start, below);
+
+  // The finger climbs 8 px at a time to 12 px above the node. At every step
+  // the ring sits where the placement says, the lens keeps its lift from the
+  // finger, and the measured centre moves no further than the finger did
+  // plus the swing, never a flip.
+  let finger = below;
+  let last: Client | null = null;
+  const steps: string[] = [];
+  while (finger.y > top.y - 12) {
+    const next = { x: finger.x, y: Math.max(finger.y - 8, top.y - 12) };
+    await touchDrag(cdp, finger, next, 0, 2);
+    finger = next;
+    const want = lensCentre(frame, finger, side);
+    await expect.poll(() => ringSamplesAround(page, want)).toBeGreaterThanOrEqual(6);
+    const { at } = await colourCentroid(page, LOUPE_RING);
+    if (last) expect(Math.hypot(at.x - last.x, at.y - last.y)).toBeLessThan(8 + 2 * 8);
+    const lift = Math.hypot(at.x - finger.x, at.y - finger.y);
+    expect(lift).toBeGreaterThan(LIFT - 4);
+    expect(lift).toBeLessThan(LIFT + 4);
+    steps.push(
+      `${Math.round(finger.y - frame.top)}:${Math.round(at.x - frame.left)},${Math.round(at.y - frame.top)}`,
+    );
+    last = at;
+  }
+  test.info().annotations.push({ type: "lens-centres", description: steps.join(" ") });
+  expect(lensCentre(frame, finger, side).x).not.toBe(finger.x);
+  await shot(page, "loupe-top-slide");
   await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
 });

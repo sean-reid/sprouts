@@ -45,17 +45,28 @@ export function nearestFeature(world: Point, state: GameState, view: View): numb
   return best * view.scale;
 }
 
-// Lens centre for a finger at a screen point: above it, below it when the top
-// edge is too close, and shifted inward so the whole disc stays on the canvas.
-export function loupeCentre(finger: Point, width: number, height: number): Point {
-  const above = finger.y - LOUPE_LIFT;
-  const y = above - RADIUS >= 0 ? above : finger.y + LOUPE_LIFT;
-  return { x: clamp(finger.x, RADIUS, width - RADIUS), y: clamp(y, RADIUS, height - RADIUS) };
+export type LoupeSide = 1 | -1;
+
+// Lens centre for a finger at a screen point: LOUPE_LIFT above it, swinging to
+// the given side at the same distance as the finger nears the top, kept on the canvas.
+export function loupeCentre(finger: Point, width: number, height: number, side: LoupeSide): Point {
+  const y = Math.max(finger.y - LOUPE_LIFT, RADIUS);
+  const dy = finger.y - y;
+  const dx = Math.sqrt(Math.max(0, LOUPE_LIFT * LOUPE_LIFT - dy * dy));
+  return {
+    x: clamp(finger.x + side * dx, RADIUS, width - RADIUS),
+    y: clamp(y, RADIUS, height - RADIUS),
+  };
+}
+
+export function loupeSwings(finger: Point): boolean {
+  return finger.y - LOUPE_LIFT < RADIUS;
 }
 
 export class Loupe {
   private world: Point | null = null;
   private armed = false;
+  private side: LoupeSide | null = null;
 
   // Arms once the finger has cleared the node the stroke started on, then
   // follows it while it stays near a feature; returns whether the frame needs
@@ -88,6 +99,7 @@ export class Loupe {
   // The stroke is over; the next one has to clear its start node again.
   release(): boolean {
     this.armed = false;
+    this.side = null;
     return this.hide();
   }
 
@@ -95,7 +107,11 @@ export class Loupe {
     if (!this.world) return;
     setCssPixelTransform(ctx, view);
     const finger = view.toScreen(this.world);
-    const centre = loupeCentre(finger, view.width, view.height);
+    // One side per stroke, so a finger crossing the middle does not flip the lens.
+    if (this.side === null && loupeSwings(finger)) {
+      this.side = finger.x < view.width / 2 ? 1 : -1;
+    }
+    const centre = loupeCentre(finger, view.width, view.height, this.side ?? 1);
     const project = (p: Point): Point => {
       const s = view.toScreen(p);
       return {
