@@ -46,14 +46,39 @@ export interface GameRecord extends Omit<Fixture, "moves"> {
   // The settle the game was played under; 0 replays with none.
   settleVersion: number;
   moves: RecordMove[];
+  // The router, move list and settle the moves' caches were worked out
+  // under; a record from other versions loads with no cache.
+  cacheVersions?: CacheVersions;
+}
+
+export interface CacheVersions {
+  router: number;
+  list: number;
+  settle: number;
+}
+
+function cacheVersions(): CacheVersions {
+  return { router: ROUTER_VERSION, list: MOVE_LIST_VERSION, settle: SETTLE_VERSION };
+}
+
+function currentVersions(versions: CacheVersions | undefined): boolean {
+  const now = cacheVersions();
+  return (
+    versions !== undefined &&
+    versions.router === now.router &&
+    versions.list === now.list &&
+    versions.settle === now.settle
+  );
 }
 
 export function hasStroke(move: RecordMove): move is FixtureMove {
   return "polyline" in move;
 }
 
+// A move carried by index alone; a saved stroke keeps its cached index
+// beside its polyline and is not one.
 export function isIndexed(move: RecordMove): move is IndexedRecordMove {
-  return "index" in move;
+  return "index" in move && !("polyline" in move);
 }
 
 // A move with what the engine reported about it: the spline it fitted, the
@@ -67,6 +92,9 @@ export interface RecordedMove extends Move {
   topology?: FaceMove;
   cutOff?: number;
   indexed?: IndexedMove;
+  // The regenerated board would not take this move, so the game cannot
+  // travel as indices while the move stands.
+  refused?: true;
 }
 
 export const UNKNOWN_NODE = -1;
@@ -163,6 +191,14 @@ export class History {
     );
     history.nodes = record.nodes ?? null;
     history.moves = record.moves.map(fromRecordMove);
+    // A cache from other versions is dropped; a move a link carries by
+    // index alone keeps its index, which is the move itself.
+    if (!currentVersions(record.cacheVersions)) {
+      for (const move of history.moves.filter(drawn)) {
+        delete move.indexed;
+        delete move.refused;
+      }
+    }
     history.cursor = Math.min(Math.max(record.cursor, 0), history.moves.length);
     return history;
   }
@@ -194,6 +230,13 @@ export class History {
     if (topology) kept.topology = topology;
     this.moves.push(kept);
     this.cursor = this.moves.length;
+  }
+
+  // Whether every move carries the index the link would send. A move's
+  // index depends only on the moves before it, so the moves a new move or
+  // a truncation discards take their caches with them and the rest hold.
+  get indexed(): boolean {
+    return this.moves.length > 0 && this.moves.every((move) => move.indexed);
   }
 
   // A copy to work on while the game goes on.
@@ -295,7 +338,22 @@ export class History {
       settleVersion: this.settleVersion,
       moves: this.moves.map(toRecordMove),
       cursor: this.cursor,
+      ...(this.moves.some((move) => move.indexed || move.refused)
+        ? { cacheVersions: cacheVersions() }
+        : {}),
     };
+  }
+}
+
+// Records what the engine's indexing said about a move: its index, or
+// `false` when the regenerated board refused it.
+function setIndexed(move: RecordedMove, indexed: IndexedMove | false): void {
+  if (indexed) {
+    move.indexed = indexed;
+    delete move.refused;
+  } else {
+    delete move.indexed;
+    move.refused = true;
   }
 }
 
@@ -305,6 +363,7 @@ function cloneMove(move: RecordedMove): RecordedMove {
   if (move.topology) clone.topology = move.topology;
   if (move.cutOff !== undefined) clone.cutOff = move.cutOff;
   if (move.indexed) clone.indexed = move.indexed;
+  if (move.refused) clone.refused = true;
   return clone;
 }
 
@@ -340,6 +399,11 @@ function toRecordMove(move: RecordedMove): FixtureMove {
     newNode: [move.newNodePos.x, move.newNodePos.y],
     ...(move.cutOff !== undefined ? { cutOff: move.cutOff } : {}),
     ...(move.segments ? { segments: move.segments } : {}),
+    ...(move.indexed
+      ? { cache: { index: move.indexed.index, along: move.indexed.along } }
+      : move.refused
+        ? { cache: { refused: true as const } }
+        : {}),
   };
 }
 
@@ -361,6 +425,10 @@ function fromRecordMove(move: RecordMove): RecordedMove {
       newNodePos: { x: move.newNode[0], y: move.newNode[1] },
       ...(move.cutOff !== undefined ? { cutOff: move.cutOff } : {}),
       ...(move.segments ? { segments: move.segments } : {}),
+      ...(move.cache?.index !== undefined && move.cache.along !== undefined
+        ? { indexed: { index: move.cache.index, along: move.cache.along } }
+        : {}),
+      ...(move.cache?.refused ? { refused: true as const } : {}),
     };
   }
   return {
@@ -417,6 +485,8 @@ function asRecord(value: unknown): GameRecord | null {
   // another board.
   const settleVersion = v.settleVersion ?? 0;
   if (!isCount(settleVersion) || settleVersion > SETTLE_VERSION) return null;
+  const cacheVersions = v.cacheVersions === undefined ? undefined : asVersions(v.cacheVersions);
+  if (v.cacheVersions !== undefined && !cacheVersions) return null;
   return {
     version: 1,
     initialNodes: v.initialNodes,
@@ -427,7 +497,15 @@ function asRecord(value: unknown): GameRecord | null {
     settleVersion,
     moves: v.moves,
     cursor: v.cursor,
+    ...(cacheVersions ? { cacheVersions } : {}),
   };
+}
+
+function asVersions(value: unknown): CacheVersions | null {
+  if (typeof value !== "object" || value === null) return null;
+  const c = value as Record<string, unknown>;
+  if (!isCount(c.router) || !isCount(c.list) || !isCount(c.settle)) return null;
+  return { router: c.router, list: c.list, settle: c.settle };
 }
 
 function isCount(value: unknown): value is number {
@@ -455,10 +533,13 @@ function isLayout(value: unknown, count: number): value is [number, number][] {
 function isRecordMove(value: unknown, nodes: number, halfEdges: number): value is RecordMove {
   if (typeof value !== "object" || value === null) return false;
   const m = value as Record<string, unknown>;
-  if ("index" in m) return isCount(m.index) && isCount(m.along) && m.along <= 255;
+  if ("index" in m && !("polyline" in m)) {
+    return isCount(m.index) && isCount(m.along) && m.along <= 255;
+  }
   if (!isCount(m.from) || !isCount(m.to) || m.from >= nodes || m.to >= nodes) return false;
   if ("face" in m) return isPair(m.node) && isFace(m.face, m.from, m.to, nodes, halfEdges);
   if (m.cutOff !== undefined && !isCount(m.cutOff)) return false;
+  if (m.cache !== undefined && !isMoveCache(m.cache)) return false;
   return (
     Array.isArray(m.polyline) &&
     m.polyline.length >= 2 &&
@@ -466,6 +547,15 @@ function isRecordMove(value: unknown, nodes: number, halfEdges: number): value i
     isPair(m.newNode) &&
     (m.segments === undefined || isSegments(m.segments))
   );
+}
+
+function isMoveCache(value: unknown): boolean {
+  if (typeof value !== "object" || value === null) return false;
+  const c = value as Record<string, unknown>;
+  if (c.index !== undefined && !isCount(c.index)) return false;
+  if (c.along !== undefined && !(isCount(c.along) && c.along <= 255)) return false;
+  if (c.refused !== undefined && c.refused !== true) return false;
+  return true;
 }
 
 function isSegments(value: unknown): value is Cubic[] {
@@ -876,11 +966,12 @@ export interface LinkEngine {
 }
 
 // The game as the link will carry it, worked out on a copy. An index
-// link is tried first: the engine names every move by index while
-// replaying them on a fresh board, which routes and settles each move
-// itself, so the visitor's board is that board rather than this one;
-// a game the engine cannot index that way falls back to shapes, and
-// only that failure is caught. For shapes the
+// link comes first: a game whose every move carries an index from an
+// earlier share goes out at once, a game with a move the regenerated
+// board refused goes as shapes at once, and otherwise the engine indexes
+// the whole game while replaying it on a fresh board, so the visitor's
+// board is that board rather than this one; only that call's failure is
+// caught. For shapes the
 // engine says which drawn moves the router redraws, then the link
 // is replayed as decoded and any topology move the replay refuses,
 // or lands its node more than DRIFT_TOLERANCE from the recorded
@@ -904,17 +995,16 @@ export async function prepareLink(
   settled?: Point[],
 ): Promise<{ history: History; refusedAt?: number; mismatch?: boolean }> {
   const history = source.clone();
-  for (const move of history.moves) delete move.indexed;
+  if (history.indexed) return { history };
   const plan = classification(history);
-  if (plan) {
+  if (plan && !history.moves.some((move) => move.refused)) {
     const indexed = await engine.index(plan).catch(() => undefined);
     if (indexed) {
-      indexed.moves.forEach((move, i) => {
-        const target = history.moves[i];
-        if (target) target.indexed = move;
-      });
-      return { history };
+      history.moves.forEach((move, i) => setIndexed(move, indexed.moves[i] ?? false));
+      if (indexed.refused === undefined) return { history };
     }
+  }
+  if (plan) {
     try {
       const { topology } = await engine.classify(plan);
       topology.forEach((face, i) => {
@@ -960,6 +1050,38 @@ export async function prepareLink(
   }
 }
 
+// Whether the saved record carries an index for each of its first `count`
+// moves, so a comparison with a link needs no engine.
+export function indicesCached(saved: GameRecord, count: number): boolean {
+  return (
+    saved.moves.length >= count &&
+    currentVersions(saved.cacheVersions) &&
+    saved.moves.slice(0, count).every((move) => hasStroke(move) && move.cache?.index !== undefined)
+  );
+}
+
+// Indexing a saved game routes every move again, so a page opening an
+// own link indexes a game this short at once and a longer uncached one
+// only after the link has opened.
+export const SHORT_GAME = 15;
+
+// Whether an index link could be the saved game but the check has to wait
+// for the engine: the headers match, the record's cache does not cover
+// the link's moves, and the game is SHORT_GAME moves or longer.
+export function ownLinkDeferred(saved: GameRecord, linked: GameRecord): boolean {
+  const count = linked.moves.length;
+  return (
+    count >= SHORT_GAME &&
+    linked.moves.every(isIndexed) &&
+    saved.moves.length >= count &&
+    saved.initialNodes === linked.initialNodes &&
+    saved.boardSize === linked.boardSize &&
+    saved.firstPlayer === linked.firstPlayer &&
+    saved.settleVersion === linked.settleVersion &&
+    !indicesCached(saved, count)
+  );
+}
+
 // Whether an index link names the saved game: the two carry the same
 // header and the engine indexes the saved record's first moves to the
 // link's, so a game played on past the link still reopens live. A link
@@ -983,21 +1105,23 @@ export async function sameIndexedGame(
     return false;
   }
   const shared = linked.moves.length;
-  const plan = classification(
-    History.from({ ...saved, moves: saved.moves.slice(0, shared), cursor: shared }),
-  );
+  const same = (moves: IndexedMove[]) =>
+    moves.length === shared &&
+    moves.every((move, i) => {
+      const other = linked.moves[i];
+      return (
+        other !== undefined &&
+        isIndexed(other) &&
+        other.index === move.index &&
+        other.along === move.along
+      );
+    });
+  const cached = History.from({ ...saved, moves: saved.moves.slice(0, shared), cursor: shared });
+  if (cached.indexed) return same(cached.moves.map((move) => move.indexed!));
+  const plan = classification(cached);
   if (!plan) return false;
   const indexed = await index(plan).catch(() => undefined);
-  if (!indexed || indexed.moves.length !== linked.moves.length) return false;
-  return indexed.moves.every((move, i) => {
-    const other = linked.moves[i];
-    return (
-      other !== undefined &&
-      isIndexed(other) &&
-      other.index === move.index &&
-      other.along === move.along
-    );
-  });
+  return indexed !== undefined && indexed.refused === undefined && same(indexed.moves);
 }
 
 export function shareUrl(history: History): string {

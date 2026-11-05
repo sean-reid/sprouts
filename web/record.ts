@@ -12,6 +12,18 @@ export interface FixtureMove {
   // The spline the move committed as; a settled game carries it so a
   // replay applies the move exactly.
   segments?: Cubic[];
+  // What a share worked out for the move, under the versions the record
+  // names in cacheVersions: its index in the engine's move list and its
+  // node's place along the routed curve, or that a regenerated board
+  // would not take it, so the game shares as shapes without indexing
+  // again.
+  cache?: MoveCache;
+}
+
+export interface MoveCache {
+  index?: number;
+  along?: number;
+  refused?: true;
 }
 
 export interface Fixture {

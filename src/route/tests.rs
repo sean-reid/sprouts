@@ -748,10 +748,11 @@ fn rehearse_shared_game(game: &SharedGame) -> Drift {
         moves: fixture.moves.iter().map(|m| m.wire()).collect(),
         known: vec![None; fixture.moves.len()],
     });
-    // Indexing fails at the move the regenerated board refuses or lists
-    // differently, "move N: ...".
     let (indexed, index_refused) = match indexed {
-        Ok(indexed) => {
+        Ok(protocol::Indexed {
+            moves,
+            refused: None,
+        }) => {
             let by_index = protocol::rehearse(protocol::Rehearsal {
                 router_version: protocol::ROUTER_VERSION,
                 settle_version: fixture.settle_version,
@@ -760,8 +761,7 @@ fn rehearse_shared_game(game: &SharedGame) -> Drift {
                 board_size: fixture.board_size,
                 first_player: Player::Human,
                 nodes: None,
-                moves: indexed
-                    .moves
+                moves: moves
                     .iter()
                     .map(|m| protocol::LinkMove::Indexed {
                         index: m.index,
@@ -774,17 +774,15 @@ fn rehearse_shared_game(game: &SharedGame) -> Drift {
                 by_index.refused, None,
                 "indexing passed but the replay refused"
             );
-            (indexed.moves, None)
+            (moves, None)
         }
-        Err(why) => {
-            eprintln!("  indexing: {why}");
-            let at = why
-                .strip_prefix("move ")
-                .and_then(|rest| rest.split(':').next())
-                .and_then(|n| n.parse().ok())
-                .unwrap_or_else(|| panic!("indexing: {why}"));
+        Ok(protocol::Indexed {
+            refused: Some(at), ..
+        }) => {
+            eprintln!("  indexing: the regenerated board refuses move {at}");
             (Vec::new(), Some(at))
         }
+        Err(why) => panic!("indexing: {why}"),
     };
     let varint =
         |v: usize| 1 + (usize::BITS - v.max(1).leading_zeros()).saturating_sub(1) as usize / 7;
@@ -880,10 +878,11 @@ fn measure_shared_game_drift() {
     }
 }
 
-/// Rewrites the three shared-game fixtures tests/e2e/replay-links.spec.ts
+/// Rewrites the four shared-game fixtures tests/e2e/replay-links.spec.ts
 /// shares, for when the router's output changes:
 /// `cargo test --release record_shared_games -- --ignored`. The pick,
-/// from SPROUTS_PICK_4, SPROUTS_PICK_9 and SPROUTS_PICK_12 when set, is
+/// from SPROUTS_PICK_4, SPROUTS_PICK_9, SPROUTS_PICK_12 and
+/// SPROUTS_PICK_24 when set, is
 /// which chord the human opens with. The record is deterministic while
 /// the AI's draw stays inside its routing budget.
 #[test]
@@ -913,6 +912,12 @@ fn record_shared_games() {
         30,
         pick("SPROUTS_PICK_12", 5),
         &dir.join("thirty-moves-12n-1000.json"),
+    );
+    record_shared_game(
+        24,
+        10,
+        pick("SPROUTS_PICK_24", 0),
+        &dir.join("ten-moves-24n-1000.json"),
     );
 }
 

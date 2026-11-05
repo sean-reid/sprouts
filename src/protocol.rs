@@ -690,10 +690,13 @@ pub struct IndexedMove {
     pub along: u8,
 }
 
-/// Every move of a game by index, in the order played.
+/// Every move of a game by index, in the order played, up to the first
+/// move a regenerated board refuses or lists differently, which is named
+/// in `refused`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Tsify)]
 pub struct Indexed {
     pub moves: Vec<IndexedMove>,
+    pub refused: Option<usize>,
 }
 
 /// Every legal move of the position in the order a share link's indices
@@ -759,9 +762,10 @@ fn normalised(face: &face::FaceModel, mut mv: ModelMove) -> ModelMove {
 /// index in the position's move list, with the human's node as its place
 /// along the curve and the AI's left to the router. Alongside, the moves
 /// are replayed by index on a fresh board the way a visitor's engine
-/// replays the link; a move that board refuses, or that lists as another
-/// move there, is an error, so a link only goes out as indices when the
-/// visitor regenerates the recorded game.
+/// replays the link; the first move that board refuses, lists as another
+/// move, or ends as another position stops the indexing and is named, so
+/// a link only goes out as indices when the visitor regenerates the
+/// recorded game.
 pub fn index_moves(plan: Classification) -> Result<Indexed, String> {
     let mut state = start(
         plan.initial_nodes,
@@ -793,37 +797,45 @@ pub fn index_moves(plan: Classification) -> Result<Indexed, String> {
         } else {
             along_of(&mov.segments, mov.new_node_pos)
         };
-        let regenerated = move_list(&fresh)
-            .into_iter()
-            .nth(listed)
-            .filter(same)
-            .ok_or_else(|| format!("move {index}: the regenerated board lists another move"))?;
+        let Some(regenerated) = move_list(&fresh).into_iter().nth(listed).filter(same) else {
+            return Ok(Indexed {
+                moves,
+                refused: Some(index),
+            });
+        };
         let spot = if along == 0 {
             Spot::Router
         } else {
             Spot::Along(along)
         };
-        if let Outcome::Rejected { rejection } = apply_listed(&mut fresh, regenerated, spot) {
-            return Err(format!(
-                "move {index}: the regenerated board refuses it: {}",
-                rejection.message
-            ));
+        if matches!(
+            apply_listed(&mut fresh, regenerated, spot),
+            Outcome::Rejected { .. }
+        ) {
+            return Ok(Indexed {
+                moves,
+                refused: Some(index),
+            });
         }
-        moves.push(IndexedMove {
-            index: listed,
-            along,
-        });
         state
             .apply_move(mov)
             .map_err(|e| format!("move {index}: {}", e.message))?;
         settle::settle(&mut state);
         if face::canonical_form(&state.face) != face::canonical_form(&fresh.face) {
-            return Err(format!(
-                "move {index}: the regenerated board is another position"
-            ));
+            return Ok(Indexed {
+                moves,
+                refused: Some(index),
+            });
         }
+        moves.push(IndexedMove {
+            index: listed,
+            along,
+        });
     }
-    Ok(Indexed { moves })
+    Ok(Indexed {
+        moves,
+        refused: None,
+    })
 }
 
 /// Where a point sits along a curve, as a byte: 1 at the start, 255 at the
@@ -2577,11 +2589,13 @@ mod tests {
                 known: vec![None; fixture.moves.len()],
             };
             let indexed = match index_moves(plan) {
-                Ok(indexed) => indexed.moves,
-                Err(why) if why.contains("regenerated board") => {
-                    eprintln!("{name}: {why}");
+                Ok(Indexed {
+                    refused: Some(at), ..
+                }) => {
+                    eprintln!("{name}: the regenerated board refuses move {at}");
                     continue;
                 }
+                Ok(indexed) => indexed.moves,
                 Err(why) => panic!("{name}: {why}"),
             };
             indexed_games += 1;

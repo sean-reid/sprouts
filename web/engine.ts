@@ -23,6 +23,11 @@ interface Pending {
 }
 
 const CALL_TIMEOUT_MS = 30_000;
+// A share replays the whole game in the engine, routing every move, up
+// to three times; on a slow machine a 30-move game needs about a minute
+// per replay.
+const SHARE_CALL_TIMEOUT_MS = 180_000;
+const SHARE_METHODS: ReadonlySet<Method> = new Set<Method>(["indexMoves", "classify", "rehearse"]);
 
 export class Engine {
   private readonly worker: Worker;
@@ -46,6 +51,13 @@ export class Engine {
     return this.send(lane, method, args);
   }
 
+  // Ends the worker; pending requests never settle.
+  dispose(): void {
+    for (const entry of this.pending.values()) clearTimeout(entry.timer);
+    this.pending.clear();
+    this.worker.terminate();
+  }
+
   cancel(lane: string): void {
     const id = this.lanes.get(lane);
     if (id === undefined) return;
@@ -60,9 +72,12 @@ export class Engine {
   ): Promise<Result<M>> {
     return new Promise<Result<M>>((resolve, reject) => {
       const id = ++this.nextId;
-      const timer = setTimeout(() => {
-        this.take(id)?.reject(new CallTimeout(method));
-      }, CALL_TIMEOUT_MS);
+      const timer = setTimeout(
+        () => {
+          this.take(id)?.reject(new CallTimeout(method));
+        },
+        SHARE_METHODS.has(method) ? SHARE_CALL_TIMEOUT_MS : CALL_TIMEOUT_MS,
+      );
       this.pending.set(id, {
         method,
         lane,

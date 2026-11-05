@@ -1,7 +1,15 @@
 import { readFileSync } from "node:fs";
 import { basename } from "node:path";
 import { expect, test, type BrowserContextOptions, type Page } from "@playwright/test";
-import { decodeRecord, DRIFT_TOLERANCE, hasStroke, isIndexed, sameGame } from "../../web/history";
+import {
+  decodeRecord,
+  DRIFT_TOLERANCE,
+  encodeRecord,
+  hasStroke,
+  History,
+  isIndexed,
+  sameGame,
+} from "../../web/history";
 import type { Fixture } from "../../web/record";
 import { HIGHLIGHT_COLOR } from "../../web/render";
 import {
@@ -11,6 +19,14 @@ import {
   interceptWorkerMessages,
   recordNodesOnScreen,
   colourPixelsNear,
+  clickAway,
+  drawBetween,
+  expectDotAt,
+  holdNext,
+  lastRequestArgs,
+  openBoard,
+  playExchange,
+  requestCount,
   rowIds,
   savedRecord,
   share,
@@ -34,18 +50,17 @@ const fixtures = [
 // the payload budget in characters, the form the link takes, and for a
 // shapes link how many AI moves go as topology. The link carries indices
 // when the engine regenerates the whole game on a fresh board, and shapes
-// when the regenerated board refuses a move, as the nine-node and
-// thirty-move games do. The budget belongs to the recording: the payload
-// measured when the game was recorded (34, 1486 and 2047) plus 10
-// percent, rounded up. The nine-node game went from 1335 to 1486 when
-// the bare loop's circle points moved a quarter step off the heading
-// grid and its human strokes refit around them; the thirty-move game
-// went from 2907 to 2047 with its new pick and all 15 AI moves as
-// topology.
+// when the regenerated board refuses a move, as the nine-node,
+// thirty-move and 24-node games do. The budget belongs to the recording:
+// the payload measured on router version 5 with the recorder's default
+// picks (34, 1486, 2047 and 691) plus 10 percent, rounded up. A payload
+// depends on the router version, the pick and the recorder, so a new
+// recording brings its own budget.
 const routed: [string, number, "indices" | "shapes", number][] = [
   ["fixtures/saved/eight-moves-4n-1000.json", 38, "indices", 4],
   ["fixtures/saved/ten-moves-9n-1000.json", 1635, "shapes", 5],
   ["fixtures/saved/thirty-moves-12n-1000.json", 2252, "shapes", 15],
+  ["fixtures/saved/ten-moves-24n-1000.json", 761, "shapes", 5],
 ];
 
 // A share replays the game up to three times in the engine, routing
@@ -69,7 +84,11 @@ function visitorOptions(): BrowserContextOptions {
 async function openSaved(page: Page, file: string): Promise<number> {
   const fixture = JSON.parse(readFileSync(file, "utf8")) as Fixture;
   const record = { firstPlayer: "human", cursor: fixture.moves.length, ...fixture };
-  await page.addInitScript((s) => localStorage.setItem("sprouts.game", s), JSON.stringify(record));
+  await page.addInitScript(interceptWorkerMessages);
+  // Seeded once, so a reload keeps what the page saved since.
+  await page.addInitScript((s) => {
+    if (!localStorage.getItem("sprouts.game")) localStorage.setItem("sprouts.game", s);
+  }, JSON.stringify(record));
   await page.goto("/");
   await expect(entries(page)).toHaveCount(fixture.moves.length, { timeout: 240_000 });
   await expect(page.locator("#status")).not.toHaveText(/Initializing|Replay/, {
@@ -129,10 +148,31 @@ for (const [file, budget, form, topologyMoves] of routed) {
     browser,
   }) => {
     test.setTimeout(600_000);
+    const opened = Date.now();
     const total = await openSaved(page, file);
     await expect(page.locator("#status")).toHaveText("Your turn!");
+    test.info().annotations.push({
+      type: `${name}-restore-ms`,
+      description: String(Date.now() - opened),
+    });
     const before = await strokeCells(page);
+    // The record predates the cache, so the first share indexes once and
+    // the second reads the cache or the refused marker.
+    const started = Date.now();
     const { url, payload } = await share(page, `${name}-payload-chars`, SHARE_WAIT);
+    test.info().annotations.push({
+      type: `${name}-first-share-ms`,
+      description: String(Date.now() - started),
+    });
+    expect(await requestCount(page, "indexMoves")).toBe(1);
+    const again = Date.now();
+    const second = await share(page, `${name}-payload-chars-again`, SHARE_WAIT);
+    test.info().annotations.push({
+      type: `${name}-second-share-ms`,
+      description: String(Date.now() - again),
+    });
+    expect(second.url).toBe(url);
+    expect(await requestCount(page, "indexMoves")).toBe(1);
     expect(payload).toBeLessThan(budget);
     await expect(page.locator("#status")).not.toHaveText(/replay may stop|may differ/);
     await shot(page, `${name}-source`);
@@ -165,25 +205,31 @@ for (const [file, budget, form, topologyMoves] of routed) {
     if (form === "shapes") expectSameStrokes(before, await strokeCells(other));
 
     // Sharing again from the visitor's board gives a link to the same game.
-    const again = await share(other, `${name}-visitor-payload-chars`, SHARE_WAIT);
+    const visitorShare = await share(other, `${name}-visitor-payload-chars`, SHARE_WAIT);
     const relinked = decodeRecord(
-      again.url.slice(again.url.indexOf(HASH_PREFIX) + HASH_PREFIX.length),
+      visitorShare.url.slice(visitorShare.url.indexOf(HASH_PREFIX) + HASH_PREFIX.length),
     );
     if (!relinked) throw new Error("the visitor's link does not decode");
     expect(sameGame(linked, relinked)).toBe(true);
     if (form === "indices") {
       // The regenerated board is a pure function of the move list, so the
       // visitor's link is the sharer's.
-      expect(again.payload).toBe(payload);
+      expect(visitorShare.payload).toBe(payload);
       await visitor.close();
       // The share put the link in the address bar; a reload with it lands
       // on the live game, since the saved record indexes to the link's
       // moves.
       expect(page.url()).toBe(url);
+      const reloaded = Date.now();
       await page.reload();
       await expect(page.locator("#status")).toHaveText("Your turn!", { timeout: 240_000 });
+      test.info().annotations.push({
+        type: `${name}-reopen-ms`,
+        description: String(Date.now() - reloaded),
+      });
       expect(page.url()).not.toContain("#");
       await expect(entries(page)).toHaveCount(total);
+      expect(await requestCount(page, "indexMoves")).toBe(0);
       return;
     }
     expect(relinked.moves.map(hasStroke)).toEqual(linked.moves.map(hasStroke));
@@ -204,6 +250,84 @@ for (const [file, budget, form, topologyMoves] of routed) {
     await visitor.close();
   });
 }
+
+// A new move after an undo discards the moves ahead with their cached
+// indices, so the next share indexes the whole game again.
+test("a share after an undo and a new move indexes the whole game again", async ({ page }) => {
+  test.setTimeout(300_000);
+  await openBoard(page);
+  await playExchange(page);
+  await share(page, "exchange-payload-chars", SHARE_WAIT);
+  expect(await requestCount(page, "indexMoves")).toBe(1);
+  await page.locator("#undoBtn").click();
+  await expect(page.locator("#status")).toHaveText("Move undone: your turn");
+  await playExchange(page);
+  await share(page, "exchange-again-payload-chars", SHARE_WAIT);
+  expect(await requestCount(page, "indexMoves")).toBe(2);
+  const [plan] = (await lastRequestArgs(page, "indexMoves")) as [{ moves: unknown[] }];
+  expect(plan.moves).toHaveLength(2);
+});
+
+// A share while the AI is thinking would queue its replays ahead of the
+// AI's move in the worker, so the button is disabled and the click does
+// nothing; the AI's move lands.
+test("Share is refused during the AI's turn and the move still lands", async ({ page }) => {
+  await openBoard(page);
+  await holdNext(page, "aiMove", 3_000);
+  const mid = await drawBetween(page, 0, 1, 4);
+  await expectDotAt(page, mid);
+  await clickAway(page);
+  await expect(page.locator("#status")).toHaveText(/AI is thinking/);
+  await expect(page.locator("#shareBtn")).toBeDisabled();
+  // A disabled button never dispatches a click, so the attribute comes off
+  // and the guard in share() is what refuses the click.
+  await page.evaluate(() => document.getElementById("shareBtn")?.removeAttribute("disabled"));
+  await page.locator("#shareBtn").click();
+  await expect(page.locator("#status")).toHaveText("Your turn!", { timeout: 60_000 });
+  await expect(page.locator("#moveList li")).toHaveCount(2);
+  expect(await requestCount(page, "indexMoves")).toBe(0);
+  await expect(page.locator("#shareBtn")).toBeEnabled();
+});
+
+// A long index link over a saved game with the same header is opened in
+// review first and checked against the saved record in a worker of its
+// own, so when it turns out to be another game the review still steps.
+test("a long index link that is not the saved game opens in review and steps", async ({ page }) => {
+  test.setTimeout(600_000);
+  const file = "fixtures/saved/thirty-moves-12n-1000.json";
+  const fixture = JSON.parse(readFileSync(file, "utf8")) as Fixture;
+  const saved = { firstPlayer: "human", cursor: fixture.moves.length, ...fixture };
+  // Fifteen moves on the same header, each the first move the engine
+  // lists, which is not the saved game.
+  const other = new History(fixture.initialNodes, fixture.boardSize, "human", 1);
+  for (let i = 0; i < 15; i++) {
+    other.push({ fromNode: 0, toNode: 0, polyline: [{ x: 0, y: 0 }], newNodePos: { x: 0, y: 0 } });
+    other.moves[i]!.indexed = { index: 0, along: 0 };
+  }
+  await page.addInitScript(interceptWorkerMessages);
+  await page.addInitScript((s) => localStorage.setItem("sprouts.game", s), JSON.stringify(saved));
+  await page.goto("/" + HASH_PREFIX + encodeRecord(other));
+  // The check may finish before the status can be read, so the end state
+  // is what is asserted: the link stays open and one indexMoves request
+  // went to the checker's worker.
+  await expect(page.locator("#status")).toHaveText(/^Reviewing: move \d+ of \d+|^Replay stopped/, {
+    timeout: 240_000,
+  });
+  await expect.poll(() => requestCount(page, "indexMoves"), { timeout: 240_000 }).toBe(1);
+  await expect(page.locator("#status")).toHaveText(/^Reviewing: move \d+ of \d+|^Replay stopped/, {
+    timeout: 240_000,
+  });
+  expect(page.url()).toContain("#");
+  const rows = await page.locator("#moveList li").count();
+  expect(rows).toBeGreaterThan(1);
+  await page.locator("#backBtn").click();
+  await expect(page.locator("#status")).toHaveText(new RegExp(`^Reviewing: move ${rows - 1} of`), {
+    timeout: 60_000,
+  });
+  // The saved game is untouched.
+  const kept = await page.evaluate(() => JSON.parse(localStorage.getItem("sprouts.game") ?? "{}"));
+  expect((kept as { moves: unknown[] }).moves).toHaveLength(fixture.moves.length);
+});
 
 // A version 4 link of two moves, the second a face move, with its router
 // byte set to a version this page does not have.
