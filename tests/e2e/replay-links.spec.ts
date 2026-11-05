@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { basename } from "node:path";
 import { expect, test, type BrowserContextOptions, type Page } from "@playwright/test";
-import { decodeRecord, DRIFT_TOLERANCE, hasStroke, sameGame } from "../../web/history";
+import { decodeRecord, DRIFT_TOLERANCE, hasStroke, isIndexed, sameGame } from "../../web/history";
 import type { Fixture } from "../../web/record";
 import { HIGHLIGHT_COLOR } from "../../web/render";
 import {
@@ -29,20 +29,27 @@ const fixtures = [
   "fixtures/games/selfplay-4n-500.json",
 ];
 
-// Games recorded against the current AI by the record_shared_games test
-// in src/route/tests.rs, the human strokes bulged, so AI moves travel as
-// face moves and human moves as geometry. Per game: the payload budget in
-// characters and how many of the AI's moves go as topology. The budget
-// belongs to the recording: it is the payload measured when the game was
-// recorded (828 and 1335) with about 10 percent headroom, and a new
-// recording brings its own. A settled record sends each human stroke as
-// its exact cubics, 13 to 19 per stroke at twice the human clearance.
-// Every AI move of both games is the router's own line, so all of them
-// travel as topology.
-const routed: [string, number, number][] = [
-  ["fixtures/saved/eight-moves-4n-1000.json", 910, 4],
-  ["fixtures/saved/ten-moves-9n-1000.json", 1470, 5],
+// Games recorded by the record_shared_games test in src/route/tests.rs,
+// the human strokes bulged so the router does not redraw them. Per game:
+// the payload budget in characters, the form the link takes, and for a
+// shapes link how many AI moves go as topology. The link carries indices
+// when the engine regenerates the whole game on a fresh board, and shapes
+// when the regenerated board refuses a move, as the nine-node and
+// thirty-move games do. The budget belongs to the recording: the payload
+// measured when the game was recorded (34, 1335 and 2907) plus 10
+// percent, rounded up. The wasm build routes one AI move of the
+// thirty-move game differently from the native recorder, so the page's
+// rehearsal sends 14 of its 15 AI moves as topology where the native
+// replay sends all 15.
+const routed: [string, number, "indices" | "shapes", number][] = [
+  ["fixtures/saved/eight-moves-4n-1000.json", 38, "indices", 4],
+  ["fixtures/saved/ten-moves-9n-1000.json", 1470, "shapes", 5],
+  ["fixtures/saved/thirty-moves-12n-1000.json", 3198, "shapes", 14],
 ];
+
+// A share replays the game up to three times in the engine, routing
+// every move; the thirty-move game takes about a minute on the runner.
+const SHARE_WAIT = 180_000;
 
 const entries = (page: Page) => page.locator("#moveList li");
 
@@ -114,9 +121,9 @@ for (const file of fixtures) {
   });
 }
 
-for (const [file, budget, topologyMoves] of routed) {
+for (const [file, budget, form, topologyMoves] of routed) {
   const name = basename(file, ".json");
-  test(`${name} shares its AI moves as topology and rebuilds the same board`, async ({
+  test(`${name} shares its moves as ${form} and the visitor rebuilds the game`, async ({
     page,
     browser,
   }) => {
@@ -124,19 +131,23 @@ for (const [file, budget, topologyMoves] of routed) {
     const total = await openSaved(page, file);
     await expect(page.locator("#status")).toHaveText("Your turn!");
     const before = await strokeCells(page);
-    const { url, payload } = await share(page, `${name}-payload-chars`);
+    const { url, payload } = await share(page, `${name}-payload-chars`, SHARE_WAIT);
     expect(payload).toBeLessThan(budget);
-    await expect(page.locator("#status")).not.toHaveText(/replay may stop/);
+    await expect(page.locator("#status")).not.toHaveText(/replay may stop|may differ/);
     await shot(page, `${name}-source`);
 
     const linked = decodeRecord(url.slice(url.indexOf(HASH_PREFIX) + HASH_PREFIX.length));
     if (!linked) throw new Error("the link does not decode");
     expect(linked.moves).toHaveLength(total);
-    // The human moves first, and strokes stay geometry.
-    const humanMoves = linked.moves.filter((_, i) => i % 2 === 0);
-    expect(humanMoves.every(hasStroke)).toBe(true);
-    const aiMoves = linked.moves.filter((_, i) => i % 2 === 1);
-    expect(aiMoves.filter((move) => !hasStroke(move))).toHaveLength(topologyMoves);
+    if (form === "indices") {
+      expect(linked.moves.every(isIndexed)).toBe(true);
+    } else {
+      // The human moves first, and strokes stay geometry.
+      const humanMoves = linked.moves.filter((_, i) => i % 2 === 0);
+      expect(humanMoves.every(hasStroke)).toBe(true);
+      const aiMoves = linked.moves.filter((_, i) => i % 2 === 1);
+      expect(aiMoves.filter((move) => !hasStroke(move))).toHaveLength(topologyMoves);
+    }
 
     const visitor = await browser.newContext(visitorOptions());
     const other = await visitor.newPage();
@@ -145,24 +156,43 @@ for (const [file, budget, topologyMoves] of routed) {
       new RegExp(`^Reviewing: move ${total} of ${total}\\.`),
       { timeout: 240_000 },
     );
+    // The same face moves give the same rows, ids and cut-off counts on
+    // both ends, whether or not the boards share their geometry.
     await expect(entries(other)).toHaveText(await entries(page).allTextContents());
+    for (let i = 0; i < total; i++) expect(await rowIds(other, i)).toEqual(await rowIds(page, i));
     await shot(other, `${name}-visitor`);
-    expectSameStrokes(before, await strokeCells(other));
+    if (form === "shapes") expectSameStrokes(before, await strokeCells(other));
 
-    // The visitor's engine drew the topology moves, so sharing again gives
-    // a link to the same game with the same moves as topology.
-    const again = await share(other, `${name}-visitor-payload-chars`);
+    // Sharing again from the visitor's board gives a link to the same game.
+    const again = await share(other, `${name}-visitor-payload-chars`, SHARE_WAIT);
     const relinked = decodeRecord(
       again.url.slice(again.url.indexOf(HASH_PREFIX) + HASH_PREFIX.length),
     );
     if (!relinked) throw new Error("the visitor's link does not decode");
     expect(sameGame(linked, relinked)).toBe(true);
+    if (form === "indices") {
+      // The regenerated board is a pure function of the move list, so the
+      // visitor's link is the sharer's.
+      expect(again.payload).toBe(payload);
+      await visitor.close();
+      // The share put the link in the address bar; a reload with it lands
+      // on the live game, since the saved record indexes to the link's
+      // moves.
+      expect(page.url()).toBe(url);
+      await page.reload();
+      await expect(page.locator("#status")).toHaveText("Your turn!", { timeout: 240_000 });
+      expect(page.url()).not.toContain("#");
+      await expect(entries(page)).toHaveCount(total);
+      return;
+    }
     expect(relinked.moves.map(hasStroke)).toEqual(linked.moves.map(hasStroke));
     // The visitor's router placed every topology move's node within the
     // drift the share allowed of the sharer's.
     const drift = linked.moves.map((move, i) => {
       const other = relinked.moves[i];
-      if (!other || hasStroke(move) || hasStroke(other)) return 0;
+      if (!other || hasStroke(move) || hasStroke(other) || isIndexed(move) || isIndexed(other)) {
+        return 0;
+      }
       return Math.hypot(move.node[0] - other.node[0], move.node[1] - other.node[1]);
     });
     const largest = Math.max(...drift);

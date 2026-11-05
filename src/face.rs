@@ -25,7 +25,7 @@ pub enum Component {
 /// `b`. A self-loop sets `at_b` equal to `at_a` and `enclosed` is what the
 /// loop surrounds. A loop on an isolated node has two equivalent sides;
 /// `apply` takes either, `moves` lists one.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Move {
     pub a: NodeId,
     pub at_a: Option<HalfEdgeId>,

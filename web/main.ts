@@ -16,9 +16,12 @@ import {
   History,
   loadSaved,
   pendingFace,
+  isIndexed,
+  pendingIndex,
   prepareLink,
   recordFromHash,
   sameGame,
+  sameIndexedGame,
   save,
   shareUrl,
   StaleLink,
@@ -863,9 +866,12 @@ async function seek(target: number): Promise<boolean> {
       let outcome: Outcome;
       try {
         const face = pendingFace(move);
-        outcome = face
-          ? await engine.call("applyFaceMove", face, move.newNodePos)
-          : await engine.call("applyMove", toMove(move));
+        const indexed = pendingIndex(move);
+        outcome = indexed
+          ? await engine.call("applyIndexedMove", indexed)
+          : face
+            ? await engine.call("applyFaceMove", face, move.newNodePos)
+            : await engine.call("applyMove", toMove(move));
       } catch (error) {
         if (epoch === gameEpoch) setStatus("Replay failed: " + describe(error), "lose");
         return false;
@@ -1025,6 +1031,7 @@ async function share(): Promise<void> {
       timeline,
       {
         classify: (plan) => engine.call("classify", plan),
+        index: (plan) => engine.call("indexMoves", plan),
         rehearse: (plan) => engine.call("rehearse", plan),
       },
       // A review position is not the record's last board, which the rehearsal settles to.
@@ -1237,6 +1244,29 @@ function placeUndo(): void {
   else gameControls.append(undoBtn);
 }
 
+// An index link to the saved game: the engine indexes the saved record
+// and the indices are compared to the link's. The worker answers every
+// call through a game instance, so one is built on the saved record's
+// header first; the indexing itself replays the record. A failure reads
+// as another game, which the link then opens.
+async function ownIndexedGame(saved: GameRecord, linked: GameRecord): Promise<boolean> {
+  if (!linked.moves.every(isIndexed) || saved.moves.length < linked.moves.length) return false;
+  try {
+    const layout = saved.nodes ? { nodes: saved.nodes.map(([x, y]) => ({ x, y })) } : undefined;
+    await engine.call(
+      "init",
+      saved.initialNodes,
+      saved.boardSize,
+      saved.firstPlayer,
+      layout,
+      saved.settleVersion,
+    );
+    return await sameIndexedGame(saved, linked, (plan) => engine.call("indexMoves", plan));
+  } catch {
+    return false;
+  }
+}
+
 // A link made for another router opens whatever game is saved, with a
 // word about why.
 async function boot(): Promise<void> {
@@ -1253,7 +1283,7 @@ async function boot(): Promise<void> {
   const epoch = gameEpoch;
   try {
     if (linked) {
-      if (saved && sameGame(saved, linked)) {
+      if (saved && (sameGame(saved, linked) || (await ownIndexedGame(saved, linked)))) {
         dropHash();
         await restore(saved, false);
       } else {

@@ -673,6 +673,10 @@ struct Drift {
     refused: Option<usize>,
     node: f64,
     board: f64,
+    /// The first move an index link's replay refuses, and the bytes the
+    /// link's moves take.
+    index_refused: Option<usize>,
+    index_bytes: usize,
 }
 
 /// Replays a shared game the way a visitor's engine replays its link and
@@ -724,6 +728,7 @@ fn rehearse_shared_game(game: &SharedGame) -> Drift {
     let rehearsed = protocol::rehearse(protocol::Rehearsal {
         router_version: protocol::ROUTER_VERSION,
         settle_version: fixture.settle_version,
+        list_version: protocol::MOVE_LIST_VERSION,
         initial_nodes: fixture.initial_nodes,
         board_size: fixture.board_size,
         first_player: Player::Human,
@@ -734,9 +739,63 @@ fn rehearse_shared_game(game: &SharedGame) -> Drift {
         moves,
     })
     .unwrap();
+    let indexed = protocol::index_moves(protocol::Classification {
+        initial_nodes: fixture.initial_nodes,
+        board_size: fixture.board_size,
+        first_player: Player::Human,
+        nodes: None,
+        settle_version: fixture.settle_version,
+        moves: fixture.moves.iter().map(|m| m.wire()).collect(),
+        known: vec![None; fixture.moves.len()],
+    });
+    // Indexing fails at the move the regenerated board refuses or lists
+    // differently, "move N: ...".
+    let (indexed, index_refused) = match indexed {
+        Ok(indexed) => {
+            let by_index = protocol::rehearse(protocol::Rehearsal {
+                router_version: protocol::ROUTER_VERSION,
+                settle_version: fixture.settle_version,
+                list_version: protocol::MOVE_LIST_VERSION,
+                initial_nodes: fixture.initial_nodes,
+                board_size: fixture.board_size,
+                first_player: Player::Human,
+                nodes: None,
+                moves: indexed
+                    .moves
+                    .iter()
+                    .map(|m| protocol::LinkMove::Indexed {
+                        index: m.index,
+                        along: m.along,
+                    })
+                    .collect(),
+            })
+            .unwrap();
+            assert_eq!(
+                by_index.refused, None,
+                "indexing passed but the replay refused"
+            );
+            (indexed.moves, None)
+        }
+        Err(why) => {
+            eprintln!("  indexing: {why}");
+            let at = why
+                .strip_prefix("move ")
+                .and_then(|rest| rest.split(':').next())
+                .and_then(|n| n.parse().ok())
+                .unwrap_or_else(|| panic!("indexing: {why}"));
+            (Vec::new(), Some(at))
+        }
+    };
+    let varint =
+        |v: usize| 1 + (usize::BITS - v.max(1).leading_zeros()).saturating_sub(1) as usize / 7;
     let mut drift = Drift {
         topology: game.topology.iter().flatten().count(),
         refused: rehearsed.refused,
+        index_refused,
+        index_bytes: indexed
+            .iter()
+            .map(|m| varint(m.index * 2) + usize::from(m.along > 0))
+            .sum(),
         ..Drift::default()
     };
     for (m, node) in fixture.moves.iter().zip(&rehearsed.nodes) {
@@ -792,7 +851,7 @@ fn a_shared_game_replays_to_the_same_board() {
 #[test]
 #[ignore]
 fn measure_shared_game_drift() {
-    eprintln!("pick nodes moves topology refused node_drift board_drift");
+    eprintln!("pick nodes moves topology refused node_drift board_drift index_refused index_bytes");
     for pick in 0..21 {
         let game = match shared_game_at(pick) {
             Ok(game) => game,
@@ -803,22 +862,27 @@ fn measure_shared_game_drift() {
         };
         let drift = rehearse_shared_game(&game);
         eprintln!(
-            "{pick} {} {} {} {} {:.3} {:.3}",
+            "{pick} {} {} {} {} {:.3} {:.3} {} {}",
             game.fixture.initial_nodes,
             game.fixture.moves.len(),
             drift.topology,
             drift.refused.map_or("none".to_string(), |i| i.to_string()),
             drift.node,
-            drift.board
+            drift.board,
+            drift
+                .index_refused
+                .map_or("none".to_string(), |i| i.to_string()),
+            drift.index_bytes
         );
     }
 }
 
-/// Rewrites the two shared-game fixtures that tests/e2e/replay-links.spec.ts
-/// carries as topology, for when the router's output changes:
+/// Rewrites the three shared-game fixtures tests/e2e/replay-links.spec.ts
+/// shares, for when the router's output changes:
 /// `cargo test --release record_shared_games -- --ignored`. The pick,
-/// from SPROUTS_PICK_4 and SPROUTS_PICK_9 when set, is which chord the
-/// human opens with. The record is deterministic.
+/// from SPROUTS_PICK_4, SPROUTS_PICK_9 and SPROUTS_PICK_12 when set, is
+/// which chord the human opens with. The record is deterministic while
+/// the AI's draw stays inside its routing budget.
 #[test]
 #[ignore]
 fn record_shared_games() {
@@ -840,6 +904,12 @@ fn record_shared_games() {
         10,
         pick("SPROUTS_PICK_9", 36),
         &dir.join("ten-moves-9n-1000.json"),
+    );
+    record_shared_game(
+        12,
+        30,
+        pick("SPROUTS_PICK_12", 1),
+        &dir.join("thirty-moves-12n-1000.json"),
     );
 }
 
@@ -1947,4 +2017,40 @@ fn a_chord_beside_a_straight_line_between_its_ends_leaves_the_line() {
         far_from_line * 2 > total,
         "{far_from_line} of {total} points off the line"
     );
+}
+
+/// How long indexing a game takes natively, which boot pays when a link
+/// is in the URL: `cargo test --release probe_index_time -- --ignored
+/// --nocapture`.
+#[test]
+#[ignore]
+fn probe_index_time() {
+    for (nodes, moves, pick) in [(12, 30, 1), (24, 10, 0), (24, 20, 0)] {
+        let game = match shared_game(nodes, moves, pick) {
+            Ok(game) => game,
+            Err(why) => {
+                eprintln!("PROBE {nodes}n {moves}m: {why}");
+                continue;
+            }
+        };
+        let plan = || protocol::Classification {
+            initial_nodes: game.fixture.initial_nodes,
+            board_size: game.fixture.board_size,
+            first_player: Player::Human,
+            nodes: None,
+            settle_version: game.fixture.settle_version,
+            moves: game.fixture.moves.iter().map(|m| m.wire()).collect(),
+            known: vec![None; game.fixture.moves.len()],
+        };
+        let start = std::time::Instant::now();
+        let outcome = protocol::index_moves(plan());
+        eprintln!(
+            "PROBE {nodes}n {moves}m: index_moves {:?} in {} ms",
+            outcome
+                .as_ref()
+                .map(|i| i.moves.len())
+                .map_err(|e| e.clone()),
+            start.elapsed().as_millis()
+        );
+    }
 }

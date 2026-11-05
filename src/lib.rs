@@ -22,8 +22,8 @@ mod validation;
 use protocol::RouteHashPlan;
 use protocol::{
     AiReply, AutoPlacement, AutoPlacementQuery, Classification, Classified, Curve, FaceMove,
-    FitQuery, Layout, Move, MovesFrom, Outcome, Placement, PlacementQuery, Rehearsal, Rehearsed,
-    RouteReply, Snapshot,
+    FitQuery, Indexed, IndexedMove, Layout, Move, MovesFrom, Outcome, Placement, PlacementQuery,
+    Rehearsal, Rehearsed, RouteReply, Snapshot,
 };
 use tsify::{Ts, Tsify};
 use types::{GameState, Player, Point};
@@ -99,6 +99,19 @@ impl SproutsGame {
         Ok(protocol::classify(plan.to_rust()?)
             .map_err(|e| JsError::new(&e))?
             .into_ts()?)
+    }
+
+    /// Each move of a game as its index in the position's move list.
+    #[wasm_bindgen(js_name = indexMoves)]
+    pub fn index_moves(&self, plan: Ts<Classification>) -> Result<Ts<Indexed>, JsError> {
+        Ok(protocol::index_moves(plan.to_rust()?)
+            .map_err(|e| JsError::new(&e))?
+            .into_ts()?)
+    }
+
+    #[wasm_bindgen(js_name = applyIndexedMove)]
+    pub fn apply_indexed_move(&mut self, mov: Ts<IndexedMove>) -> Result<Ts<Outcome>, JsError> {
+        Ok(protocol::apply_indexed_move(&mut self.state, mov.to_rust()?).into_ts()?)
     }
 
     /// FNV-1a over the board's node positions and line flattenings, as

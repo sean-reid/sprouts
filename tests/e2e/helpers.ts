@@ -910,9 +910,16 @@ export async function awaitReply(page: Page): Promise<void> {
 export const HASH_PREFIX = "#game=";
 
 // Shares the game and returns the link and its payload length.
-export async function share(page: Page, label: string): Promise<{ url: string; payload: number }> {
+// Shares the game and returns the link and its payload length; a long
+// game's check replays it three times in the engine, so `timeout` bounds
+// the wait for the status.
+export async function share(
+  page: Page,
+  label: string,
+  timeout = 5_000,
+): Promise<{ url: string; payload: number }> {
   await page.locator("#shareBtn").click();
-  await expect(page.locator("#status")).toHaveText(/Link copied|Copy the link/);
+  await expect(page.locator("#status")).toHaveText(/Link copied|Copy the link/, { timeout });
   const url = page.url();
   const at = url.indexOf(HASH_PREFIX);
   expect(at).toBeGreaterThan(0);
