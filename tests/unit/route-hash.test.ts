@@ -5,10 +5,11 @@ import init, { type Player, type RouteHashPlan, SproutsGame } from "../../pkg/sp
 // The page redraws a shared game's AI moves in wasm, with Rust's own
 // libm, so the built wasm has to route the fixtures to the bytes the
 // native test recorded on a Mac and the Linux runner checks.
-// Routing the fixtures in wasm took 4.1 to 4.4 s on a Mac at a load
-// average of 26 and 5.0 s on the ubuntu-latest runner, so the test gets
-// about twice that.
-const ROUTE_HASH_TIMEOUT_MS = 12_000;
+// A mismatch routes the fixtures a second time for the per-move list.
+// One pass took 2.8 s on a Mac at a load average of 8 (4.1 to 4.4 s at
+// 26) and 5.0 s on the ubuntu-latest runner, so the test gets about
+// twice two runner passes.
+const ROUTE_HASH_TIMEOUT_MS = 24_000;
 
 describe("the wasm router", () => {
   it(

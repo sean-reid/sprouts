@@ -37,7 +37,11 @@ const fixtures = [
 // when the regenerated board refuses a move, as the nine-node and
 // thirty-move games do. The budget belongs to the recording: the payload
 // measured when the game was recorded (34, 1486 and 2047) plus 10
-// percent, rounded up.
+// percent, rounded up. The nine-node game went from 1335 to 1486 when
+// the bare loop's circle points moved a quarter step off the heading
+// grid and its human strokes refit around them; the thirty-move game
+// went from 2907 to 2047 with its new pick and all 15 AI moves as
+// topology.
 const routed: [string, number, "indices" | "shapes", number][] = [
   ["fixtures/saved/eight-moves-4n-1000.json", 38, "indices", 4],
   ["fixtures/saved/ten-moves-9n-1000.json", 1635, "shapes", 5],

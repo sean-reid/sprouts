@@ -832,6 +832,9 @@ fn shared_game_at(pick: usize) -> Result<SharedGame, String> {
 #[test]
 #[cfg(not(debug_assertions))]
 fn a_shared_game_replays_to_the_same_board() {
+    // Pick 1 is out: the recorder cannot apply its move 3, a chord the
+    // router draws within a unit of its own spoke, which the unit-grid
+    // snap on entry turns into a crossing.
     for pick in [0, 2, 3, 4, 9, 10, 11, 12, 17, 36] {
         let game = shared_game_at(pick).unwrap();
         let drift = rehearse_shared_game(&game);
@@ -1155,10 +1158,8 @@ fn the_sweep_fixture_replays_to_its_position() {
     }
 }
 
-/// The shared 4-node game at pick 5 after five moves under router
-/// version 4, settled, with the AI to move: the loop on node 3 at its one
-/// spoke is the one the wasm build fitted the other way round from the
-/// native build, so the fixture is kept as recorded.
+/// A settled 4-node position after five moves with the AI to move, where
+/// node 3 has one spoke and a bare loop on it.
 const LOOP_FIXTURE: &str = "fixtures/routing/loop-4n-5m.json";
 
 #[test]
