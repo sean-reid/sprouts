@@ -332,6 +332,11 @@ const FALLBACK_CEILING: usize = 1;
 /// and 1 measured.
 const AI_FALLBACKS: usize = 1;
 const HUMAN_FALLBACKS: usize = 1;
+/// Routes the sweeps refuse as twisted, a settled path whose sides moved,
+/// as the AI and as the human: the measured values, so a change that
+/// turns drawable moves into twisted refusals shows.
+const AI_TWISTED: usize = 3;
+const HUMAN_TWISTED: usize = 4;
 
 /// Whether a running count sits under its ceiling.
 fn within(count: usize, ceiling: usize) -> bool {
@@ -396,6 +401,8 @@ proptest! {
         eprintln!("{total}");
         prop_assert_eq!(total.bug, 0);
         prop_assert!(within(total.topology, AI_TOPOLOGY_CEILING), "{}", total);
+        let twisted = total.shape.get("twisted").copied().unwrap_or(0);
+        prop_assert!(within(twisted, AI_TWISTED), "{}", total);
         let (cases, fallbacks) = {
             let mut progress = PROGRESS.lock().unwrap();
             progress[0].0 += 1;
@@ -430,6 +437,8 @@ proptest! {
         eprintln!("human {total}");
         prop_assert_eq!(total.bug, 0);
         prop_assert!(within(total.topology, HUMAN_TOPOLOGY_CEILING), "{}", total);
+        let twisted = total.shape.get("twisted").copied().unwrap_or(0);
+        prop_assert!(within(twisted, HUMAN_TWISTED), "{}", total);
         let (cases, fallbacks) = {
             let mut progress = PROGRESS.lock().unwrap();
             progress[1].0 += 1;

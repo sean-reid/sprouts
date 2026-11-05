@@ -334,6 +334,12 @@ impl Router {
         arena: &erode::Arena,
         path: Vec<Point>,
     ) -> Result<Move, Unroutable> {
+        // Uncrossing a figure of eight joins its lobes, and a piece inside
+        // a lobe changes sides: that path is another move's, so the
+        // corridor has no drawing of this one.
+        if !sides_match(state, mv, &path) {
+            return Err(Unroutable::Shape("twisted"));
+        }
         #[cfg(test)]
         let t = std::time::Instant::now();
         // The relaxation can carry the path past a node; the taut path is
@@ -406,12 +412,6 @@ fn plan(
     let (arena, path, fenced) = taut_path(router, state, mv, want, parity, fencing)?;
     let path = split_pinches(path, eroded_by(state, want) / 4.0, |q| arena.free_at(q));
     let path = settle(path)?;
-    // Uncrossing a figure of eight joins its lobes, and a piece inside a
-    // lobe changes sides: that path is another move's, so the corridor
-    // has no drawing of this one.
-    if !sides_match(state, mv, &path) {
-        return Err(Unroutable::Shape("twisted"));
-    }
     Ok((arena, path, fenced))
 }
 
