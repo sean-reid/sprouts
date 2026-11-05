@@ -302,10 +302,11 @@ const CASES: u32 = 4;
 const CASES: u32 = 24;
 const SEED: u64 = 7;
 /// Read-back mismatches the seeded sweep shows as the AI and as the
-/// human. The sweep is seeded and platform-exact, so these are the
-/// measured values, and a router change that moves them is recorded here.
-const AI_TOPOLOGY_CEILING: usize = 1;
-const HUMAN_TOPOLOGY_CEILING: usize = 3;
+/// human: none, since a path whose uncrossing or relaxation moves a
+/// piece is refused as twisted before the fit. The sweep is seeded and
+/// platform-exact, so a router change that moves these is recorded here.
+const AI_TOPOLOGY_CEILING: usize = 0;
+const HUMAN_TOPOLOGY_CEILING: usize = 0;
 /// Most states a corridor search that found its path may hold in one
 /// sweep game. The fenced search peaks near 5,000; the search without
 /// fences, run again when a fenced corridor fails in the relaxation or
@@ -331,6 +332,11 @@ const FALLBACK_CEILING: usize = 1;
 /// and 1 measured.
 const AI_FALLBACKS: usize = 1;
 const HUMAN_FALLBACKS: usize = 1;
+/// Routes the sweeps refuse as twisted, a settled path whose sides moved,
+/// as the AI and as the human: the measured values, so a change that
+/// turns drawable moves into twisted refusals shows.
+const AI_TWISTED: usize = 3;
+const HUMAN_TWISTED: usize = 4;
 
 /// Whether a running count sits under its ceiling.
 fn within(count: usize, ceiling: usize) -> bool {
@@ -381,6 +387,9 @@ proptest! {
         let tally = sweep::game(nodes, &picks, Player::AI);
         prop_assert!(tally.is_ok(), "{}", tally.as_ref().unwrap_err());
         let s = stats::take();
+        if std::env::var_os(RECORD_TOPOLOGY).is_some() && tally.as_ref().unwrap().topology > 0 {
+            record_refusals("ai", nodes, &picks, Player::AI);
+        }
         eprintln!(
             "states {} misses {} retries {} exact {}",
             s.states_ok_max, s.fence_misses, s.fence_retries, s.exact_hits
@@ -392,6 +401,8 @@ proptest! {
         eprintln!("{total}");
         prop_assert_eq!(total.bug, 0);
         prop_assert!(within(total.topology, AI_TOPOLOGY_CEILING), "{}", total);
+        let twisted = total.shape.get("twisted").copied().unwrap_or(0);
+        prop_assert!(within(twisted, AI_TWISTED), "{}", total);
         let (cases, fallbacks) = {
             let mut progress = PROGRESS.lock().unwrap();
             progress[0].0 += 1;
@@ -412,6 +423,9 @@ proptest! {
         let tally = sweep::game(nodes, &picks, Player::Human);
         prop_assert!(tally.is_ok(), "{}", tally.as_ref().unwrap_err());
         let s = stats::take();
+        if std::env::var_os(RECORD_TOPOLOGY).is_some() && tally.as_ref().unwrap().topology > 0 {
+            record_refusals("human", nodes, &picks, Player::Human);
+        }
         eprintln!(
             "human states {} misses {} retries {} exact {}",
             s.states_ok_max, s.fence_misses, s.fence_retries, s.exact_hits
@@ -423,6 +437,8 @@ proptest! {
         eprintln!("human {total}");
         prop_assert_eq!(total.bug, 0);
         prop_assert!(within(total.topology, HUMAN_TOPOLOGY_CEILING), "{}", total);
+        let twisted = total.shape.get("twisted").copied().unwrap_or(0);
+        prop_assert!(within(twisted, HUMAN_TWISTED), "{}", total);
         let (cases, fallbacks) = {
             let mut progress = PROGRESS.lock().unwrap();
             progress[1].0 += 1;
@@ -1063,9 +1079,83 @@ fn record_topology_positions() {
     eprintln!("{written} positions written");
 }
 
+/// Replays one sweep game as `player` and records every position where a
+/// listed move's route reads back as another move under fixtures/topology
+/// as <label>-<nodes>n-<moves>m.json, printing the listed move and the
+/// move the curve read back as. Returns how many it recorded.
+fn record_refusals(label: &str, nodes: usize, picks: &[u32], player: Player) -> usize {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/topology");
+    let mut state = GameState::with_nodes_at(crate::types::opening_layout(nodes, 1000), 1000, 0);
+    state.current_player = player;
+    let mut refused = 0;
+    for &pick in picks {
+        let moves = state.face.search_moves();
+        if moves.is_empty() {
+            break;
+        }
+        let first = pick as usize % moves.len();
+        let mut drawn = None;
+        for k in (0..moves.len()).map(|k| (first + k) % moves.len()) {
+            stats::take();
+            match draws(&state, &moves[k]) {
+                Ok(mov) => {
+                    drawn = Some(mov);
+                    break;
+                }
+                Err(Unroutable::Topology) => {
+                    let read = stats::take().last_read_back;
+                    let name = format!("{label}-{nodes}n-{}m.json", state.lines.len());
+                    std::fs::write(dir.join(&name), sweep::fixture_json(&state)).unwrap();
+                    eprintln!(
+                        "{name}: {:?} read back as {:?}",
+                        moves[k],
+                        read.map(|m| (m.a, m.at_a, m.b, m.at_b, m.enclosed))
+                    );
+                    refused += 1;
+                }
+                Err(_) => {}
+            }
+        }
+        let Some(mov) = drawn else { break };
+        state.apply_move(mov).unwrap();
+        state.current_player = player;
+    }
+    refused
+}
+
+/// Set to record the sweep proptests' read-back refusals under
+/// fixtures/topology as they run.
+const RECORD_TOPOLOGY: &str = "SPROUTS_RECORD_TOPOLOGY";
+
 /// Read-back mismatches the four recorded positions show; the measured
 /// value, since the positions and the router are exact.
-const RECORDED_TOPOLOGY: usize = 1;
+const RECORDED_TOPOLOGY: usize = 0;
+
+/// The same-line chord that refused last: in game23 after ten moves, the
+/// chord from node 4 to node 13 on one of 4's own lines enclosing node 5
+/// draws, and the curve reads back as the move it was asked for.
+#[test]
+fn the_same_line_chord_in_game23_draws_as_listed() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("fixtures/topology/game23-6n-10m.json");
+    let state = position(&path);
+    let chords: Vec<FaceMove> = state
+        .face
+        .moves()
+        .into_iter()
+        .filter(|m| m.a == 4 && m.b == 13 && m.enclosed == vec![5])
+        .collect();
+    assert!(!chords.is_empty(), "the chord is listed");
+    for mv in &chords {
+        let drawn = route(&state, mv).unwrap_or_else(|why| panic!("{mv:?}: {why:?}"));
+        let read = crate::embedding::embed(&state, &drawn).expect("the curve embeds");
+        assert_eq!(
+            (read.a, read.at_a, read.b, read.at_b),
+            (mv.a, mv.at_a, mv.b, mv.at_b)
+        );
+        assert_eq!(read.enclosed, mv.enclosed);
+    }
+}
 
 /// Positions where a route read back as another move when recorded. No
 /// route fails as a bug, and the mismatches do not grow.
@@ -1088,7 +1178,7 @@ fn recorded_topology_positions_stay_bounded() {
         }
     }
     eprintln!("{tally}");
-    assert!(tally.topology <= RECORDED_TOPOLOGY, "{tally}");
+    assert!(within(tally.topology, RECORDED_TOPOLOGY), "{tally}");
 }
 
 /// The first seeded sweep game played out six moves by the recorder's
@@ -1189,7 +1279,7 @@ const SWEEP_FIXTURE: &str = "fixtures/routing/sweep-6n-6m.json";
 /// The final routing hash a Mac records; the Linux runner and the wasm
 /// build (tests/unit/route-hash.test.ts) have to produce the same one,
 /// since a share link is redrawn on the visitor's device.
-const ROUTING_HASH: u64 = 0xa39a_4017_2306_5eef;
+const ROUTING_HASH: u64 = 0x7ebb_828c_5672_7ae7;
 
 #[test]
 fn routing_hashes_the_same_on_every_platform() {
@@ -2574,5 +2664,94 @@ fn probe_fixed_position_room() {
             t[5],
             t[6]
         );
+    }
+}
+
+/// Prints, for every move of every recorded topology position whose
+/// route reads back as another move, the sides of each class member's
+/// path at each stage: the planned taut path, the relaxed path, and the
+/// finished curve's read-back: `cargo test probe_topology_stages --
+/// --ignored --nocapture`.
+#[test]
+#[ignore = "prints the stages of every read-back refusal, run as needed"]
+fn probe_topology_stages() {
+    for path in fixture_paths("fixtures/topology") {
+        let name = path.file_name().unwrap().to_string_lossy().to_string();
+        let mut state = position(&path);
+        if name.starts_with("human") {
+            state.current_player = Player::Human;
+        }
+        let want = rules(&state);
+        for mv in state.face.search_moves() {
+            if !matches!(draws(&state, &mv), Err(Unroutable::Topology)) {
+                continue;
+            }
+            eprintln!("{name}: listed {mv:?}");
+            let members = std::iter::once(mv.clone()).chain(crate::ai::class_members(&state, &mv));
+            for member in members {
+                let own = state.face.component_of(member.a, member.at_a).unwrap();
+                let sides = |p: &[Point]| {
+                    let mut got = embedding::sides(
+                        &state,
+                        member.a,
+                        member.at_a,
+                        member.b,
+                        member.at_b,
+                        own,
+                        p,
+                    );
+                    got.sort_unstable();
+                    got
+                };
+                let tightened = taut_path(
+                    &mut Router::new(),
+                    &state,
+                    &member,
+                    &want,
+                    Parity::Search,
+                    Fencing::Up,
+                );
+                if let Ok((arena, tight, _)) = &tightened {
+                    let split =
+                        split_pinches(tight.clone(), eroded_by(1000) / 4.0, |q| arena.free_at(q));
+                    let settled = settle(split.clone());
+                    eprintln!(
+                        "  {:?}: tightened sides {:?}, split sides {:?}, settled sides {:?}",
+                        member.enclosed,
+                        sides(tight),
+                        sides(&split),
+                        settled.as_deref().map(sides)
+                    );
+                }
+                let planned = plan(
+                    &mut Router::new(),
+                    &state,
+                    &member,
+                    &want,
+                    Parity::Search,
+                    Fencing::Up,
+                );
+                let Ok((arena, taut, fenced)) = planned else {
+                    eprintln!("  {:?}: plan {:?}", member.enclosed, planned.err());
+                    continue;
+                };
+                let relaxed = relax(&state, &member, &want, &arena, &taut);
+                stats::take();
+                let finished = match &relaxed {
+                    Some(r) => finish(&state, &member, r.clone())
+                        .or_else(|_| finish(&state, &member, taut.clone())),
+                    None => finish(&state, &member, taut.clone()),
+                };
+                let read = stats::take().last_read_back.map(|m| m.enclosed);
+                eprintln!(
+                    "  {:?} fenced {fenced}: taut sides {:?}, relaxed sides {:?}, finish {:?} read {:?}",
+                    member.enclosed,
+                    sides(&taut),
+                    relaxed.as_deref().map(sides),
+                    finished.as_ref().map(|_| "ok").map_err(|e| format!("{e:?}")),
+                    read
+                );
+            }
+        }
     }
 }
