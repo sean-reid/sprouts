@@ -279,6 +279,39 @@ test("the game over dialog takes focus, keeps Tab inside and gives focus back", 
   await expect(page.locator("#nodeTargets button")).toHaveCount(4);
 });
 
+test("the game over dialog's buttons are 44 px targets inside the viewport", async ({ page }) => {
+  await loadFinished(page);
+  await openModal(page);
+  const review = (await page.locator("#reviewBtn").boundingBox())!;
+  const newGame = (await page.locator("#newGameBtn").boundingBox())!;
+  const card = (await page.locator("#gameOverModal .modal-content").boundingBox())!;
+  const viewport = page.viewportSize()!;
+  const box = (b: { width: number; height: number }) =>
+    `${Math.round(b.width)} by ${Math.round(b.height)}`;
+  await mkdir("test-results/fixtures", { recursive: true });
+  await writeFile(
+    `test-results/fixtures/${test.info().project.name}-dialog-buttons.txt`,
+    `review ${box(review)}\nnew game ${box(newGame)}\n`,
+  );
+  await shot(page, "game-over-dialog");
+
+  for (const b of [review, newGame]) {
+    expect(b.width).toBeGreaterThanOrEqual(44);
+    expect(b.height).toBeGreaterThanOrEqual(44);
+  }
+  const sideBySide = review.y === newGame.y;
+  const gap = sideBySide
+    ? newGame.x - (review.x + review.width)
+    : newGame.y - (review.y + review.height);
+  expect(gap).toBeGreaterThanOrEqual(8);
+  expect(card.x).toBeGreaterThanOrEqual(0);
+  expect(card.y).toBeGreaterThanOrEqual(0);
+  expect(card.x + card.width).toBeLessThanOrEqual(viewport.width);
+  expect(card.y + card.height).toBeLessThanOrEqual(viewport.height);
+  expect(Math.abs(card.x + card.width / 2 - viewport.width / 2)).toBeLessThanOrEqual(1);
+  expect(Math.abs(card.y + card.height / 2 - viewport.height / 2)).toBeLessThanOrEqual(1);
+});
+
 interface MotionProbe {
   replyAt: number | null;
   turnAt: number | null;
