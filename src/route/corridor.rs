@@ -9,18 +9,18 @@
 //! that landed wrong.
 
 use std::cmp::Ordering;
-use std::collections::{BinaryHeap, HashMap, HashSet};
+use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
 use std::hash::{BuildHasherDefault, Hasher};
 
 use spade::handles::FixedVertexHandle;
 
 use super::cross;
-use super::erode::{Arena, Cuts, Entry};
+use super::erode::{Arena, Cuts, Entry, Fences};
 use super::Unroutable;
 use crate::types::Point;
 
 /// States one corridor search may hold before it gives the move up.
-const SEARCH_STATES: usize = 400_000;
+pub(super) const SEARCH_STATES: usize = 400_000;
 
 type Portals = Vec<(Point, Point)>;
 
@@ -47,6 +47,9 @@ struct Key {
     mask: u64,
     /// Whether the path has been outside the exit's guard.
     out: bool,
+    /// In a triangle a fence runs through, whether the path is on the
+    /// side of the segment holding the vertex its two edges share.
+    near: bool,
 }
 
 /// A multiply and fold over the words of a key: the search looks its
@@ -146,9 +149,21 @@ fn accepts(want: Want, parity: u64, all: u64) -> bool {
     }
 }
 
+/// What bounds a search: the fences it may not cross and the states it
+/// may hold before it gives the move up.
+#[derive(Clone, Copy)]
+pub(super) struct Limits<'a> {
+    pub fences: &'a Fences,
+    pub cap: usize,
+}
+
 /// Dijkstra over (triangle, parity) from the entry's triangles to an exit
-/// triangle whose parity the move accepts, returning the portals crossed
-/// as (left, right) pairs in travel order.
+/// triangle whose parity the move accepts, never crossing a fence,
+/// returning the portals crossed as (left, right) pairs in travel order,
+/// or a bug once it holds more states than the limit. A fence meets an
+/// edge at its midpoint, so a step across such an edge is on one half of
+/// it, and in a fenced triangle the half tells which side of the segment
+/// the path is on.
 pub(super) fn search(
     arena: &Arena,
     cuts: &Cuts,
@@ -156,7 +171,9 @@ pub(super) fn search(
     exit: &Entry,
     want: Want,
     is_loop: bool,
+    limits: Limits<'_>,
 ) -> Result<Corridor, Unroutable> {
+    let Limits { fences, cap } = limits;
     let goal: HashSet<usize, Fold> = exit.tris.iter().copied().collect();
     let mut heap = BinaryHeap::new();
     let mut best: HashMap<Key, f64, Fold> = HashMap::default();
@@ -166,6 +183,7 @@ pub(super) fn search(
             tri: t,
             mask: 0,
             out: starts_out(arena, t, exit, is_loop),
+            near: false,
         };
         best.insert(key, 0.0);
         heap.push(Item {
@@ -200,7 +218,7 @@ pub(super) fn search(
                 parity: key.mask,
             });
         }
-        if best.len() > SEARCH_STATES {
+        if best.len() > cap {
             return Err(Unroutable::Bug("search states"));
         }
         let verts = arena.ccw_vertices(key.tri);
@@ -212,29 +230,177 @@ pub(super) fn search(
             let Some(out) = step_out(arena, key.tri, next_tri, exit, key.out) else {
                 continue;
             };
+            // The vertex the crossing keeps to, when a fence fixes it.
+            let mut half = None;
+            if let Some(seg) = fences.at(key.tri) {
+                if seg.edges.contains(&edge) {
+                    half = Some(if key.near {
+                        seg.shared
+                    } else if p == seg.shared {
+                        q
+                    } else {
+                        p
+                    });
+                } else if key.near {
+                    continue;
+                }
+            }
+            let nears: &[bool] = match fences.at(next_tri) {
+                Some(seg) if seg.edges.contains(&edge) => match half {
+                    Some(v) => {
+                        if v == seg.shared {
+                            &[true]
+                        } else {
+                            &[false]
+                        }
+                    }
+                    None => &[false, true],
+                },
+                _ => &[false],
+            };
             let (pp, qq) = (arena.vertex_point(p), arena.vertex_point(q));
             let mid = Point::new((pp.x + qq.x) / 2.0, (pp.y + qq.y) / 2.0);
-            let next = Key {
-                tri: next_tri,
-                mask: key.mask ^ cuts.bits[edge],
-                out,
-            };
-            let cost = item.cost + item.pos.distance_to(&mid);
-            if best.get(&next).is_none_or(|&c| cost < c) {
-                best.insert(next, cost);
+            for &near in nears {
+                // The vertex the crossing keeps to once the fence on either
+                // side has fixed it, so the portal is that half of the edge
+                // and the taut path stays off the fence.
+                let keep = half.or_else(|| {
+                    fences.at(next_tri).and_then(|seg| {
+                        seg.edges.contains(&edge).then(|| {
+                            if near {
+                                seg.shared
+                            } else if p == seg.shared {
+                                q
+                            } else {
+                                p
+                            }
+                        })
+                    })
+                });
                 // Leaving through the edge `p` to `q` of a triangle on its
                 // screen-left puts `q` on the traveller's left.
-                parent.insert(next, (key, (qq, pp)));
-                heap.push(Item {
-                    cost,
-                    bound: cost + exit.at.distance_to(&mid),
-                    key: next,
-                    pos: mid,
-                });
+                let portal = match keep {
+                    Some(v) if v == q => (qq, mid),
+                    Some(_) => (mid, pp),
+                    None => (qq, pp),
+                };
+                let through = Point::new(
+                    (portal.0.x + portal.1.x) / 2.0,
+                    (portal.0.y + portal.1.y) / 2.0,
+                );
+                let cost = item.cost + item.pos.distance_to(&through);
+                let next = Key {
+                    tri: next_tri,
+                    mask: key.mask ^ cuts.bits[edge],
+                    out,
+                    near,
+                };
+                if best.get(&next).is_none_or(|&c| cost < c) {
+                    best.insert(next, cost);
+                    parent.insert(next, (key, portal));
+                    heap.push(Item {
+                        cost,
+                        bound: cost + exit.at.distance_to(&through),
+                        key: next,
+                        pos: through,
+                    });
+                }
             }
         }
     }
     Err(Unroutable::Room)
+}
+
+/// A basis over Z_2 of the parities of closed walks, kept with distinct
+/// leading bits in descending order so a vector reduces to zero exactly
+/// when it is a sum of basis vectors.
+#[derive(Default)]
+struct Basis {
+    rows: Vec<u64>,
+}
+
+impl Basis {
+    fn reduce(&self, mut v: u64) -> u64 {
+        for &r in &self.rows {
+            v = v.min(v ^ r);
+        }
+        v
+    }
+
+    fn insert(&mut self, v: u64) {
+        let v = self.reduce(v);
+        if v != 0 {
+            self.rows.push(v);
+            self.rows.sort_unstable_by(|a, b| b.cmp(a));
+        }
+    }
+
+    fn contains(&self, v: u64) -> bool {
+        self.reduce(v) == 0
+    }
+}
+
+/// Whether some walk from the entry to the exit under the guard rule has
+/// a parity the move accepts. The parity of any walk is the parity along
+/// a search tree's path to its last state plus a sum of closed walks, so
+/// the closed walks met while the tree is grown form a basis and the
+/// question is membership. The tree is grown over the moves the search
+/// may make, so a parity this refuses is one no corridor has.
+pub(super) fn parity_reachable(
+    arena: &Arena,
+    cuts: &Cuts,
+    entry: &Entry,
+    exit: &Entry,
+    want: Want,
+    is_loop: bool,
+) -> bool {
+    let index = |tri: usize, out: bool| tri * 2 + usize::from(out);
+    let states = arena.triangle_count() * 2;
+    let mut seen = vec![false; states];
+    let mut along = vec![0u64; states];
+    let mut basis = Basis::default();
+    let mut queue = VecDeque::new();
+    for &t in &entry.tris {
+        let out = starts_out(arena, t, exit, is_loop);
+        if !seen[index(t, out)] {
+            seen[index(t, out)] = true;
+            queue.push_back((t, out));
+        }
+    }
+    while let Some((t, out)) = queue.pop_front() {
+        let here = along[index(t, out)];
+        let verts = arena.ccw_vertices(t);
+        for k in 0..3 {
+            let Some((next, edge)) = arena.across(t, verts[k], verts[(k + 1) % 3]) else {
+                continue;
+            };
+            let Some(out) = step_out(arena, t, next, exit, out) else {
+                continue;
+            };
+            let parity = here ^ cuts.bits[edge];
+            let s = index(next, out);
+            if seen[s] {
+                basis.insert(parity ^ along[s]);
+            } else {
+                seen[s] = true;
+                along[s] = parity;
+                queue.push_back((next, out));
+            }
+        }
+    }
+    let Want::Parity(mask) = want else {
+        return exit
+            .tris
+            .iter()
+            .any(|&t| seen[index(t, false)] || seen[index(t, true)]);
+    };
+    exit.tris.iter().any(|&t| {
+        [false, true].into_iter().any(|out| {
+            let s = index(t, out);
+            seen[s]
+                && (basis.contains(mask ^ along[s]) || basis.contains(mask ^ cuts.all ^ along[s]))
+        })
+    })
 }
 
 /// Whether an exit triangle can be reached from an entry triangle through

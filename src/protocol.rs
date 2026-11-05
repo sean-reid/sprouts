@@ -431,7 +431,7 @@ fn cut_off(model: &face::FaceModel) -> usize {
 /// Changes whenever the router draws a different curve for the same face
 /// move. A share link carries it, so a page with another router refuses
 /// the link instead of drawing a game the sharer never saw.
-pub const ROUTER_VERSION: u8 = 5;
+pub const ROUTER_VERSION: u8 = 6;
 
 /// Changes whenever the settle moves a board differently. Records and
 /// links carry the version they were played under; 0 is a game recorded
@@ -2908,6 +2908,11 @@ mod tests {
             .into_iter()
             .find(|m| m.a == 2 && m.b == 7 && m.enclosed == vec![0, 1])
             .expect("the chord is listed");
+        let face: crate::face::Move = chord.clone().into();
+        // The chord's class is reachable, and the filter and the exhaustive
+        // search agree on that at both clearances.
+        assert_ne!(route::parity_unreachable(&state, &face, false), Some(true));
+        assert_ne!(route::parity_unreachable(&state, &face, true), Some(true));
         assert_eq!(routed(&mut state, chord), 2);
     }
 

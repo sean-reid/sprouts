@@ -113,9 +113,14 @@ fn print_rows(title: &str, rows: &[Row]) {
             eprintln!("     bugs {:?} shape {:?}", s.refused.bugs, s.refused.shape);
         }
         eprintln!(
-            "     most states in a corridor found {}; parity searches {}",
+            "     most states in a corridor found {}; parity searches {}; fence misses {}; ms in parity searches {:.0}, tighten {:.0}, relax {:.0}, finish {:.0}",
             s.states_ok_max,
-            parity_summary(&s.parity)
+            parity_summary(&s.parity),
+            s.fence_misses,
+            s.phase_ms[0],
+            s.phase_ms[1],
+            s.phase_ms[2],
+            s.phase_ms[3]
         );
     }
     let worst = rows.iter().map(Row::total_ms).fold(0.0, f64::max);
@@ -336,11 +341,10 @@ fn a_shared_router_answers_as_fresh_routers_do() {
 
 /// A chord whose ends the arena disconnects puts its corners in the no
 /// room memo, and the next chord between those corners is refused without
-/// another arena or search.
+/// another arena or search. The live record supplies the chord.
 #[test]
 fn a_second_chord_between_corners_without_room_is_refused_from_memory() {
-    for moves in [6, 8, 10, 12] {
-        let state = opening_after(moves);
+    for state in [position_of_record("room-24n-1000.json")] {
         let candidates = state.face.search_moves();
         for first in candidates.iter().filter(|m| m.a != m.b) {
             let mut router = route::Router::new();
@@ -539,6 +543,47 @@ fn the_live_room_position_draws_under_the_cheap_pass() {
     }
 }
 
+/// Candidates of the live position whose parity search leaves EXACT_STATES
+/// behind, to a fence miss or a fenced corridor's retry: 52 measured, all
+/// retries.
+#[cfg(not(debug_assertions))]
+const LIVE_FALLBACK_CEILING: usize = 60;
+
+/// No listed move of the live position exhausts the corridor search:
+/// every candidate routes at the cheap clearance through one Router
+/// without a search states bug, and few fall back to the full cap.
+/// 1,443 candidates, release only.
+#[cfg(not(debug_assertions))]
+#[test]
+fn no_listed_move_of_the_live_position_exhausts_the_search() {
+    let state = position_of_record("room-24n-1000.json");
+    let candidates = state.face.search_moves();
+    assert_eq!(candidates.len(), 1443);
+    let mut router = route::Router::new();
+    stats::take();
+    let mut exhausted = 0;
+    for mv in &candidates {
+        if matches!(
+            router.route_cheap(&state, mv),
+            Err(route::Unroutable::Bug("search states"))
+        ) {
+            exhausted += 1;
+        }
+    }
+    let s = stats::take();
+    assert_eq!(exhausted, 0);
+    assert_eq!(s.refused.bug, 0, "{:?}", s.refused.bugs);
+    let fallbacks = s.fence_misses + s.fence_retries;
+    eprintln!(
+        "{} fence misses, {} fence retries",
+        s.fence_misses, s.fence_retries
+    );
+    assert!(
+        fallbacks <= LIVE_FALLBACK_CEILING,
+        "{fallbacks} candidates fell back to the full-cap search"
+    );
+}
+
 /// Replies on the live position where the page answered Undrawn with room
 /// to spare: `cargo test --release probe_live_room_position -- --ignored
 /// --nocapture`.
@@ -597,6 +642,8 @@ fn probe_live_room_candidates() {
         let s = stats::take();
         let parity = if s.parity.is_empty() {
             "no parity"
+        } else if s.fence_misses > 0 {
+            "parity, fences missed"
         } else {
             "parity"
         };
@@ -667,10 +714,13 @@ fn probe_sweep_search_states() {
         }
         let s = stats::take();
         eprintln!(
-            "{label}: {tally}; most states in a corridor found {}, bugs {:?}; parity searches {}",
+            "{label}: {tally}; most states in a corridor found {}, bugs {:?}; parity searches {}; exact hits {}, fence misses {}, fence retries {}",
             s.states_ok_max,
             s.refused.bugs,
-            parity_summary(&s.parity)
+            parity_summary(&s.parity),
+            s.exact_hits,
+            s.fence_misses,
+            s.fence_retries
         );
     }
 }

@@ -85,6 +85,37 @@ pub(super) struct Cuts {
     pub own_bit: u64,
 }
 
+/// A fence's run through one triangle: the two edges whose midpoints its
+/// segment joins, and the vertex they share, which the segment cuts off
+/// from the rest of the triangle.
+#[derive(Clone, Copy)]
+pub(super) struct Segment {
+    pub edges: [usize; 2],
+    pub shared: FixedVertexHandle,
+}
+
+/// An edge crossed by a fence, with its two vertices.
+type Crossing = (usize, [FixedVertexHandle; 2]);
+
+/// The fence segment in each triangle, by face index, where one runs.
+pub(super) struct Fences {
+    pub segments: Vec<Option<Segment>>,
+}
+
+impl Fences {
+    /// No fences at all.
+    pub(super) fn none() -> Self {
+        Self {
+            segments: Vec::new(),
+        }
+    }
+
+    /// The fence running through triangle `t`, if any.
+    pub(super) fn at(&self, t: usize) -> Option<Segment> {
+        self.segments.get(t).copied().flatten()
+    }
+}
+
 pub(super) struct Arena {
     cdt: Cdt,
     /// Whether each triangle, by face index, keeps every clearance.
@@ -884,6 +915,11 @@ impl Arena {
         )
     }
 
+    /// Triangles by face index, free or not.
+    pub(super) fn triangle_count(&self) -> usize {
+        self.free.len()
+    }
+
     /// Bit per end: whether triangle `t` lies within that end's guard.
     pub(super) fn guard(&self, t: usize) -> u8 {
         self.guard[t]
@@ -1230,6 +1266,248 @@ impl Arena {
             }
         }
         Ok(cuts)
+    }
+
+    /// Labels every triangle that is not free with its blob, the triangles
+    /// it reaches through other unfree ones. A blob is one obstacle to a
+    /// path, whatever pieces sit in it.
+    fn blobs(&self) -> Vec<usize> {
+        let n = self.free.len();
+        let mut label = vec![usize::MAX; n];
+        let mut next = 0;
+        for start in 0..n {
+            if self.handles[start].is_none() || self.free[start] || label[start] != usize::MAX {
+                continue;
+            }
+            label[start] = next;
+            let mut stack = vec![start];
+            while let Some(t) = stack.pop() {
+                for e in self
+                    .cdt
+                    .face(self.handles[t].expect("a triangle"))
+                    .adjacent_edges()
+                {
+                    let Some(f) = e.rev().face().as_inner() else {
+                        continue;
+                    };
+                    let u = f.fix().index();
+                    if !self.free[u] && label[u] == usize::MAX {
+                        label[u] = next;
+                        stack.push(u);
+                    }
+                }
+            }
+            next += 1;
+        }
+        label
+    }
+
+    /// The blob a piece's wall sits in.
+    fn piece_blob(&self, state: &GameState, comp: Component, blobs: &[usize]) -> Option<usize> {
+        let v = self.piece_vertex(state, comp)?;
+        self.cdt
+            .vertex(v)
+            .out_edges()
+            .filter_map(|e| e.face().as_inner())
+            .map(|f| blobs[f.fix().index()])
+            .find(|&b| b != usize::MAX)
+    }
+
+    /// The triangle across the edge `p`, `q` of triangle `t`, free or not,
+    /// with the edge's index.
+    fn neighbour(
+        &self,
+        t: usize,
+        p: FixedVertexHandle,
+        q: FixedVertexHandle,
+    ) -> Option<(usize, usize)> {
+        let e = self.cdt.get_edge_from_neighbors(p, q)?;
+        let index = e.as_undirected().fix().index();
+        [e.face(), e.rev().face()]
+            .into_iter()
+            .filter_map(|f| f.as_inner().map(|f| f.fix().index()))
+            .find(|&f| f != t)
+            .map(|f| (f, index))
+    }
+
+    /// Fences a parity search may not cross: one tree of polylines
+    /// joining the pieces the move encloses and one joining the pieces it
+    /// does not, each polyline running through free triangles off the
+    /// ends' guards, from the midpoint of one edge to the midpoint of the
+    /// next, so it touches no vertex and glues to nothing but the blobs it
+    /// joins. Kept from passing between two pieces of one side, a path
+    /// can reach only a few parities, so the search stays small; where a
+    /// fence closes the passage a path needs, the search runs again
+    /// without them.
+    pub(super) fn fences(&self, state: &GameState, mv: &FaceMove, face: FaceId) -> Fences {
+        let model = &state.face;
+        let own = model.component_of(mv.a, mv.at_a).ok();
+        let blobs = self.blobs();
+        let mut sides: [Vec<usize>; 2] = [Vec::new(), Vec::new()];
+        for &comp in model.components(face) {
+            if Some(comp) == own {
+                continue;
+            }
+            let Some(blob) = self.piece_blob(state, comp, &blobs) else {
+                continue;
+            };
+            let side = &mut sides[usize::from(!mv.enclosed.contains(&model.lowest_node(comp)))];
+            if !side.contains(&blob) {
+                side.push(blob);
+            }
+        }
+        let mut fences = Fences {
+            segments: vec![None; self.free.len()],
+        };
+        let mut on_fence = vec![false; self.cdt.num_undirected_edges()];
+        for members in &sides {
+            if members.len() >= 2 {
+                self.fence_tree(members, &blobs, &mut fences.segments, &mut on_fence);
+            }
+        }
+        fences
+    }
+
+    /// Joins the blobs `members` with polylines through free triangles no
+    /// fence runs through yet, fewest triangles first, each new polyline
+    /// starting at a joined blob's edge or at a midpoint already on the
+    /// tree and ending at an edge of a blob not yet joined.
+    fn fence_tree(
+        &self,
+        members: &[usize],
+        blobs: &[usize],
+        segments: &mut [Option<Segment>],
+        on_fence: &mut [bool],
+    ) {
+        let mut joined: Vec<usize> = vec![members[0]];
+        while joined.len() < members.len() {
+            let anchored = on_fence.to_vec();
+            let reached = self.grow_fence(
+                |_, edge, other| {
+                    anchored[edge] || (!self.free[other] && joined.contains(&blobs[other]))
+                },
+                |other| {
+                    !self.free[other]
+                        && members.contains(&blobs[other])
+                        && !joined.contains(&blobs[other])
+                },
+                segments,
+                on_fence,
+            );
+            let Some(other) = reached else {
+                return;
+            };
+            joined.push(blobs[other]);
+        }
+    }
+
+    /// One fence polyline through free triangles off the guards that host
+    /// none yet, fewest triangles first, from a triangle `anchor` accepts
+    /// by one of its edges (the edge the polyline starts at) to an edge
+    /// across which `target` accepts the triangle. Returns that triangle.
+    fn grow_fence(
+        &self,
+        anchor: impl Fn(usize, usize, usize) -> bool,
+        target: impl Fn(usize) -> bool,
+        segments: &mut [Option<Segment>],
+        on_fence: &mut [bool],
+    ) -> Option<usize> {
+        let n = self.free.len();
+        let edges = |t: usize| {
+            let v = self.ccw_vertices(t);
+            (0..3).filter_map(move |k| {
+                let (p, q) = (v[k], v[(k + 1) % 3]);
+                self.neighbour(t, p, q)
+                    .map(|(other, edge)| (edge, other, p, q))
+            })
+        };
+        let hostable = |t: usize, segments: &[Option<Segment>]| {
+            self.free[t] && self.guard[t] == 0 && segments[t].is_none()
+        };
+        let mut parent: Vec<Option<usize>> = vec![None; n];
+        let mut entry: Vec<Option<Crossing>> = vec![None; n];
+        let mut seen = vec![false; n];
+        let mut queue = VecDeque::new();
+        for t in (0..n).filter(|&t| self.handles[t].is_some() && hostable(t, segments)) {
+            if let Some((edge, _, p, q)) =
+                edges(t).find(|&(edge, other, _, _)| anchor(t, edge, other))
+            {
+                seen[t] = true;
+                entry[t] = Some((edge, [p, q]));
+                queue.push_back(t);
+            }
+        }
+        let mut found = None;
+        'search: while let Some(t) = queue.pop_front() {
+            for (edge, other, p, q) in edges(t) {
+                if entry[t].is_some_and(|(e, _)| e == edge) {
+                    continue;
+                }
+                if target(other) {
+                    found = Some((t, (edge, [p, q]), other));
+                    break 'search;
+                }
+                if seen[other] || !hostable(other, segments) {
+                    continue;
+                }
+                seen[other] = true;
+                parent[other] = Some(t);
+                entry[other] = Some((edge, [p, q]));
+                queue.push_back(other);
+            }
+        }
+        let (mut cur, mut exit, reached) = found?;
+        loop {
+            let came = entry[cur].expect("an entry edge");
+            let shared = came.1.into_iter().find(|v| exit.1.contains(v));
+            segments[cur] = Some(Segment {
+                edges: [came.0, exit.0],
+                shared: shared.expect("edges of one triangle"),
+            });
+            on_fence[came.0] = true;
+            on_fence[exit.0] = true;
+            match parent[cur] {
+                Some(prev) => {
+                    exit = came;
+                    cur = prev;
+                }
+                None => return Some(reached),
+            }
+        }
+    }
+
+    /// The midpoint of every edge, by edge index.
+    #[cfg(test)]
+    pub(super) fn edge_midpoints(&self) -> Vec<Point> {
+        let mut out = vec![Point::new(0.0, 0.0); self.cdt.num_undirected_edges()];
+        for e in self.cdt.undirected_edges() {
+            let [p, q] = e.positions().map(point);
+            out[e.fix().index()] = Point::new((p.x + q.x) / 2.0, (p.y + q.y) / 2.0);
+        }
+        out
+    }
+
+    /// One fence from the triangle holding `from` to the one holding `to`,
+    /// for tests that want a wall of their own placing.
+    #[cfg(test)]
+    pub(super) fn fence_between(&self, from: Point, to: Point) -> Fences {
+        let at = |p: Point| match self.cdt.locate(point2(p)) {
+            PositionInTriangulation::OnFace(f) => f.index(),
+            _ => panic!("{p:?} is not inside a triangle"),
+        };
+        let (start, end) = (at(from), at(to));
+        let mut fences = Fences {
+            segments: vec![None; self.free.len()],
+        };
+        let mut on_fence = vec![false; self.cdt.num_undirected_edges()];
+        let reached = self.grow_fence(
+            |t, _, _| t == start,
+            |other| other == end,
+            &mut fences.segments,
+            &mut on_fence,
+        );
+        assert_eq!(reached, Some(end), "no fence runs from {from:?} to {to:?}");
+        fences
     }
 
     fn adjacency(&self) -> Vec<Vec<FixedVertexHandle>> {

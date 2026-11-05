@@ -289,6 +289,10 @@ static HUMAN_TALLY: std::sync::Mutex<sweep::Tally> = std::sync::Mutex::new(sweep
     bugs: std::collections::BTreeMap::new(),
 });
 
+/// Cases run and parity searches that left EXACT_STATES behind, summed
+/// over every case so far, per player.
+static PROGRESS: std::sync::Mutex<[(u32, usize); 2]> = std::sync::Mutex::new([(0, 0); 2]);
+
 /// Random games to play; an unoptimised build takes some twenty seconds
 /// over each. The games are the same on every run, so a result here is
 /// reproducible and the aggregate below is a fixed number.
@@ -300,8 +304,62 @@ const SEED: u64 = 7;
 /// Read-back mismatches the seeded sweep shows as the AI and as the
 /// human. The sweep is seeded and platform-exact, so these are the
 /// measured values, and a router change that moves them is recorded here.
-const AI_TOPOLOGY_CEILING: usize = 4;
-const HUMAN_TOPOLOGY_CEILING: usize = 2;
+const AI_TOPOLOGY_CEILING: usize = 1;
+const HUMAN_TOPOLOGY_CEILING: usize = 3;
+/// Most states a corridor search that found its path may hold in one
+/// sweep game. The fenced search peaks near 5,000; the search without
+/// fences, run again when a fenced corridor fails in the relaxation or
+/// the fit, reached 74,960 as the human.
+const CORRIDOR_STATES_CEILING: usize = 100_000;
+/// Parity searches in one sweep game the fences held back from their
+/// corridor, so the search without them ran: at most one in any game.
+const FENCE_MISSES_CEILING: usize = 1;
+/// Routes the release sweeps try and the listed moves they refuse as
+/// Room, as the AI and as the human: the exact counts, asserted when the
+/// last case ends and re-recorded with every router change, so a change
+/// in either direction shows. A corridor that hugs a node costs a later
+/// move its room, which the Room count carries.
+const AI_ROUTES: usize = 927;
+const AI_ROOM: usize = 554;
+const HUMAN_ROUTES: usize = 973;
+const HUMAN_ROOM: usize = 608;
+/// Parity searches in one sweep game that left EXACT_STATES behind,
+/// whether a fence then missed or a fenced corridor was retried, so a
+/// lowered cap or an arena change that floods the fallback shows.
+const FALLBACK_CEILING: usize = 1;
+/// The same summed over the whole sweep, as the AI and as the human: 1
+/// and 1 measured.
+const AI_FALLBACKS: usize = 1;
+const HUMAN_FALLBACKS: usize = 1;
+
+/// Whether a running count sits under its ceiling.
+fn within(count: usize, ceiling: usize) -> bool {
+    count <= ceiling
+}
+
+/// The router's counters over one sweep game, checked against the
+/// ceilings above.
+fn sweep_stats_hold(s: &stats::Stats) -> Result<(), String> {
+    if s.states_ok_max > CORRIDOR_STATES_CEILING {
+        return Err(format!(
+            "a corridor found held {} states, ceiling {CORRIDOR_STATES_CEILING}",
+            s.states_ok_max
+        ));
+    }
+    if s.fence_misses > FENCE_MISSES_CEILING {
+        return Err(format!(
+            "{} parity searches missed with the fences up, ceiling {FENCE_MISSES_CEILING}",
+            s.fence_misses
+        ));
+    }
+    if s.fence_misses + s.fence_retries > FALLBACK_CEILING {
+        return Err(format!(
+            "{} parity searches fell back to the full cap, ceiling {FALLBACK_CEILING}",
+            s.fence_misses + s.fence_retries
+        ));
+    }
+    Ok(())
+}
 
 proptest! {
     #![proptest_config(Config {
@@ -319,26 +377,62 @@ proptest! {
     /// failing position prints as a bench fixture.
     #[test]
     fn no_listed_move_fails_as_a_bug(nodes in 4usize..=12, picks in prop::collection::vec(any::<u32>(), 36)) {
+        stats::take();
         let tally = sweep::game(nodes, &picks, Player::AI);
         prop_assert!(tally.is_ok(), "{}", tally.as_ref().unwrap_err());
+        let s = stats::take();
+        eprintln!(
+            "states {} misses {} retries {} exact {}",
+            s.states_ok_max, s.fence_misses, s.fence_retries, s.exact_hits
+        );
+        let held = sweep_stats_hold(&s);
+        prop_assert!(held.is_ok(), "{}", held.unwrap_err());
         let mut total = TALLY.lock().unwrap();
         total.add(&tally.unwrap());
         eprintln!("{total}");
         prop_assert_eq!(total.bug, 0);
-        prop_assert!(total.topology <= AI_TOPOLOGY_CEILING, "{}", total);
+        prop_assert!(within(total.topology, AI_TOPOLOGY_CEILING), "{}", total);
+        let (cases, fallbacks) = {
+            let mut progress = PROGRESS.lock().unwrap();
+            progress[0].0 += 1;
+            progress[0].1 += s.fence_misses + s.fence_retries;
+            progress[0]
+        };
+        prop_assert!(within(fallbacks, AI_FALLBACKS), "{fallbacks} fallbacks");
+        if cases == CASES && cfg!(not(debug_assertions)) {
+            prop_assert_eq!((total.tried, total.room), (AI_ROUTES, AI_ROOM), "{}", total);
+        }
     }
 
     /// The same games drawn at the human clearances, which routeMove and
     /// applyFaceMove use for the player at the keyboard.
     #[test]
     fn no_listed_move_fails_as_a_bug_for_the_human(nodes in 4usize..=12, picks in prop::collection::vec(any::<u32>(), 36)) {
+        stats::take();
         let tally = sweep::game(nodes, &picks, Player::Human);
         prop_assert!(tally.is_ok(), "{}", tally.as_ref().unwrap_err());
+        let s = stats::take();
+        eprintln!(
+            "human states {} misses {} retries {} exact {}",
+            s.states_ok_max, s.fence_misses, s.fence_retries, s.exact_hits
+        );
+        let held = sweep_stats_hold(&s);
+        prop_assert!(held.is_ok(), "{}", held.unwrap_err());
         let mut total = HUMAN_TALLY.lock().unwrap();
         total.add(&tally.unwrap());
         eprintln!("human {total}");
         prop_assert_eq!(total.bug, 0);
-        prop_assert!(total.topology <= HUMAN_TOPOLOGY_CEILING, "{}", total);
+        prop_assert!(within(total.topology, HUMAN_TOPOLOGY_CEILING), "{}", total);
+        let (cases, fallbacks) = {
+            let mut progress = PROGRESS.lock().unwrap();
+            progress[1].0 += 1;
+            progress[1].1 += s.fence_misses + s.fence_retries;
+            progress[1]
+        };
+        prop_assert!(within(fallbacks, HUMAN_FALLBACKS), "{fallbacks} fallbacks");
+        if cases == CASES && cfg!(not(debug_assertions)) {
+            prop_assert_eq!((total.tried, total.room), (HUMAN_ROUTES, HUMAN_ROOM), "{}", total);
+        }
     }
 }
 
@@ -1031,9 +1125,14 @@ fn routing_hashes() -> [u64; 5] {
         let want = rules(&state);
         for mv in state.face.search_moves() {
             if mv.a != mv.b || !mv.enclosed.is_empty() {
-                if let Ok((arena, taut)) =
-                    plan(&mut Router::new(), &state, &mv, &want, Parity::Search)
-                {
+                if let Ok((arena, taut, _)) = plan(
+                    &mut Router::new(),
+                    &state,
+                    &mv,
+                    &want,
+                    Parity::Search,
+                    Fencing::Up,
+                ) {
                     stages[0].points(&arena.vertex_points());
                     stages[1].points(&taut);
                     if let Some(relaxed) = relax(&state, &mv, &want, &arena, &taut) {
@@ -1380,7 +1479,15 @@ fn a_pinch_left_coincident_still_routes_or_is_refused_as_a_shape() {
         enclosed: vec![3],
     };
     let want = rules(&state);
-    let (arena, taut) = taut_path(&mut Router::new(), &state, &mv, &want, Parity::Search).unwrap();
+    let (arena, taut, _) = taut_path(
+        &mut Router::new(),
+        &state,
+        &mv,
+        &want,
+        Parity::Search,
+        Fencing::Up,
+    )
+    .unwrap();
     let n = taut.len();
     assert!(
         (1..n - 1).any(|i| (i + 1..n - 1).any(|j| taut[i].distance_to(&taut[j]) < 1e-9)),
@@ -1611,8 +1718,14 @@ fn probe_end_pins() {
                 continue;
             }
             routes += 1;
-            let Ok((arena, taut)) = plan(&mut Router::new(), &state, &mv, &want, Parity::Search)
-            else {
+            let Ok((arena, taut, _)) = plan(
+                &mut Router::new(),
+                &state,
+                &mv,
+                &want,
+                Parity::Search,
+                Fencing::Up,
+            ) else {
                 continue;
             };
             let Some(relaxed) = relax(&state, &mv, &want, &arena, &taut) else {
@@ -1726,8 +1839,15 @@ fn corner_chord(state: &GameState, rise: f64) -> (FaceMove, impl Fn(&Point) -> b
     let want = rules(&human);
     let mut moves = listed(state, 0, 2);
     moves.retain(|m| {
-        plan(&mut Router::new(), &human, m, &want, Parity::Search)
-            .is_ok_and(|(_, taut)| between(&taut[1]))
+        plan(
+            &mut Router::new(),
+            &human,
+            m,
+            &want,
+            Parity::Search,
+            Fencing::Up,
+        )
+        .is_ok_and(|(_, taut, _)| between(&taut[1]))
     });
     assert_eq!(moves.len(), 1, "one chord through the corner: {moves:?}");
     (moves.remove(0), between)
@@ -1805,7 +1925,15 @@ fn assert_relaxed_point_leaves_spokes(
     at_start: bool,
 ) {
     let end = state.nodes[0].position;
-    let (arena, taut) = plan(&mut Router::new(), state, mv, want, Parity::Search).unwrap();
+    let (arena, taut, _) = plan(
+        &mut Router::new(),
+        state,
+        mv,
+        want,
+        Parity::Search,
+        Fencing::Up,
+    )
+    .unwrap();
     let relaxed = relax(state, mv, want, &arena, &taut).unwrap();
     let before = clearance::resample(&taut, clearance::SPACING * super::eroded_by(state, want));
     let n = relaxed.len();
@@ -2100,6 +2228,351 @@ fn probe_index_time() {
                 .map(|i| i.moves.len())
                 .map_err(|e| e.clone()),
             start.elapsed().as_millis()
+        );
+    }
+}
+
+/// A round loop from node 0 at the top round two inner nodes, with its
+/// new node 3 at the bottom, so the chords from 0 to 3 inside it split
+/// the two nodes four ways. The inner nodes sit at `inner`, both left of
+/// the straight chord.
+fn ring_face(inner: [Point; 2]) -> GameState {
+    let mut state = GameState::new(3);
+    for (node, at) in state
+        .nodes
+        .iter_mut()
+        .zip([p(500.0, 150.0), inner[0], inner[1]])
+    {
+        node.position = at;
+    }
+    state.current_player = Player::AI;
+    let polyline: Vec<Point> = (0..=72)
+        .map(|k| {
+            let t = -std::f64::consts::FRAC_PI_2 + std::f64::consts::TAU * k as f64 / 72.0;
+            p(500.0 + 350.0 * t.cos(), 500.0 + 350.0 * t.sin())
+        })
+        .collect();
+    state
+        .apply_move(Move::new(0, 0, polyline, p(500.0, 850.0), Player::AI, 1000))
+        .unwrap();
+    state.current_player = Player::AI;
+    state
+}
+
+/// The chords from 0 to 3 in the face holding node 1.
+fn inner_chords(state: &GameState) -> Vec<FaceMove> {
+    let inner = state.face.corner_face(1, None).unwrap();
+    listed(state, 0, 3)
+        .into_iter()
+        .filter(|m| state.face.corner_face(m.a, m.at_a).unwrap() == inner)
+        .collect()
+}
+
+/// The straight chord from 0 to 3 puts both inner nodes on one side, so
+/// the chord naming the other side for both has two pieces wrong after
+/// the first search. The fenced parity search finds the corridor round
+/// them, and every one of the four chords draws and reads back.
+#[test]
+fn a_chord_wrong_on_two_pieces_routes_round_them_through_the_fences() {
+    let state = ring_face([p(380.0, 450.0), p(380.0, 550.0)]);
+    let chords = inner_chords(&state);
+    assert_eq!(chords.len(), 4, "{chords:?}");
+    // A fence joins the two inner nodes when the chord names them as one
+    // side, and a side with one piece gets none.
+    let want = rules(&state);
+    for mv in &chords {
+        let face = state.face.corner_face(mv.a, mv.at_a).unwrap();
+        let arena = Router::new().arena(&state, face, mv, &want).unwrap();
+        let fenced = arena
+            .fences(&state, mv, face)
+            .segments
+            .iter()
+            .flatten()
+            .count();
+        assert_eq!(
+            fenced > 0,
+            mv.enclosed.len() != 1,
+            "{mv:?}: {fenced} fenced triangles"
+        );
+    }
+    // Where the first path has pieces wrong, the filter and the exhaustive
+    // search both find the class reachable.
+    for mv in &chords {
+        assert_ne!(parity_unreachable(&state, mv, false), Some(true), "{mv:?}");
+    }
+    assert!(chords
+        .iter()
+        .any(|mv| parity_unreachable(&state, mv, false) == Some(false)));
+    let mut wrong_counts = Vec::new();
+    for mv in &chords {
+        stats::take();
+        let drawn = route(&state, mv).unwrap_or_else(|why| panic!("{mv:?}: {why:?}"));
+        assert_eq!(protocol::check(&state, &drawn), Ok(()));
+        let s = stats::take();
+        assert_eq!(s.fence_misses, 0, "{mv:?} needed the search without fences");
+        wrong_counts.extend(s.parity.iter().map(|&(wrong, _, found)| (wrong, found)));
+    }
+    assert!(
+        wrong_counts.contains(&(2, true)),
+        "no chord had two pieces wrong: {wrong_counts:?}"
+    );
+}
+
+/// Two inner nodes closer than two node clearances, even the human's, are
+/// one obstacle, so a chord that puts them on different sides has no
+/// corridor at any length.
+/// The parity filter says Room before any search, never Bug, and nothing
+/// is remembered against the corner pair, since the chords round both
+/// still draw.
+#[test]
+fn a_chord_splitting_two_glued_pieces_is_refused_as_room_without_a_search() {
+    let state = ring_face([p(380.0, 490.0), p(380.0, 510.0)]);
+    let disc = MIN_PATH_CLEARANCE + curve::tolerance(1000);
+    assert!(
+        state.nodes[1]
+            .position
+            .distance_to(&state.nodes[2].position)
+            < 2.0 * disc
+    );
+    let chords = inner_chords(&state);
+    assert_eq!(chords.len(), 4, "{chords:?}");
+    let mut router = Router::new();
+    for mv in &chords {
+        stats::take();
+        let drawn = router.route(&state, mv);
+        let s = stats::take();
+        if mv.enclosed.len() == 1 {
+            assert!(matches!(drawn, Err(Unroutable::Room)), "{mv:?}: {drawn:?}");
+            assert!(
+                s.parity.iter().all(|&(_, _, found)| !found),
+                "{mv:?} found a corridor"
+            );
+            // The exhaustive search without fences says the same, at both
+            // clearances.
+            assert_eq!(parity_unreachable(&state, mv, false), Some(true), "{mv:?}");
+            assert_eq!(parity_unreachable(&state, mv, true), Some(true), "{mv:?}");
+        } else {
+            assert!(drawn.is_ok(), "{mv:?}: {drawn:?}");
+        }
+        assert_eq!(s.fence_misses, 0);
+    }
+    assert_eq!(router.corners_without_room(), 0);
+}
+
+/// A fence of the test's own placing across the straight chord on an
+/// empty board: the search with it up goes round the fence's end, so the
+/// corridor is longer than the straight one, crosses the fence's line
+/// only beyond its ends, and still reaches the exit.
+#[test]
+fn a_fence_across_the_straight_chord_sends_the_corridor_round_its_end() {
+    let mut state = GameState::new(4);
+    for (node, at) in state.nodes.iter_mut().zip([
+        p(200.0, 500.0),
+        p(800.0, 500.0),
+        p(500.0, 100.0),
+        p(500.0, 900.0),
+    ]) {
+        node.position = at;
+    }
+    state.current_player = Player::AI;
+    let mv = chord(0, 1);
+    let want = rules(&state);
+    let face = state.face.corner_face(0, None).unwrap();
+    let arena = Router::new().arena(&state, face, &mv, &want).unwrap();
+    let entry = arena.entries(&state, 0, None).unwrap();
+    let exit = arena.entries(&state, 1, None).unwrap();
+    let cuts = arena
+        .cuts(&state, &mv, face, &corridor::blocked(&arena, &entry, &exit))
+        .unwrap();
+    let length = |path: &[Point]| -> f64 { path.windows(2).map(|w| w[0].distance_to(&w[1])).sum() };
+    let route_with = |fences: &erode::Fences| {
+        let found = corridor::search(
+            &arena,
+            &cuts,
+            &entry,
+            &exit,
+            corridor::Want::Any,
+            false,
+            corridor::Limits {
+                fences,
+                cap: corridor::SEARCH_STATES,
+            },
+        )
+        .unwrap();
+        corridor::draw(&found, &entry, &exit)
+    };
+    let straight = route_with(&erode::Fences::none());
+    assert!(length(&straight) < 601.0, "{}", length(&straight));
+    let fences = arena.fence_between(p(500.0, 350.0), p(500.0, 650.0));
+    assert!(fences.segments.iter().flatten().count() >= 2);
+    // The fence runs through the midpoints of the edges its segments join.
+    let midpoints = arena.edge_midpoints();
+    let fence_ys: Vec<f64> = fences
+        .segments
+        .iter()
+        .flatten()
+        .flat_map(|seg| seg.edges.map(|e| midpoints[e].y))
+        .collect();
+    let (top, bottom) = fence_ys
+        .iter()
+        .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), &y| {
+            (lo.min(y), hi.max(y))
+        });
+    assert!(
+        top < 450.0 && bottom > 550.0,
+        "fence spans {top:.0} to {bottom:.0}"
+    );
+    let detour = route_with(&fences);
+    assert!(
+        length(&detour) > length(&straight) + 10.0,
+        "straight {:.0}, detour {:.0}",
+        length(&straight),
+        length(&detour)
+    );
+    // The taut path crosses no piece of the fence, and the straight one
+    // crosses it.
+    let pieces: Vec<(Point, Point)> = fences
+        .segments
+        .iter()
+        .flatten()
+        .map(|seg| (midpoints[seg.edges[0]], midpoints[seg.edges[1]]))
+        .collect();
+    let crosses = |path: &[Point]| {
+        path.windows(2).any(|w| {
+            pieces
+                .iter()
+                .any(|&(c, d)| clearance::proper_crossing(w[0], w[1], c, d))
+        })
+    };
+    assert!(crosses(&straight));
+    assert!(!crosses(&detour), "{detour:?}");
+    // A fence shapes the search alone. Tightening keeps the cut parity,
+    // the class itself, and with no cut on this board it pulls the detour
+    // straight through the fence.
+    let taut = arena.tighten(&cuts, &detour, &entry, &exit);
+    assert!(crosses(&taut), "{taut:?}");
+    assert!(length(&taut) < length(&detour));
+    assert_eq!(detour.last().map(|q| (q.x, q.y)), Some((800.0, 500.0)));
+}
+
+/// Prints whether each saved recording's final position still has a
+/// legal move, which the share specs need to load into a live game:
+/// `cargo test saved_recordings_stay_live -- --ignored --nocapture`.
+#[test]
+#[ignore = "prints the saved recordings' liveness, run as needed"]
+fn saved_recordings_stay_live() {
+    for path in fixture_paths("fixtures/saved") {
+        let fixture = crate::replay::load(&path).unwrap();
+        let state = crate::replay::play_as(&fixture, Player::Human);
+        eprintln!(
+            "{}: {} legal moves after {} lines",
+            path.file_name().unwrap().to_string_lossy(),
+            state.face.search_moves().len(),
+            state.lines.len()
+        );
+    }
+}
+
+/// Routes every listed move of every recorded position as the AI and as
+/// the human and prints one line per position and player: the fixture,
+/// the moves replayed, the player, the listed count, a 0/1 string of
+/// which listed moves drew in list order, and the refusals by kind. The
+/// positions are every prefix of every fixture under fixtures/routing,
+/// fixtures/undrawn, fixtures/topology, fixtures/settle and
+/// fixtures/saved, replayed as recorded, and a position lists at most
+/// its first 300 moves. Two routers' outputs line up move for move:
+/// `cargo test --release probe_fixed_position_room -- --ignored
+/// --nocapture`.
+#[test]
+#[ignore = "routes every listed move of every recorded position, run in release"]
+fn probe_fixed_position_room() {
+    const MOST_MOVES: usize = 300;
+    let mut totals = [[0usize; 7]; 2];
+    for dir in [
+        "fixtures/routing",
+        "fixtures/undrawn",
+        "fixtures/topology",
+        "fixtures/settle",
+        "fixtures/saved",
+    ] {
+        for path in fixture_paths(dir) {
+            let Ok(fixture) = crate::replay::load(&path) else {
+                continue;
+            };
+            let name = path.file_name().unwrap().to_string_lossy().to_string();
+            // Routing and topology fixtures were recorded under older rules
+            // and replay without validation; saved and settle records
+            // replay as the page does, and a prefix the engine refuses is
+            // skipped.
+            let recorded = dir == "fixtures/saved" || dir == "fixtures/settle";
+            for played in 0..=fixture.moves.len() {
+                let mut prefix = fixture.clone();
+                prefix.moves.truncate(played);
+                let base = if recorded {
+                    let replayed =
+                        std::panic::catch_unwind(|| crate::replay::play_as(&prefix, Player::Human));
+                    let Ok(base) = replayed else { continue };
+                    base
+                } else {
+                    let json = serde_json::to_string(&prefix).unwrap();
+                    let tmp = std::env::temp_dir().join(format!("fixed-{name}-{played}.json"));
+                    std::fs::write(&tmp, json).unwrap();
+                    let replayed = std::panic::catch_unwind(|| position(&tmp));
+                    let _ = std::fs::remove_file(&tmp);
+                    let Ok(base) = replayed else {
+                        eprintln!("skip\t{name}\t{played}");
+                        continue;
+                    };
+                    base
+                };
+                for (k, player) in [Player::AI, Player::Human].into_iter().enumerate() {
+                    let mut state = base.clone();
+                    state.current_player = player;
+                    let listed = state.face.search_moves();
+                    let mut bits = String::with_capacity(listed.len());
+                    let mut counts = [0usize; 7];
+                    for mv in listed.iter().take(MOST_MOVES) {
+                        let slot = match route(&state, mv) {
+                            Ok(_) => 0,
+                            Err(Unroutable::Room) => 1,
+                            Err(Unroutable::Shape(_)) => 2,
+                            Err(Unroutable::Topology) => 3,
+                            Err(Unroutable::Sides) => 4,
+                            Err(Unroutable::NoSpot) => 5,
+                            Err(Unroutable::Bug(_)) => 6,
+                        };
+                        counts[slot] += 1;
+                        bits.push(if slot == 0 { '1' } else { '0' });
+                    }
+                    for (t, c) in totals[k].iter_mut().zip(counts) {
+                        *t += c;
+                    }
+                    eprintln!(
+                        "pos\t{name}\t{played}\t{player:?}\t{}\t{bits}\t{}\t{}\t{}\t{}\t{}\t{}",
+                        listed.len().min(MOST_MOVES),
+                        counts[1],
+                        counts[2],
+                        counts[3],
+                        counts[4],
+                        counts[5],
+                        counts[6]
+                    );
+                }
+            }
+        }
+    }
+    for (k, player) in ["AI", "human"].into_iter().enumerate() {
+        let t = totals[k];
+        eprintln!(
+            "total\t{player}\tlisted {}\tdrawn {}\troom {}\tshape {}\ttopology {}\tsides {}\tnospot {}\tbug {}",
+            t.iter().sum::<usize>(),
+            t[0],
+            t[1],
+            t[2],
+            t[3],
+            t[4],
+            t[5],
+            t[6]
         );
     }
 }
