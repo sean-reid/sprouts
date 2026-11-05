@@ -12,6 +12,7 @@ import {
   drawBetween,
   expectDotAt,
   findDot,
+  firstPlayerControls,
   frameOf,
   holdNext,
   interceptWorkerMessages,
@@ -50,9 +51,9 @@ async function expectRing(page: Page, id: number): Promise<void> {
     .toBeGreaterThanOrEqual(8);
 }
 
-// Tab from the last toolbar button lands on the first node target.
+// Tab runs from the last first-player control into the node targets.
 async function tabToNode(page: Page, id: number): Promise<void> {
-  await page.locator('button[data-first="ai"]').focus();
+  await firstPlayerControls(page).last().focus();
   for (let k = 0; k <= id; k++) await page.keyboard.press(tabKey());
   await expect(nodeButton(page, id)).toBeFocused();
 }

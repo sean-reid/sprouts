@@ -15,6 +15,7 @@ import {
   awaitReply,
   boardNodes,
   boardSettled,
+  chooseFirstPlayer,
   clickAway,
   expectNodeDrawnAt,
   expectSameStrokes,
@@ -376,7 +377,7 @@ test("a finished game reopens in review and steps single moves", async ({ page }
 
 test("a game the AI started restores with the AI as first player", async ({ page }) => {
   await openBoard(page);
-  await page.locator("button[data-first='ai']").click();
+  await chooseFirstPlayer(page, "ai");
   await startGame(page, 4);
   await expect(page.locator("#status")).toHaveText("Your turn!", { timeout: 60_000 });
   await expect(entries(page)).toHaveText([/^1\. AI, /]);
@@ -385,6 +386,9 @@ test("a game the AI started restores with the AI as first player", async ({ page
   await expect(page.locator("#status")).toHaveText("Your turn!");
   await expect(entries(page)).toHaveText([/^1\. AI, /]);
   await expect(page.locator("button[data-first='ai']")).toHaveAttribute("aria-pressed", "true");
+  if (await page.locator("#aiStartsBtn").isVisible()) {
+    await expect(page.locator("#aiStartsBtn")).toHaveAttribute("aria-pressed", "true");
+  }
   await expect(page.locator("#turn")).toHaveAttribute("data-player", "human");
   await expect(page.locator("#undoBtn")).toBeEnabled();
 

@@ -10,7 +10,7 @@
     <h1>SPROUTS</h1>
 
     <div class="toolbar">
-      <div class="controls game">
+      <div id="gameControls" class="controls game">
         <div class="node-count" role="group" aria-label="Nodes">
           <span id="nodeCountLabel" class="narrow-hidden">Nodes</span>
           <button id="fewerBtn" type="button" aria-label="Fewer nodes">&minus;</button>
@@ -27,6 +27,9 @@
           <span id="countNote" class="visually-hidden" role="status" aria-live="polite"></span>
         </div>
         <button id="startBtn">New game<span id="startCount" class="narrow-hidden"></span></button>
+        <button id="aiStartsBtn" type="button" class="phone-only" aria-pressed="false">
+          AI starts
+        </button>
         <button id="undoBtn" disabled>Undo</button>
       </div>
 
@@ -56,7 +59,7 @@
       </div>
 
       <aside id="history" aria-label="Move list" hidden>
-        <div class="history-nav">
+        <div id="historyNav" class="history-nav">
           <button id="backBtn" disabled>Back</button>
           <button id="forwardBtn" disabled>Forward</button>
           <button id="shareBtn">Share</button>

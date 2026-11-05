@@ -27,6 +27,37 @@ h1 {
   flex-shrink: 0;
 }
 
+/* On a phone the title gives its height to the move list, the first player
+   choice is one button in the first row, and whose turn it is shows on the
+   ring and the status line alone. */
+@media (max-width: 767px) {
+  h1 {
+    font-size: 22px;
+    letter-spacing: 4px;
+    margin-bottom: 4px;
+  }
+
+  .controls.setup {
+    display: none;
+  }
+
+  #aiStartsBtn {
+    padding-left: 10px;
+    padding-right: 10px;
+  }
+
+  #aiStartsBtn[aria-pressed="true"] {
+    background: #2a2a2a;
+    color: #ffffff;
+  }
+}
+
+@media (min-width: 768px) {
+  .phone-only {
+    display: none;
+  }
+}
+
 /* The row keeps the Cancel button's height from page load so the board
    never resizes when a stroke locks. */
 .status-row {
