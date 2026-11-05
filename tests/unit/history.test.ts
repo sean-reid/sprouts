@@ -992,6 +992,11 @@ describe("a link that names moves by index", () => {
     expect(saved.moves[1]).toMatchObject({ refused: true });
     const back = History.from(saved);
     expect(back.moves[0]?.indexed).toEqual({ index: 2, along: 100 });
+    expect(back.moves[0]?.polyline).toEqual(move.polyline);
+    expect(back.moves[0]?.fromNode).toBe(0);
+    expect(pendingIndex(back.moves[0]!)).toBeUndefined();
+    expect(saved.moves.every(hasStroke)).toBe(true);
+    expect(saved.moves.some(isIndexed)).toBe(false);
     expect(back.moves[1]?.refused).toBe(true);
     history.invalidateFrom(1);
     expect(history.moves[0]?.indexed).toEqual({ index: 2, along: 100 });

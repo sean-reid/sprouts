@@ -52,8 +52,10 @@ export function hasStroke(move: RecordMove): move is FixtureMove {
   return "polyline" in move;
 }
 
+// A move carried by index alone; a saved stroke keeps its cached index
+// beside its polyline and is not one.
 export function isIndexed(move: RecordMove): move is IndexedRecordMove {
-  return "index" in move;
+  return "index" in move && !("polyline" in move);
 }
 
 // A move with what the engine reported about it: the spline it fitted, the
@@ -499,7 +501,9 @@ function isLayout(value: unknown, count: number): value is [number, number][] {
 function isRecordMove(value: unknown, nodes: number, halfEdges: number): value is RecordMove {
   if (typeof value !== "object" || value === null) return false;
   const m = value as Record<string, unknown>;
-  if ("index" in m) return isCount(m.index) && isCount(m.along) && m.along <= 255;
+  if ("index" in m && !("polyline" in m)) {
+    return isCount(m.index) && isCount(m.along) && m.along <= 255;
+  }
   if (!isCount(m.from) || !isCount(m.to) || m.from >= nodes || m.to >= nodes) return false;
   if ("face" in m) return isPair(m.node) && isFace(m.face, m.from, m.to, nodes, halfEdges);
   if (m.cutOff !== undefined && !isCount(m.cutOff)) return false;
