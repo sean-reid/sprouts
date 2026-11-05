@@ -805,21 +805,77 @@ fn the_hook_of_the_issue_98_game_does_not_form_under_version_2() {
     assert!(same_face_model(&state));
 }
 
+fn lines_and_nodes_agree(state: &GameState) {
+    for line in &state.lines {
+        let node = state.find_node(state.initial_node_count + line.id).unwrap();
+        assert_eq!(
+            node.position, line.new_node_pos,
+            "line {} and node {} disagree",
+            line.id, node.id
+        );
+    }
+}
+
+/// A chord whose control points sit on the grid with its made node a
+/// fraction off it: the version 2 start step moves the node onto the grid
+/// and leaves the points alone, and the line is written with its node;
+/// the undo puts both back.
+#[test]
+fn a_node_moved_onto_the_grid_is_written_with_its_line_and_undone_with_it() {
+    let mut state = GameState::with_nodes_at(
+        vec![
+            Point::new(300.0, 500.0),
+            Point::new(700.0, 500.0),
+            Point::new(500.0, 200.0),
+            Point::new(500.0, 800.0),
+        ],
+        1000,
+        0,
+    );
+    let straight = vec![Cubic {
+        p0: Point::new(300.0, 500.0),
+        p1: Point::new(433.0, 500.0),
+        p2: Point::new(567.0, 500.0),
+        p3: Point::new(700.0, 500.0),
+    }];
+    let off = Point::new(500.4, 500.0);
+    let mov = crate::types::Move::as_given(
+        0,
+        1,
+        vec![Point::new(300.0, 500.0), Point::new(700.0, 500.0)],
+        straight.clone(),
+        off,
+        Player::Human,
+    );
+    state.apply_move(mov).unwrap();
+    // Entry rounds the node to the exact grid, far finer than the unit
+    // grid the settle stores on; the undo puts back what was there.
+    let node_was = state.find_node(4).unwrap().position;
+    let line_was = state.lines[0].new_node_pos;
+    assert_ne!(node_was, crate::exact::snap_to_unit(node_was, grid(1000)));
+    state.settle_version = 2;
+    settle(&mut state);
+    let node = state.find_node(4).unwrap().position;
+    assert_ne!(node, node_was, "the node stayed off the unit grid");
+    assert_eq!(node, state.lines[0].new_node_pos);
+    assert_eq!(node, crate::exact::snap_to_unit(node, grid(1000)));
+    let record = state.settles.pop().unwrap();
+    record.restore(&mut state);
+    assert_eq!(state.find_node(4).unwrap().position, node_was);
+    assert_eq!(state.lines[0].new_node_pos, line_was);
+    assert_eq!(state.lines[0].segments, straight);
+}
+
 /// After every settle each line's made node sits where the line says it
-/// does, over every fixture position and the version 2 seeded game.
+/// does, over every fixture position and the version 2 seeded game. The
+/// 24-node fixture runs in release only.
 #[test]
 fn a_made_node_and_its_line_agree_after_every_settle() {
-    let agree = |state: &GameState| {
-        for line in &state.lines {
-            let node = state.find_node(state.initial_node_count + line.id).unwrap();
-            assert_eq!(
-                node.position, line.new_node_pos,
-                "line {} and node {} disagree",
-                line.id, node.id
-            );
-        }
-    };
+    let agree = lines_and_nodes_agree;
     for fixture in all_fixtures() {
+        if cfg!(debug_assertions) && fixture.initial_nodes >= 24 {
+            continue;
+        }
         let mut drawn = fixture.start();
         for recorded in &fixture.moves {
             let mov = fixture_move(&drawn, recorded);
