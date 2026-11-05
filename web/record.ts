@@ -12,6 +12,13 @@ export interface FixtureMove {
   // The spline the move committed as; a settled game carries it so a
   // replay applies the move exactly.
   segments?: Cubic[];
+  // The move's index in the engine's move list and its node's place along
+  // the routed curve, once the engine has reported them; `refused` marks
+  // a move a regenerated board would not take, so the game shares as
+  // shapes without indexing again.
+  index?: number;
+  along?: number;
+  refused?: true;
 }
 
 export interface Fixture {

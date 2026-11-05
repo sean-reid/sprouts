@@ -16,6 +16,7 @@ import {
   History,
   loadSaved,
   pendingFace,
+  drawn,
   isIndexed,
   pendingIndex,
   prepareLink,
@@ -629,7 +630,7 @@ interface Drawn {
 // Records the move as the engine applied it, on its grid with the spline
 // it committed as, so a replay sends the engine its own input.
 function recordMove(outcome: Applied, drawn?: Drawn, topology?: FaceMove): void {
-  timeline.push(outcome.mov, topology, outcome.cutOff);
+  timeline.push(outcome.mov, topology, outcome.cutOff, outcome.indexed ?? false);
   applySnapshot(outcome.snapshot, drawn);
   persist();
 }
@@ -859,6 +860,7 @@ async function seek(target: number): Promise<boolean> {
         return false;
       }
       timeline.cursor--;
+      timeline.invalidateFrom(timeline.cursor);
     }
     while (timeline.cursor < target) {
       const move = timeline.moves[timeline.cursor];
@@ -1039,6 +1041,19 @@ async function share(): Promise<void> {
     );
     const copied = copyLater(prepared.then(({ history }) => shareUrl(history)));
     const { history, refusedAt, mismatch } = await prepared;
+    // The indices the share worked out hold for the timeline's own moves.
+    history.moves.forEach((move, i) => {
+      const own = timeline.moves[i];
+      if (!own || !drawn(own) || own.polyline.length !== move.polyline.length) return;
+      if (move.indexed) {
+        own.indexed = move.indexed;
+        delete own.refused;
+      } else if (move.refused) {
+        own.refused = true;
+        delete own.indexed;
+      }
+    });
+    persist();
     const url = shareUrl(history);
     window.history.replaceState(null, "", url);
     const warning =

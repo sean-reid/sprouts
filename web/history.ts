@@ -67,6 +67,9 @@ export interface RecordedMove extends Move {
   topology?: FaceMove;
   cutOff?: number;
   indexed?: IndexedMove;
+  // The regenerated board would not take this move, so the game cannot
+  // travel as indices while the move stands.
+  refused?: true;
 }
 
 export const UNKNOWN_NODE = -1;
@@ -186,14 +189,32 @@ export class History {
   }
 
   // A move made from the cursor discards whatever was ahead of it; the
-  // AI's move comes with the face move it was drawn from.
-  push(move: Move, topology?: FaceMove, cutOff?: number): void {
+  // AI's move comes with the face move it was drawn from, and a move the
+  // engine applied with the index its shadow board gave it, or `false`
+  // when that board refused it.
+  push(move: Move, topology?: FaceMove, cutOff?: number, indexed?: IndexedMove | false): void {
     this.moves.length = this.cursor;
     const kept = cloneMove(move);
     if (cutOff !== undefined) kept.cutOff = cutOff;
     if (topology) kept.topology = topology;
+    setIndexed(kept, indexed);
     this.moves.push(kept);
     this.cursor = this.moves.length;
+  }
+
+  // Forgets the indices of move number index + 1 and every move after it:
+  // an undo may change what comes before them, and the engine reports
+  // them again as the moves are applied.
+  invalidateFrom(index: number): void {
+    for (const move of this.moves.slice(index)) {
+      delete move.indexed;
+      delete move.refused;
+    }
+  }
+
+  // Whether every move carries the index the link would send.
+  get indexed(): boolean {
+    return this.moves.length > 0 && this.moves.every((move) => move.indexed);
   }
 
   // A copy to work on while the game goes on.
@@ -249,7 +270,9 @@ export class History {
     const { segments } = outcome.mov;
     if (segments) this.settle(index, { ...outcome.mov, segments });
     const move = this.moves[index];
-    if (move) move.cutOff = outcome.cutOff;
+    if (!move) return;
+    move.cutOff = outcome.cutOff;
+    setIndexed(move, outcome.indexed ?? false);
   }
 
   // The id of the node move number index + 1 created.
@@ -299,12 +322,27 @@ export class History {
   }
 }
 
+// Records what the engine's shadow board said about an applied move: its
+// index, or `false` when the regenerated board refused it; nothing is
+// recorded when the engine was not asked.
+function setIndexed(move: RecordedMove, indexed: IndexedMove | false | undefined): void {
+  if (indexed === undefined) return;
+  if (indexed) {
+    move.indexed = indexed;
+    delete move.refused;
+  } else {
+    delete move.indexed;
+    move.refused = true;
+  }
+}
+
 function cloneMove(move: RecordedMove): RecordedMove {
   const clone: RecordedMove = toMove(move);
   if (move.segments) clone.segments = move.segments;
   if (move.topology) clone.topology = move.topology;
   if (move.cutOff !== undefined) clone.cutOff = move.cutOff;
   if (move.indexed) clone.indexed = move.indexed;
+  if (move.refused) clone.refused = true;
   return clone;
 }
 
@@ -340,6 +378,8 @@ function toRecordMove(move: RecordedMove): FixtureMove {
     newNode: [move.newNodePos.x, move.newNodePos.y],
     ...(move.cutOff !== undefined ? { cutOff: move.cutOff } : {}),
     ...(move.segments ? { segments: move.segments } : {}),
+    ...(move.indexed ? { index: move.indexed.index, along: move.indexed.along } : {}),
+    ...(move.refused ? { refused: true as const } : {}),
   };
 }
 
@@ -361,6 +401,10 @@ function fromRecordMove(move: RecordMove): RecordedMove {
       newNodePos: { x: move.newNode[0], y: move.newNode[1] },
       ...(move.cutOff !== undefined ? { cutOff: move.cutOff } : {}),
       ...(move.segments ? { segments: move.segments } : {}),
+      ...(move.index !== undefined && move.along !== undefined
+        ? { indexed: { index: move.index, along: move.along } }
+        : {}),
+      ...(move.refused ? { refused: true as const } : {}),
     };
   }
   return {
@@ -459,6 +503,9 @@ function isRecordMove(value: unknown, nodes: number, halfEdges: number): value i
   if (!isCount(m.from) || !isCount(m.to) || m.from >= nodes || m.to >= nodes) return false;
   if ("face" in m) return isPair(m.node) && isFace(m.face, m.from, m.to, nodes, halfEdges);
   if (m.cutOff !== undefined && !isCount(m.cutOff)) return false;
+  if (m.index !== undefined && !isCount(m.index)) return false;
+  if (m.along !== undefined && !(isCount(m.along) && m.along <= 255)) return false;
+  if (m.refused !== undefined && m.refused !== true) return false;
   return (
     Array.isArray(m.polyline) &&
     m.polyline.length >= 2 &&
@@ -876,11 +923,13 @@ export interface LinkEngine {
 }
 
 // The game as the link will carry it, worked out on a copy. An index
-// link is tried first: the engine names every move by index while
-// replaying them on a fresh board, which routes and settles each move
-// itself, so the visitor's board is that board rather than this one;
-// a game the engine cannot index that way falls back to shapes, and
-// only that failure is caught. For shapes the
+// link comes first: a game whose every move carries the index the
+// engine gave it as it was applied goes out at once, a game with a move
+// the regenerated board refused goes as shapes at once, and a record
+// from before the indices asks the engine once, which names every move
+// by index while replaying them on a fresh board, so the visitor's
+// board is that board rather than this one; only that call's failure is
+// caught. For shapes the
 // engine says which drawn moves the router redraws, then the link
 // is replayed as decoded and any topology move the replay refuses,
 // or lands its node more than DRIFT_TOLERANCE from the recorded
@@ -904,17 +953,16 @@ export async function prepareLink(
   settled?: Point[],
 ): Promise<{ history: History; refusedAt?: number; mismatch?: boolean }> {
   const history = source.clone();
-  for (const move of history.moves) delete move.indexed;
+  if (history.indexed) return { history };
   const plan = classification(history);
-  if (plan) {
+  if (plan && !history.moves.some((move) => move.refused)) {
     const indexed = await engine.index(plan).catch(() => undefined);
     if (indexed) {
-      indexed.moves.forEach((move, i) => {
-        const target = history.moves[i];
-        if (target) target.indexed = move;
-      });
-      return { history };
+      history.moves.forEach((move, i) => setIndexed(move, indexed.moves[i] ?? false));
+      if (indexed.refused === undefined) return { history };
     }
+  }
+  if (plan) {
     try {
       const { topology } = await engine.classify(plan);
       topology.forEach((face, i) => {
@@ -983,21 +1031,23 @@ export async function sameIndexedGame(
     return false;
   }
   const shared = linked.moves.length;
-  const plan = classification(
-    History.from({ ...saved, moves: saved.moves.slice(0, shared), cursor: shared }),
-  );
+  const same = (moves: IndexedMove[]) =>
+    moves.length === shared &&
+    moves.every((move, i) => {
+      const other = linked.moves[i];
+      return (
+        other !== undefined &&
+        isIndexed(other) &&
+        other.index === move.index &&
+        other.along === move.along
+      );
+    });
+  const cached = History.from({ ...saved, moves: saved.moves.slice(0, shared), cursor: shared });
+  if (cached.indexed) return same(cached.moves.map((move) => move.indexed!));
+  const plan = classification(cached);
   if (!plan) return false;
   const indexed = await index(plan).catch(() => undefined);
-  if (!indexed || indexed.moves.length !== linked.moves.length) return false;
-  return indexed.moves.every((move, i) => {
-    const other = linked.moves[i];
-    return (
-      other !== undefined &&
-      isIndexed(other) &&
-      other.index === move.index &&
-      other.along === move.along
-    );
-  });
+  return indexed !== undefined && indexed.refused === undefined && same(indexed.moves);
 }
 
 export function shareUrl(history: History): string {
