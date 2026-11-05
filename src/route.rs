@@ -493,18 +493,10 @@ fn taut_path(
             // Flipping every bit at once is the same move drawn round the
             // other side of its own piece, and a bare node has no sides.
             let want = corridor::Want::Parity(first.parity ^ wrong);
-            let second = parity_search(
-                &arena,
-                &cuts,
-                &entry,
-                &exit,
-                want,
-                is_loop,
-                || match fencing {
-                    Fencing::Up => arena.fences(state, mv, face),
-                    Fencing::Down => erode::Fences::none(),
-                },
-            );
+            let second =
+                parity_search(&arena, &cuts, &entry, &exit, want, is_loop, fencing, || {
+                    arena.fences(state, mv, face)
+                });
             fenced = second.as_ref().is_ok_and(|(_, by_fences)| *by_fences);
             let second = second.map(|(found, _)| found);
             #[cfg(test)]
@@ -535,11 +527,14 @@ fn taut_path(
 const EXACT_STATES: usize = 20_000;
 
 /// The corridor in the parity class `want`, and whether fences shaped it:
-/// refused as Room when no walk through the arena reaches that class;
-/// else the class's own corridor, searched without fences within
-/// EXACT_STATES; else the corridor the fences given allow, which keep the
-/// search to a few parities; else, when a fence stood in the only way
-/// through, the search without any under the full cap.
+/// refused as Room when no walk through the arena reaches that class.
+/// With the fences up, the class's own corridor is searched for without
+/// fences within EXACT_STATES; else the corridor the fences allow, which
+/// keep the search to a few parities; else, when a fence stood in the
+/// only way through, the search without any under the full cap. With the
+/// fences down, the retry after a fenced corridor failed later, that
+/// last search runs alone.
+#[allow(clippy::too_many_arguments)]
 fn parity_search(
     arena: &erode::Arena,
     cuts: &erode::Cuts,
@@ -547,6 +542,7 @@ fn parity_search(
     exit: &erode::Entry,
     want: corridor::Want,
     is_loop: bool,
+    fencing: Fencing,
     fences: impl FnOnce() -> erode::Fences,
 ) -> Result<(corridor::Corridor, bool), Unroutable> {
     #[cfg(test)]
@@ -555,45 +551,47 @@ fn parity_search(
         return Err(Unroutable::Room);
     }
     let none = erode::Fences::none();
-    let exact = corridor::search(
-        arena,
-        cuts,
-        entry,
-        exit,
-        want,
-        is_loop,
-        corridor::Limits {
-            fences: &none,
-            cap: EXACT_STATES,
-        },
-    );
-    if let Ok(found) = exact {
+    if fencing == Fencing::Up {
+        let exact = corridor::search(
+            arena,
+            cuts,
+            entry,
+            exit,
+            want,
+            is_loop,
+            corridor::Limits {
+                fences: &none,
+                cap: EXACT_STATES,
+            },
+        );
+        if let Ok(found) = exact {
+            #[cfg(test)]
+            stats::with(|s| {
+                s.exact_hits += 1;
+                s.phase_ms[0] += started.elapsed().as_secs_f64() * 1000.0;
+            });
+            return Ok((found, false));
+        }
+        let fenced = corridor::search(
+            arena,
+            cuts,
+            entry,
+            exit,
+            want,
+            is_loop,
+            corridor::Limits {
+                fences: &fences(),
+                cap: corridor::SEARCH_STATES,
+            },
+        );
         #[cfg(test)]
-        stats::with(|s| {
-            s.exact_hits += 1;
-            s.phase_ms[0] += started.elapsed().as_secs_f64() * 1000.0;
-        });
-        return Ok((found, false));
+        stats::with(|s| s.phase_ms[0] += started.elapsed().as_secs_f64() * 1000.0);
+        if let Ok(found) = fenced {
+            return Ok((found, true));
+        }
+        #[cfg(test)]
+        stats::with(|s| s.fence_misses += 1);
     }
-    let fenced = corridor::search(
-        arena,
-        cuts,
-        entry,
-        exit,
-        want,
-        is_loop,
-        corridor::Limits {
-            fences: &fences(),
-            cap: corridor::SEARCH_STATES,
-        },
-    );
-    #[cfg(test)]
-    stats::with(|s| s.phase_ms[0] += started.elapsed().as_secs_f64() * 1000.0);
-    if let Ok(found) = fenced {
-        return Ok((found, true));
-    }
-    #[cfg(test)]
-    stats::with(|s| s.fence_misses += 1);
     corridor::search(
         arena,
         cuts,

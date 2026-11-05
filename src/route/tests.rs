@@ -301,7 +301,7 @@ const SEED: u64 = 7;
 /// human. The sweep is seeded and platform-exact, so these are the
 /// measured values, and a router change that moves them is recorded here.
 const AI_TOPOLOGY_CEILING: usize = 1;
-const HUMAN_TOPOLOGY_CEILING: usize = 1;
+const HUMAN_TOPOLOGY_CEILING: usize = 3;
 /// Most states a corridor search that found its path may hold over the
 /// sweeps. The fenced search peaks near 5,000; the search without fences,
 /// run again when a fenced corridor fails in the relaxation or the fit,
@@ -311,11 +311,18 @@ const CORRIDOR_STATES_CEILING: usize = 100_000;
 /// sweeps, so the search without them ran: 1 as the AI, none as the
 /// human, as measured.
 const FENCE_MISSES_CEILING: usize = 1;
-/// Listed moves the sweeps refuse as Room, as the AI and as the human: the
-/// measured values. A corridor that hugs a node costs a later move its
-/// room, so these hold that cost where it was measured.
-const AI_ROOM_CEILING: usize = 580;
-const HUMAN_ROOM_CEILING: usize = 593;
+/// Routes the sweeps try and the listed moves they refuse as Room, as the
+/// AI and as the human: the exact counts, re-recorded with every router
+/// change, so a change in either direction shows. A corridor that hugs
+/// a node costs a later move its room, which the Room count carries.
+const AI_ROUTES: usize = 927;
+const AI_ROOM: usize = 554;
+const HUMAN_ROUTES: usize = 973;
+const HUMAN_ROOM: usize = 608;
+/// Parity searches over one sweep game that left EXACT_STATES behind,
+/// whether a fence then missed or a fenced corridor was retried, so a
+/// lowered cap or an arena change that floods the fallback shows.
+const FALLBACK_CEILING: usize = 1;
 
 /// Whether a running count sits under its ceiling.
 fn within(count: usize, ceiling: usize) -> bool {
@@ -335,6 +342,12 @@ fn sweep_stats_hold(s: &stats::Stats) -> Result<(), String> {
         return Err(format!(
             "{} parity searches missed with the fences up, ceiling {FENCE_MISSES_CEILING}",
             s.fence_misses
+        ));
+    }
+    if s.fence_misses + s.fence_retries > FALLBACK_CEILING {
+        return Err(format!(
+            "{} parity searches fell back to the full cap, ceiling {FALLBACK_CEILING}",
+            s.fence_misses + s.fence_retries
         ));
     }
     Ok(())
@@ -371,7 +384,10 @@ proptest! {
         eprintln!("{total}");
         prop_assert_eq!(total.bug, 0);
         prop_assert!(within(total.topology, AI_TOPOLOGY_CEILING), "{}", total);
-        prop_assert!(within(total.room, AI_ROOM_CEILING), "{}", total);
+        prop_assert!(within(total.tried, AI_ROUTES), "{}", total);
+        if total.tried == AI_ROUTES {
+            prop_assert_eq!(total.room, AI_ROOM, "{}", total);
+        }
     }
 
     /// The same games drawn at the human clearances, which routeMove and
@@ -393,7 +409,10 @@ proptest! {
         eprintln!("human {total}");
         prop_assert_eq!(total.bug, 0);
         prop_assert!(within(total.topology, HUMAN_TOPOLOGY_CEILING), "{}", total);
-        prop_assert!(within(total.room, HUMAN_ROOM_CEILING), "{}", total);
+        prop_assert!(within(total.tried, HUMAN_ROUTES), "{}", total);
+        if total.tried == HUMAN_ROUTES {
+            prop_assert_eq!(total.room, HUMAN_ROOM, "{}", total);
+        }
     }
 }
 

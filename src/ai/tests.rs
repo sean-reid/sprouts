@@ -543,9 +543,16 @@ fn the_live_room_position_draws_under_the_cheap_pass() {
     }
 }
 
+/// Candidates of the live position whose parity search leaves EXACT_STATES
+/// behind, to a fence miss or a fenced corridor's retry: 52 measured, all
+/// retries.
+#[cfg(not(debug_assertions))]
+const LIVE_FALLBACK_CEILING: usize = 60;
+
 /// No listed move of the live position exhausts the corridor search:
 /// every candidate routes at the cheap clearance through one Router
-/// without a search states bug. 1,443 candidates, release only.
+/// without a search states bug, and few fall back to the full cap.
+/// 1,443 candidates, release only.
 #[cfg(not(debug_assertions))]
 #[test]
 fn no_listed_move_of_the_live_position_exhausts_the_search() {
@@ -566,9 +573,14 @@ fn no_listed_move_of_the_live_position_exhausts_the_search() {
     let s = stats::take();
     assert_eq!(exhausted, 0);
     assert_eq!(s.refused.bug, 0, "{:?}", s.refused.bugs);
+    let fallbacks = s.fence_misses + s.fence_retries;
     eprintln!(
         "{} fence misses, {} fence retries",
         s.fence_misses, s.fence_retries
+    );
+    assert!(
+        fallbacks <= LIVE_FALLBACK_CEILING,
+        "{fallbacks} candidates fell back to the full-cap search"
     );
 }
 
