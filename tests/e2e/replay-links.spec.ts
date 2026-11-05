@@ -144,8 +144,6 @@ for (const [file, budget, form, topologyMoves] of routed) {
       type: `${name}-share-ms`,
       description: String(Date.now() - started),
     });
-    // The replay that restored the game indexed every move, so the share
-    // asks the engine for nothing more.
     expect(await requestCount(page, "indexMoves")).toBe(0);
     expect(payload).toBeLessThan(budget);
     await expect(page.locator("#status")).not.toHaveText(/replay may stop|may differ/);
@@ -203,7 +201,6 @@ for (const [file, budget, form, topologyMoves] of routed) {
       });
       expect(page.url()).not.toContain("#");
       await expect(entries(page)).toHaveCount(total);
-      // The saved record carried its indices, so boot compared bytes.
       expect(await requestCount(page, "indexMoves")).toBe(0);
       return;
     }

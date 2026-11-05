@@ -2103,3 +2103,37 @@ fn probe_index_time() {
         );
     }
 }
+
+/// What the shadow board adds to each applied move, natively:
+/// `cargo test --release probe_shadow_time -- --ignored --nocapture`.
+#[test]
+#[ignore]
+fn probe_shadow_time() {
+    for (nodes, moves, pick) in [(24, 10, 0), (12, 30, 1)] {
+        let game = shared_game(nodes, moves, pick).unwrap();
+        let mut state = game.fixture.start();
+        let mut shadow = protocol::Shadow::new(&state);
+        let mut times = Vec::new();
+        for m in &game.fixture.moves {
+            let mut outcome = protocol::apply(&mut state, m.wire());
+            let start = std::time::Instant::now();
+            shadow.follow(&state, &mut outcome);
+            let indexed = matches!(
+                outcome,
+                protocol::Outcome::Applied {
+                    indexed: Some(_),
+                    ..
+                }
+            );
+            times.push(format!(
+                "{}{}",
+                start.elapsed().as_millis(),
+                if indexed { "" } else { "x" }
+            ));
+        }
+        eprintln!(
+            "PROBE shadow {nodes}n {moves}m follow ms per move: {}",
+            times.join(" ")
+        );
+    }
+}
