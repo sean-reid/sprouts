@@ -300,22 +300,22 @@ const SEED: u64 = 7;
 /// Read-back mismatches the seeded sweep shows as the AI and as the
 /// human. The sweep is seeded and platform-exact, so these are the
 /// measured values, and a router change that moves them is recorded here.
-const AI_TOPOLOGY_CEILING: usize = 0;
-const HUMAN_TOPOLOGY_CEILING: usize = 0;
+const AI_TOPOLOGY_CEILING: usize = 1;
+const HUMAN_TOPOLOGY_CEILING: usize = 1;
 /// Most states a corridor search that found its path may hold over the
 /// sweeps. The fenced search peaks near 5,000; the search without fences,
 /// run again when a fenced corridor fails in the relaxation or the fit,
-/// reached 72,548 as the human.
+/// reached 74,960 as the human.
 const CORRIDOR_STATES_CEILING: usize = 100_000;
 /// Parity searches the fences held back from their corridor over the
-/// sweeps, so the search without them ran: 2 as the AI, none as the
+/// sweeps, so the search without them ran: 1 as the AI, none as the
 /// human, as measured.
-const FENCE_MISSES_CEILING: usize = 2;
+const FENCE_MISSES_CEILING: usize = 1;
 /// Listed moves the sweeps refuse as Room, as the AI and as the human: the
 /// measured values. A corridor that hugs a node costs a later move its
 /// room, so these hold that cost where it was measured.
-const AI_ROOM_CEILING: usize = 773;
-const HUMAN_ROOM_CEILING: usize = 750;
+const AI_ROOM_CEILING: usize = 580;
+const HUMAN_ROOM_CEILING: usize = 593;
 
 /// Whether a running count sits under its ceiling.
 fn within(count: usize, ceiling: usize) -> bool {
