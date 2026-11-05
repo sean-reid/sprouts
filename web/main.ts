@@ -17,6 +17,7 @@ import {
   loadSaved,
   pendingFace,
   drawn,
+  indicesCached,
   isIndexed,
   ownLinkDeferred,
   pendingIndex,
@@ -1261,14 +1262,19 @@ function placeUndo(): void {
 }
 
 // An index link to the saved game: the cached indices are compared to the
-// link's, or a worker of its own indexes the saved record, so the game the
-// page shows is never touched. That worker answers every call through a
-// game instance, so one is built on the saved record's header first. A
-// failure reads as another game, which the link then opens.
+// link's without the engine, and only a record without them is indexed,
+// in a worker of its own so the game the page shows is never touched.
+// That worker answers every call through a game instance, so one is
+// built on the saved record's header first. A failure reads as another
+// game, which the link then opens.
 async function ownIndexedGame(saved: GameRecord, linked: GameRecord): Promise<boolean> {
   if (!linked.moves.every(isIndexed) || saved.moves.length < linked.moves.length) return false;
-  const checker = new Engine(() => {});
+  if (indicesCached(saved, linked.moves.length)) {
+    return sameIndexedGame(saved, linked, () => Promise.reject(new Error("cached")));
+  }
+  let checker: Engine | undefined;
   try {
+    checker = new Engine(() => {});
     const layout = saved.nodes ? { nodes: saved.nodes.map(([x, y]) => ({ x, y })) } : undefined;
     await checker.call(
       "init",
@@ -1278,11 +1284,12 @@ async function ownIndexedGame(saved: GameRecord, linked: GameRecord): Promise<bo
       layout,
       saved.settleVersion,
     );
-    return await sameIndexedGame(saved, linked, (plan) => checker.call("indexMoves", plan));
+    const engine = checker;
+    return await sameIndexedGame(saved, linked, (plan) => engine.call("indexMoves", plan));
   } catch {
     return false;
   } finally {
-    checker.dispose();
+    checker?.dispose();
   }
 }
 
