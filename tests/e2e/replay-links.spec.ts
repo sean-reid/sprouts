@@ -52,15 +52,15 @@ const fixtures = [
 // when the engine regenerates the whole game on a fresh board, and shapes
 // when the regenerated board refuses a move, as the nine-node,
 // thirty-move and 24-node games do. The budget belongs to the recording:
-// the payload measured on router version 5 with the recorder's default
-// picks (34, 1486, 2047 and 691) plus 10 percent, rounded up. A payload
-// depends on the router version, the pick and the recorder, so a new
-// recording brings its own budget.
+// the payload measured with the recorder's default picks (34, 894, 2503
+// and 47) plus 10 percent, rounded up. A payload depends on the router
+// version, the pick and the recorder, so a new recording brings its own
+// budget.
 const routed: [string, number, "indices" | "shapes", number][] = [
   ["fixtures/saved/eight-moves-4n-1000.json", 38, "indices", 4],
-  ["fixtures/saved/ten-moves-9n-1000.json", 1635, "shapes", 5],
-  ["fixtures/saved/thirty-moves-12n-1000.json", 2252, "shapes", 15],
-  ["fixtures/saved/ten-moves-24n-1000.json", 1305, "shapes", 5],
+  ["fixtures/saved/ten-moves-9n-1000.json", 984, "shapes", 5],
+  ["fixtures/saved/thirty-moves-12n-1000.json", 2754, "shapes", 15],
+  ["fixtures/saved/ten-moves-24n-1000.json", 52, "indices", 5],
 ];
 
 // A share replays the game up to three times in the engine, routing
@@ -305,7 +305,12 @@ test("a long index link that is not the saved game opens in review and steps", a
   const saved = { firstPlayer: "human", cursor: fixture.moves.length, ...fixture };
   // Fifteen moves on the same header, each the first move the engine
   // lists, which is not the saved game.
-  const other = new History(fixture.initialNodes, fixture.boardSize, "human", 1);
+  const other = new History(
+    fixture.initialNodes,
+    fixture.boardSize,
+    "human",
+    fixture.settleVersion ?? 1,
+  );
   for (let i = 0; i < 15; i++) {
     other.push({ fromNode: 0, toNode: 0, polyline: [{ x: 0, y: 0 }], newNodePos: { x: 0, y: 0 } });
     other.moves[i]!.indexed = { index: 0, along: 0 };
