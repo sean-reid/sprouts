@@ -469,15 +469,15 @@ test("the lens keeps its lift and stays on the canvas along the whole top edge",
   await page.mouse.click(frame.left + frame.width / 2, frame.top + frame.height - 20);
   await expect(page.locator("#status")).toHaveText("Your turn!", { timeout: 60_000 });
 
-  // The run of that line within 30 px of its highest point, wherever the
-  // settle left it, resampled every 8 px, traced 12 px below it from left
-  // to right.
+  // The run of that line through the zone where the top edge swings the
+  // lens aside, wherever the settle left it, resampled every 8 px, traced
+  // 12 px below it from left to right.
   const samples: Client[] = [];
   for (let i = 0; i <= 300; i++) samples.push((await alongLine(page, 0, i / 300)).at);
   const highest = Math.min(...samples.map((p) => p.y));
-  expect(highest - frame.top).toBeLessThan(LIFT + RADIUS - 30);
+  expect(highest - frame.top).toBeLessThan(LIFT + RADIUS - 40);
   const run: Client[] = samples
-    .filter((p) => p.y < highest + 30)
+    .filter((p) => p.y - frame.top < LIFT + RADIUS - 24)
     .map((p) => ({ x: p.x, y: p.y + 12 }));
   run.sort((p, q) => p.x - q.x);
   const path: Client[] = [run[0]!];
