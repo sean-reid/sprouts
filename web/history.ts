@@ -961,15 +961,17 @@ export async function prepareLink(
 }
 
 // Whether an index link names the saved game: the two carry the same
-// header and the engine indexes the saved record to the link's moves.
-// A link's indices say nothing about a game without the engine, so a
-// saved record that cannot be indexed is another game.
+// header and the engine indexes the saved record's first moves to the
+// link's, so a game played on past the link still reopens live. A link
+// with more moves than the saved game is another game and opens in
+// review. A link's indices say nothing about a game without the engine,
+// so a saved record that cannot be indexed is another game.
 export async function sameIndexedGame(
   saved: GameRecord,
   linked: GameRecord,
   index: (plan: Classification) => Promise<Indexed>,
 ): Promise<boolean> {
-  if (!linked.moves.every(isIndexed) || saved.moves.length !== linked.moves.length) return false;
+  if (!linked.moves.every(isIndexed) || saved.moves.length < linked.moves.length) return false;
   if (saved.initialNodes !== linked.initialNodes || saved.boardSize !== linked.boardSize) {
     return false;
   }
@@ -980,7 +982,10 @@ export async function sameIndexedGame(
   if (!sameLayout(saved.nodes, linked.nodes, saved.initialNodes, saved.boardSize, quantum)) {
     return false;
   }
-  const plan = classification(History.from(saved));
+  const shared = linked.moves.length;
+  const plan = classification(
+    History.from({ ...saved, moves: saved.moves.slice(0, shared), cursor: shared }),
+  );
   if (!plan) return false;
   const indexed = await index(plan).catch(() => undefined);
   if (!indexed || indexed.moves.length !== linked.moves.length) return false;

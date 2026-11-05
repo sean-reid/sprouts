@@ -932,11 +932,23 @@ describe("a link that names moves by index", () => {
     expect(await sameIndexedGame(saved, link, otherIndices)).toBe(false);
     const failing = () => Promise.reject(new Error("no index"));
     expect(await sameIndexedGame(saved, link, failing)).toBe(false);
-    // A different header is another game before the engine is asked.
+    // A different header is another game before the engine is asked, and
+    // so is a link with more moves than the saved game.
     const shorter = { ...saved, moves: saved.moves.slice(0, 1) };
     expect(await sameIndexedGame(shorter, link, index)).toBe(false);
     expect(await sameIndexedGame({ ...saved, firstPlayer: "ai" }, link, index)).toBe(false);
     expect(calls).toHaveLength(1);
+    // A game played on past the link indexes its first moves only.
+    const longer = twoMoves();
+    longer.push({
+      fromNode: 4,
+      toNode: 5,
+      polyline: [at(500, 500), at(500, 650)],
+      newNodePos: at(500, 575),
+    });
+    expect(await sameIndexedGame(longer.record(), link, index)).toBe(true);
+    expect(calls).toHaveLength(2);
+    expect(calls[1]?.moves).toHaveLength(2);
     // A shapes link is not compared this way.
     expect(await sameIndexedGame(saved, decodeRecord(encodeRecord(twoMoves()))!, index)).toBe(
       false,

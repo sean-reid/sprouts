@@ -1244,24 +1244,21 @@ function placeUndo(): void {
   else gameControls.append(undoBtn);
 }
 
-// A link made for another router opens whatever game is saved, with a
-// word about why.
 // An index link to the saved game: the engine indexes the saved record
-// on a board of its own shape and the indices are compared to the link's.
+// and the indices are compared to the link's. The engine builds the
+// boards from the record, so no game need be loaded first; a failure
+// reads as another game, which the link then opens.
 async function ownIndexedGame(saved: GameRecord, linked: GameRecord): Promise<boolean> {
-  if (!linked.moves.every(isIndexed) || saved.moves.length !== linked.moves.length) return false;
-  const layout = saved.nodes ? { nodes: saved.nodes.map(([x, y]) => ({ x, y })) } : undefined;
-  await engine.call(
-    "init",
-    saved.initialNodes,
-    saved.boardSize,
-    saved.firstPlayer,
-    layout,
-    saved.settleVersion,
-  );
-  return sameIndexedGame(saved, linked, (plan) => engine.call("indexMoves", plan));
+  if (!linked.moves.every(isIndexed) || saved.moves.length < linked.moves.length) return false;
+  try {
+    return await sameIndexedGame(saved, linked, (plan) => engine.call("indexMoves", plan));
+  } catch {
+    return false;
+  }
 }
 
+// A link made for another router opens whatever game is saved, with a
+// word about why.
 async function boot(): Promise<void> {
   let linked: GameRecord | null = null;
   let stale: StaleLink | null = null;
