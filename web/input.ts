@@ -13,7 +13,8 @@ export interface StrokeHandlers {
   afterMove(world: Point, kind: PointerKind): void;
   end(world: Point, kind: PointerKind): void;
   tap(world: Point, kind: PointerKind): void;
-  cancel(): void;
+  // "paused": the pointer let go before picking the stroke up from its tail.
+  cancel(reason?: "paused"): void;
   // True when the press takes hold of something the page shows; the pointer
   // then drives drag until drop instead of drawing a stroke.
   grab(world: Point, kind: PointerKind): boolean;
@@ -37,6 +38,8 @@ interface Stroke {
   drawing: boolean;
   length: number;
   last: Point;
+  // The view moved under the pointer; samples resume within PICKUP_PX of the tail.
+  paused: boolean;
 }
 
 interface Pinch {
@@ -44,10 +47,13 @@ interface Pinch {
   startDist: number;
   startWorld: Point;
   startScale: number;
+  // The finger startWorld stays under; null keeps it under the midpoint.
+  anchor: number | null;
 }
 
 const DOUBLE_TAP_MS = 300;
 const DOUBLE_TAP_SLOP = 30;
+const PICKUP_PX = 16;
 
 function kindOf(e: PointerEvent): PointerKind {
   return e.pointerType === "touch" || e.pointerType === "pen" ? e.pointerType : "mouse";
@@ -73,6 +79,8 @@ export function attachInput(
   let held: number | null = null;
   let pinch: Pinch | null = null;
   let panPointer: number | null = null;
+  // Fingers that landed on the page beside the canvas during a stroke.
+  const routed = new Set<number>();
   let spaceHeld = false;
   let lastTap: { at: number; screen: Point } | null = null;
 
@@ -92,17 +100,36 @@ export function attachInput(
     handlers.drop();
   };
 
+  const drawingFinger = (): Tracked | undefined =>
+    stroke?.drawing ? pointers.get(stroke.id) : undefined;
+
+  const pickedUp = (screen: Point): boolean => {
+    if (!stroke) return false;
+    if (stroke.paused && distance(screen, view.toScreen(stroke.last)) > PICKUP_PX) return false;
+    stroke.paused = false;
+    return true;
+  };
+
+  // A live stroke's view may sit past the board edge until the stroke is gone.
+  const endStroke = (): void => {
+    stroke = null;
+    view.rebound();
+  };
+
+  // A pinch over a live stroke keeps the stroke's tail under the finger
+  // drawing it, so the stroke goes on from there when the pinch ends.
   const beginPinch = (): void => {
     letGo();
     if (stroke && !stroke.drawing) stroke = null;
     const [a, b] = [...pointers.entries()];
     if (!a || !b) return;
-    const mid = midpoint(a[1].screen, b[1].screen);
+    const tail = stroke && drawingFinger() ? stroke : null;
     pinch = {
       ids: [a[0], b[0]],
       startDist: Math.max(1, distance(a[1].screen, b[1].screen)),
-      startWorld: view.toWorld(mid),
+      startWorld: tail ? tail.last : view.toWorld(midpoint(a[1].screen, b[1].screen)),
       startScale: view.scale,
+      anchor: tail ? tail.id : null,
     };
   };
 
@@ -112,18 +139,27 @@ export function attachInput(
     const b = pointers.get(pinch.ids[1]);
     if (!a || !b) return;
     const ratio = distance(a.screen, b.screen) / pinch.startDist;
-    view.anchor(pinch.startWorld, midpoint(a.screen, b.screen), pinch.startScale * ratio);
+    const under = pinch.anchor !== null ? pointers.get(pinch.anchor)?.screen : undefined;
+    const scale = pinch.startScale * ratio;
+    if (under) view.anchor(pinch.startWorld, under, scale, false);
+    else view.anchor(pinch.startWorld, midpoint(a.screen, b.screen), scale);
   };
 
-  canvas.addEventListener("pointerdown", (e) => {
+  const pauseStroke = (): void => {
+    if (stroke) stroke.paused = true;
+  };
+
+  const press = (e: PointerEvent): void => {
     const kind = kindOf(e);
     if (kind === "mouse" && e.button !== 0) return;
     const screen = local(e);
     pointers.set(e.pointerId, { kind, screen });
-    try {
-      canvas.setPointerCapture(e.pointerId);
-    } catch {
-      // The pointer is already gone; nothing to capture.
+    if (!routed.has(e.pointerId)) {
+      try {
+        canvas.setPointerCapture(e.pointerId);
+      } catch {
+        // The pointer is already gone; nothing to capture.
+      }
     }
     if (pointers.size === 2) {
       beginPinch();
@@ -139,11 +175,12 @@ export function attachInput(
       held = e.pointerId;
       return;
     }
-    stroke = { id: e.pointerId, drawing: false, length: 0, last: world };
+    stroke = { id: e.pointerId, drawing: false, length: 0, last: world, paused: false };
     stroke.drawing = handlers.start(world, kind);
-  });
+  };
+  canvas.addEventListener("pointerdown", press);
 
-  canvas.addEventListener("pointermove", (e) => {
+  const move = (e: PointerEvent): void => {
     const kind = kindOf(e);
     const tracked = pointers.get(e.pointerId);
     const events = e.getCoalescedEvents?.() ?? [];
@@ -167,7 +204,7 @@ export function attachInput(
       updatePinch();
       return;
     }
-    if (!stroke || stroke.id !== e.pointerId) return;
+    if (!stroke || stroke.id !== e.pointerId || !pickedUp(screen)) return;
     for (const sample of samples) {
       const world = view.toWorld(local(sample));
       stroke.length += distance(world, stroke.last);
@@ -175,12 +212,14 @@ export function attachInput(
       handlers.move(world, kind);
     }
     handlers.afterMove(stroke.last, kind);
-  });
+  };
+  canvas.addEventListener("pointermove", move);
 
   const release = (e: PointerEvent): void => {
     const tracked = pointers.get(e.pointerId);
     if (!tracked) return;
     pointers.delete(e.pointerId);
+    routed.delete(e.pointerId);
     const kind = kindOf(e);
     const screen = local(e);
     if (panPointer === e.pointerId) panPointer = null;
@@ -188,29 +227,34 @@ export function attachInput(
       letGo();
       return;
     }
+    let pinched = false;
     if (pinch && pinch.ids.includes(e.pointerId)) {
       pinch = null;
-      const remaining = pointers.entries().next().value;
-      if (stroke && remaining) {
-        stroke.id = remaining[0];
-        stroke.last = view.toWorld(remaining[1].screen);
-      } else if (stroke) {
-        stroke = null;
-        handlers.cancel();
+      pinched = true;
+      if (!stroke) return;
+      // The stroke belongs to its finger: the other one lifting resumes it,
+      // its own lifting releases it like any other release.
+      if (stroke.id !== e.pointerId) {
+        pauseStroke();
+        return;
       }
-      return;
     }
     if (!stroke || stroke.id !== e.pointerId) return;
+    if (!pickedUp(screen)) {
+      endStroke();
+      handlers.cancel("paused");
+      return;
+    }
     const world = view.toWorld(screen);
     stroke.length += distance(world, stroke.last);
     const length = stroke.length;
-    stroke = null;
+    endStroke();
     if (length >= options.minStrokeLength) {
       handlers.end(world, kind);
       return;
     }
     handlers.tap(world, kind);
-    if (kind !== "touch") return;
+    if (kind !== "touch" || pinched) return;
     const now = e.timeStamp;
     if (
       lastTap &&
@@ -229,7 +273,8 @@ export function attachInput(
   const cancelAll = (): void => {
     const hadStroke = stroke !== null;
     pointers.clear();
-    stroke = null;
+    routed.clear();
+    endStroke();
     pinch = null;
     panPointer = null;
     letGo();
@@ -241,13 +286,42 @@ export function attachInput(
   canvas.addEventListener("pointercancel", cancel);
   canvas.addEventListener("lostpointercapture", cancel);
 
+  // A second finger landing beside the canvas joins a live stroke's
+  // gesture. The browser keeps that finger captured where it landed, so
+  // its events are read off the document rather than the canvas.
+  const offCanvas = (e: PointerEvent): boolean =>
+    !(e.target instanceof Node && canvas.contains(e.target));
+  document.addEventListener(
+    "pointerdown",
+    (e) => {
+      if (!stroke?.drawing || pointers.size !== 1 || kindOf(e) !== "touch") return;
+      if (!offCanvas(e)) return;
+      routed.add(e.pointerId);
+      press(e);
+    },
+    { capture: true },
+  );
+  const fromPage =
+    (handle: (e: PointerEvent) => void) =>
+    (e: PointerEvent): void => {
+      if (routed.has(e.pointerId) && offCanvas(e)) handle(e);
+    };
+  document.addEventListener("pointermove", fromPage(move), { capture: true });
+  document.addEventListener("pointerup", fromPage(release), { capture: true });
+  document.addEventListener("pointercancel", fromPage(cancel), { capture: true });
+
   canvas.addEventListener(
     "wheel",
     (e) => {
       e.preventDefault();
       const delta = wheelDelta(e);
-      if (e.ctrlKey || e.metaKey) view.zoomAt(local(e), wheelZoomFactor(delta.y));
+      const screen = local(e);
+      if (e.ctrlKey || e.metaKey) view.zoomAt(screen, wheelZoomFactor(delta.y));
       else view.panBy(-delta.x, -delta.y);
+      const finger = drawingFinger();
+      if (!finger || finger.kind !== "mouse") return;
+      finger.screen = screen;
+      pauseStroke();
     },
     { passive: false },
   );
@@ -256,8 +330,10 @@ export function attachInput(
     if (e.target instanceof HTMLButtonElement) return;
     if (e.code === "Space") {
       e.preventDefault();
+      if (spaceHeld) return;
       spaceHeld = true;
       canvas.classList.add("pan");
+      if (stroke && drawingFinger()?.kind === "mouse") panPointer = stroke.id;
     } else if (e.key === "0" && !e.ctrlKey && !e.metaKey) {
       view.fit();
     }
@@ -266,6 +342,10 @@ export function attachInput(
     if (e.code === "Space") {
       spaceHeld = false;
       canvas.classList.remove("pan");
+      if (stroke && panPointer === stroke.id) {
+        panPointer = null;
+        pauseStroke();
+      }
     }
   });
   window.addEventListener("blur", () => {

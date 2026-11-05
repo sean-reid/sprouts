@@ -67,6 +67,14 @@ const DEFAULT_NODES = 4;
 const DOT_GRAB_PX = 22;
 const PLACING_HINT = "Drag the dot to adjust it, or press anywhere else to place it";
 const DRAW_HINT = "Draw a line between two nodes";
+// Screen pixels from the canvas edge within which a zoomed stroke gets the pan hint.
+const EDGE_HINT_PX = 12;
+const PAUSED_HINT = "The line stopped where the board moved it. Pick it up from its end to go on.";
+const PAN_HINT: Record<PointerKind, string> = {
+  touch: "Pinch or two-finger drag to move the board",
+  pen: "Pinch or two-finger drag to move the board",
+  mouse: "Hold Space and drag, or scroll, to move the board",
+};
 
 type StatusKind = "" | "win" | "lose";
 
@@ -149,6 +157,8 @@ let settleRun = 0;
 let suggestion: Promise<void> = Promise.resolve();
 // Settles once the last drag of the dot has been answered.
 let dotUpdate: Promise<void> = Promise.resolve();
+// The pan hint shows once per stroke.
+let panHinted = false;
 
 const engine = new Engine(() => setStatus("Failed to load game engine", "lose"));
 const targets = new NodeTargets(targetsEl, boardEl, state, view, {
@@ -392,6 +402,7 @@ function handleStart(world: Point, kind: PointerKind): boolean {
   state.mode = "dragging";
   state.dragStartNode = node.id;
   state.dragPath = [{ x: node.position.x, y: node.position.y }];
+  panHinted = false;
   return true;
 }
 
@@ -406,7 +417,24 @@ function handleMove(point: Point, kind: PointerKind): void {
   }
 }
 
+// A stroke at the edge of a zoomed view with more board beyond it.
+function strokeAtEdge(world: Point): boolean {
+  if (view.zoom <= 1.01) return false;
+  const at = view.toScreen(world);
+  const board = view.boardSize * view.scale;
+  return (
+    (at.x < EDGE_HINT_PX && view.tx < -0.5) ||
+    (at.y < EDGE_HINT_PX && view.ty < -0.5) ||
+    (at.x > view.width - EDGE_HINT_PX && view.tx + board > view.width + 0.5) ||
+    (at.y > view.height - EDGE_HINT_PX && view.ty + board > view.height + 0.5)
+  );
+}
+
 function handleAfterMove(world: Point, kind: PointerKind): void {
+  if (state.mode === "dragging" && !panHinted && strokeAtEdge(world)) {
+    panHinted = true;
+    setStatus(PAN_HINT[kind]);
+  }
   if (kind !== "touch" || state.mode !== "dragging") {
     hideLoupe();
     return;
@@ -518,11 +546,12 @@ function rejectStroke(rejection: Rejection, path: Point[]): void {
   updateControls();
 }
 
-function abandonStroke(): void {
+function abandonStroke(reason?: "paused"): void {
   hideLoupe();
   if (state.mode !== "dragging") return;
   state.mode = "idle";
   state.dragPath = [];
+  if (reason === "paused") setStatus(PAUSED_HINT);
 }
 
 function handleTap(): void {
