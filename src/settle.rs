@@ -16,8 +16,8 @@
 //! takes part in it still, and goes on raising the least ratio of the
 //! pairs still free, so the rest of the board spreads round a crowded
 //! corner. Version 2 also measures shape: the radius a line bends at
-//! against the line clearance, and the angle between two spokes at a node
-//! against SPOKE_DEGREES, so a kink straightens and spokes fan out the
+//! against half the line clearance, and the angle between two spokes at a
+//! node against 10 degrees, so a kink straightens and spokes fan out the
 //! way a short distance opens.
 
 use crate::curve::{self, Cubic};
@@ -35,11 +35,10 @@ pub const ROUNDS: usize = 64;
 /// Rounds per settle at version 2, where the stride collapsing on a stuck
 /// pair freezes it and the rounds go on.
 pub const ROUNDS_V2: usize = 128;
-/// Two spokes this far apart at a node are as cramped as two lines one
-/// line clearance apart.
-pub const SPOKE_DEGREES: f64 = 10.0;
-/// The chord between two unit tangents SPOKE_DEGREES apart, twice the
-/// sine of half the angle, written out so no platform's sine is involved.
+/// The chord between two unit tangents 10 degrees apart, twice the sine
+/// of half the angle, written out so no platform's sine is involved: two
+/// spokes that close at a node are as cramped as two lines one line
+/// clearance apart.
 const SPOKE_CHORD: f64 = 0.174_311_485_495_316_3;
 /// Pair distances measured plus lines carried, summed over the rounds,
 /// at which a settle stops whatever the board. The model and crossing
@@ -84,9 +83,9 @@ struct Targets {
     line: f64,
     edge_node: f64,
     edge_line: f64,
-    /// The least radius a line bends at without counting as a kink; the
-    /// line clearance, since an ordinary curve bends wider than that and
-    /// a hook into a node tighter.
+    /// The least radius a line bends at without counting as a kink: half
+    /// the line clearance, since an ordinary curve bends three times
+    /// wider and a hook into a node three times tighter.
     bend: f64,
     /// The chord between two spoke tangents at a node.
     spoke: f64,
@@ -109,7 +108,7 @@ impl Targets {
             line: MIN_PATH_CLEARANCE * s,
             edge_node: node_disc(board_size),
             edge_line: MIN_PATH_CLEARANCE * s,
-            bend: MIN_PATH_CLEARANCE * s,
+            bend: MIN_PATH_CLEARANCE * s / 2.0,
             spoke: SPOKE_CHORD,
             board: board_size as f64,
             pruned: version >= 2,
