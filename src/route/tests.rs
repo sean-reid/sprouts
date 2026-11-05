@@ -768,9 +768,8 @@ fn shared_game_at(pick: usize) -> Result<SharedGame, String> {
 /// A visitor's engine regenerates the sharer's board exactly: both engines
 /// hold the same cubics, the same face moves and the same router, so
 /// every AI move travels as topology and every routed node and settled
-/// position comes back as recorded. Pick 17 fails on a board that keeps
-/// the stroke as a line's polyline: the node ranking reads it and one AI
-/// move is no longer the router's own line.
+/// position comes back as recorded. Picks 0 and 36 are the committed
+/// recordings.
 #[test]
 #[cfg(not(debug_assertions))]
 fn a_shared_game_replays_to_the_same_board() {
