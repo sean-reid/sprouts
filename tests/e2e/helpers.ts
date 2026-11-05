@@ -917,17 +917,18 @@ export async function awaitReply(page: Page): Promise<void> {
 
 export const HASH_PREFIX = "#game=";
 
-// Shares the game and returns the link and its payload length.
 // Shares the game and returns the link and its payload length; a long
 // game's check replays it three times in the engine, so `timeout` bounds
-// the wait for the status.
+// the wait for the status, and the wait is recorded beside the payload.
 export async function share(
   page: Page,
   label: string,
   timeout = 5_000,
 ): Promise<{ url: string; payload: number }> {
+  const started = Date.now();
   await page.locator("#shareBtn").click();
   await expect(page.locator("#status")).toHaveText(/Link copied|Copy the link/, { timeout });
+  test.info().annotations.push({ type: `${label}-ms`, description: String(Date.now() - started) });
   const url = page.url();
   const at = url.indexOf(HASH_PREFIX);
   expect(at).toBeGreaterThan(0);
