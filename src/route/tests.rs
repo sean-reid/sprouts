@@ -604,13 +604,19 @@ fn shared_game(nodes: usize, moves: usize, pick: usize) -> Result<SharedGame, St
                 })
                 .ok_or_else(|| format!("no human move at move {index}"))?
         } else {
-            // The first search move that draws, so the record is the same
-            // on every run; the ranked choice depends on the wall clock.
+            // The first search move that draws, routed without a clock, so
+            // the record is the same on every run under any load.
             let moves = state.face.search_moves();
-            let order: Vec<usize> = (0..moves.len()).collect();
-            match crate::ai::draw(&state, &moves, &order) {
-                (Ok(mov), _) => protocol::Move::from(mov),
-                (Err(why), _) => return Err(format!("no AI move drawn at move {index}: {why:?}")),
+            let mut last = Err(Unroutable::Room);
+            for mv in &moves {
+                last = draws(&state, mv);
+                if last.is_ok() {
+                    break;
+                }
+            }
+            match last {
+                Ok(mov) => protocol::Move::from(mov),
+                Err(why) => return Err(format!("no AI move drawn at move {index}: {why:?}")),
             }
         };
         match protocol::apply(&mut state, wire) {
@@ -748,8 +754,9 @@ fn rehearse_shared_game(game: &SharedGame) -> Drift {
     drift
 }
 
-/// The games the recorder can play: eight moves on four nodes for picks 0
-/// to 8, ten moves on nine nodes for picks 9 to 20.
+/// The games the recorder can play: eight moves on four nodes for picks
+/// under 9, ten moves on nine nodes from 9 up; 0 and 36 are the committed
+/// recordings.
 fn shared_game_at(pick: usize) -> Result<SharedGame, String> {
     if pick < 9 {
         shared_game(4, 8, pick)
@@ -760,21 +767,28 @@ fn shared_game_at(pick: usize) -> Result<SharedGame, String> {
 
 /// A visitor's engine regenerates the sharer's board exactly: both engines
 /// hold the same cubics, the same face moves and the same router, so
-/// every routed node and every settled position comes back as recorded.
+/// every AI move travels as topology and every routed node and settled
+/// position comes back as recorded. Pick 17 fails on a board that keeps
+/// the stroke as a line's polyline: the node ranking reads it and one AI
+/// move is no longer the router's own line.
 #[test]
 #[cfg(not(debug_assertions))]
 fn a_shared_game_replays_to_the_same_board() {
-    for pick in [0, 1, 2, 3, 9, 10, 11, 12] {
+    for pick in [0, 1, 2, 3, 9, 10, 11, 12, 17, 36] {
         let game = shared_game_at(pick).unwrap();
         let drift = rehearse_shared_game(&game);
-        assert!(drift.topology > 0, "pick {pick} shares no move as topology");
+        assert_eq!(
+            drift.topology,
+            game.fixture.moves.len() / 2,
+            "pick {pick}: an AI move travels as geometry"
+        );
         assert_eq!(drift.refused, None, "pick {pick}");
         assert_eq!(drift.node, 0.0, "pick {pick}: {drift:?}");
         assert_eq!(drift.board, 0.0, "pick {pick}: {drift:?}");
     }
 }
 
-/// The drift table over the thirty games issue 63 measured:
+/// The drift table over the 21 picks the recorder can play:
 /// `cargo test --release measure_shared_game_drift -- --ignored --nocapture`.
 #[test]
 #[ignore]
@@ -825,7 +839,7 @@ fn record_shared_games() {
     record_shared_game(
         9,
         10,
-        pick("SPROUTS_PICK_9", 5),
+        pick("SPROUTS_PICK_9", 36),
         &dir.join("ten-moves-9n-1000.json"),
     );
 }
