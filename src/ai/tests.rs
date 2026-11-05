@@ -674,3 +674,224 @@ fn probe_sweep_search_states() {
         );
     }
 }
+
+/// The board of a page record under fixtures/undrawn replayed as the page
+/// does: every move applied as it committed, the board settled after each.
+fn position_of_fixture(name: &str) -> GameState {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("fixtures/undrawn")
+        .join(name);
+    let fixture = crate::replay::load(&path).unwrap();
+    crate::replay::play_as(&fixture, Player::Human)
+}
+
+/// Where the corner at node 1 of the live 4-node position is widest at
+/// radius `r`: the point and its distance to the nearer of the node's two
+/// spokes, over directions between 20 and 85 degrees above due left.
+fn widest_at(state: &GameState, r: f64) -> (crate::types::Point, f64) {
+    use crate::geometry::closest_point_on_polyline;
+    let tol = crate::curve::tolerance(state.board_size);
+    let at = state.nodes[1].position;
+    let spokes: Vec<Vec<crate::types::Point>> = state
+        .lines
+        .iter()
+        .filter(|l| l.from_node == 1 || l.to_node == 1)
+        .map(|l| l.flatten(tol))
+        .collect();
+    (20..=85)
+        .map(|deg| {
+            let rad = f64::from(deg).to_radians();
+            let p = crate::types::Point::new(at.x - rad.cos() * r, at.y - rad.sin() * r);
+            let gap = spokes
+                .iter()
+                .map(|s| closest_point_on_polyline(s, &p).1)
+                .fold(f64::INFINITY, f64::min);
+            (p, gap)
+        })
+        .fold(
+            (at, 0.0),
+            |best, next| if next.1 > best.1 { next } else { best },
+        )
+}
+
+/// The chord from node 1 to node 12 on the live 4-node position, drawn by
+/// hand: out of the corner at node 1 along its widest direction to 30
+/// units, up the middle of the corridor between node 1's two spokes, then
+/// across the open face to node 12.
+fn hand_chord(state: &GameState) -> Move {
+    use crate::types::Point;
+    let tol = crate::curve::tolerance(state.board_size);
+    let mut stroke = vec![state.nodes[1].position];
+    for r in [3.0, 5.0, 7.0, 9.0, 12.0, 15.0, 18.0, 22.0, 26.0, 30.0] {
+        stroke.push(widest_at(state, r).0);
+    }
+    let x_at = |poly: &[Point], y: f64| -> f64 {
+        poly.windows(2)
+            .find_map(|w| {
+                let (p, q) = (w[0], w[1]);
+                ((p.y - y) * (q.y - y) <= 0.0 && p.y != q.y)
+                    .then(|| p.x + (q.x - p.x) * (y - p.y) / (q.y - p.y))
+            })
+            .expect("the wall spans this height")
+    };
+    let to_node_4 = state.lines[1].flatten(tol);
+    let arc_to_node_2 = state.lines[7].flatten(tol);
+    let mut y = 705.0;
+    while y >= 440.0 {
+        let x = (x_at(&to_node_4, y) + x_at(&arc_to_node_2, y)) / 2.0;
+        stroke.push(Point::new(x, y));
+        y -= 15.0;
+    }
+    for (x, y) in [
+        (178.0, 420.0),
+        (200.0, 370.0),
+        (240.0, 330.0),
+        (290.0, 300.0),
+        (335.0, 275.0),
+    ] {
+        stroke.push(Point::new(x, y));
+    }
+    stroke.push(state.nodes[12].position);
+    let node = stroke[stroke.len() / 2];
+    Move::new(1, 12, stroke, node, Player::AI, state.board_size)
+}
+
+/// The listed move of the live 4-node position: a chord from node 1 to
+/// node 12 through the big face, the only move the model lists.
+fn pocket_chord() -> FaceMove {
+    FaceMove {
+        a: 1,
+        at_a: Some(4),
+        b: 12,
+        at_b: Some(34),
+        enclosed: Vec::new(),
+    }
+}
+
+/// The live 4-node position where the page answered Undrawn lists one
+/// move, and that move is legal: a chord drawn by hand passes the AI's
+/// validation, reads back as the listed move and applies.
+#[test]
+fn the_live_pocket_position_lists_a_legal_move() {
+    let state = position_of_fixture("pocket-4n-1000.json");
+    assert_eq!(state.current_player, Player::AI);
+    assert_eq!(state.face.search_moves(), vec![pocket_chord()]);
+    let mov = hand_chord(&state);
+    crate::protocol::check(&state, &mov).unwrap();
+    assert_eq!(embedding::embed(&state, &mov).unwrap(), pocket_chord());
+    let mut after = state.clone();
+    let wire = crate::protocol::Move {
+        from_node: mov.from_node,
+        to_node: mov.to_node,
+        polyline: mov.polyline.clone(),
+        new_node_pos: mov.new_node_pos,
+        segments: Some(mov.segments.clone()),
+    };
+    assert!(matches!(
+        crate::protocol::apply(&mut after, wire),
+        crate::protocol::Outcome::Applied { .. }
+    ));
+    assert_eq!(after.lines.len(), state.lines.len() + 1);
+}
+
+/// The AI draws the live 4-node position's one listed move.
+#[test]
+#[ignore = "the arena disconnects the ends in the corner at node 1, which is narrower than two fit margins between the forgiven radius and 5.3 units out"]
+fn the_live_pocket_position_draws() {
+    let state = position_of_fixture("pocket-4n-1000.json");
+    let candidates = state.face.search_moves();
+    let order = rank(&state, &candidates);
+    let (drawn, passed) = draw(&state, &candidates, &order);
+    let mov = drawn.unwrap_or_else(|why| panic!("{passed} passed and nothing drew: {why:?}"));
+    assert_eq!(reads_as(&state, &mov), pocket_chord());
+}
+
+/// Every attempt on the live 4-node position: the listed moves and their
+/// class members at the AI clearance, at the human clearance, and without
+/// the parity search, then the draw as the page runs it, and how wide the
+/// corner at node 1 is at each radius. `cargo test --release
+/// probe_live_pocket_position -- --ignored --nocapture`.
+#[test]
+#[ignore = "prints every attempt, run in release"]
+fn probe_live_pocket_position() {
+    let state = position_of_fixture("pocket-4n-1000.json");
+    assert_eq!(state.current_player, Player::AI);
+    for (i, n) in state.nodes.iter().enumerate() {
+        eprintln!(
+            "node {i}: ({:.1}, {:.1}) degree {}",
+            n.position.x,
+            n.position.y,
+            state.face.degree(i)
+        );
+    }
+    let candidates = state.face.search_moves();
+    let order = rank(&state, &candidates);
+    eprintln!("{} listed", candidates.len());
+    for (r, &idx) in order.iter().enumerate() {
+        let listed = &candidates[idx];
+        let face = state.face.corner_face(listed.a, listed.at_a).unwrap();
+        eprintln!(
+            "rank {r}: {listed:?} in face {face:?} with pieces {:?}",
+            state.face.components(face)
+        );
+        let members = class_members(&state, listed);
+        for (what, attempt) in
+            std::iter::once(("listed", listed)).chain(members.iter().map(|m| ("member", m)))
+        {
+            let outcome = |drawn: Result<Move, route::Unroutable>| match drawn {
+                Ok(m) => format!("drew {}-{}", m.from_node, m.to_node),
+                Err(why) => format!("{why:?}"),
+            };
+            stats::take();
+            let t = Instant::now();
+            let full = route::Router::new().route(&state, attempt);
+            let ms = t.elapsed().as_secs_f64() * 1000.0;
+            let s = stats::take();
+            eprintln!(
+                "  {what} {attempt:?}: {} in {ms:.1} ms over {} attempts, parity searches {}",
+                outcome(full),
+                s.attempts,
+                s.parity.len()
+            );
+            let cheap = route::Router::new().route_cheap(&state, attempt);
+            let skip = route::Router::new().route_cheap_with(&state, attempt, route::Parity::Skip);
+            eprintln!(
+                "    human clearance: {}; without the parity search: {}",
+                outcome(cheap),
+                outcome(skip)
+            );
+        }
+    }
+    stats::take();
+    let t = Instant::now();
+    let (drawn, passed) = draw(&state, &candidates, &order);
+    let ms = t.elapsed().as_secs_f64() * 1000.0;
+    let s = stats::take();
+    eprintln!(
+        "draw: {:?} after {passed} passed in {ms:.1} ms, {} attempts, {} arenas, {}",
+        drawn.map(|m| (m.from_node, m.to_node)),
+        s.attempts,
+        s.arenas,
+        s.refused
+    );
+    for r in [3.0, 4.0, 5.0, 5.5, 6.0, 7.0, 8.0, 10.0] {
+        let (p, gap) = widest_at(&state, r);
+        eprintln!(
+            "corner at node 1, {r} units out: {gap:.2} units to the nearer spoke at ({:.1}, {:.1})",
+            p.x, p.y
+        );
+    }
+    let mut as_human = state.clone();
+    as_human.current_player = Player::Human;
+    eprintln!(
+        "the same chord routed for the human: {:?}",
+        route::route(&as_human, &pocket_chord()).map(|m| (m.from_node, m.to_node))
+    );
+    let mov = hand_chord(&state);
+    eprintln!(
+        "hand chord: {} points, check {:?}, reads as {:?}",
+        mov.polyline.len(),
+        crate::protocol::check(&state, &mov).map_err(|r| r.message),
+        embedding::embed(&state, &mov).map_err(|r| r.message)
+    );
+}
