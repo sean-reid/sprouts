@@ -210,9 +210,6 @@ struct Survey {
     broken: bool,
     /// The least ratio over the frozen pairs.
     held: f64,
-    /// The least shape ratio, counted up to 1: a kink or a closed spoke
-    /// pair that a round may not make worse.
-    shape: f64,
 }
 
 /// Displacements gathered over one round: a sum per node, a weighted sum
@@ -624,7 +621,6 @@ impl Layout {
         let mut tests = 0;
         let mut broken = false;
         let mut held = f64::INFINITY;
-        let mut shape = f64::INFINITY;
         let mut short = |d: f64, at: Tightest| -> Option<f64> {
             let target = targets.of(at);
             let ratio = d / target;
@@ -635,7 +631,6 @@ impl Layout {
             // Shape is read off the samples already taken and costs the
             // work cap nothing, so it leaves the distance rounds as they are.
             if matches!(at, Tightest::Bend(_) | Tightest::Spokes(..)) {
-                shape = shape.min(ratio.min(1.0));
                 return (shaping && ratio < 1.0).then(|| STEP * (target - d) / 2.0);
             }
             tests += 1;
@@ -874,7 +869,6 @@ impl Layout {
             tests,
             broken,
             held,
-            shape,
         }
     }
 
@@ -1172,9 +1166,9 @@ pub struct Report {
     pub at: Tightest,
     /// Pairs frozen, each at the ratio it reached.
     pub frozen: Vec<(Tightest, f64)>,
-    /// Starting nodes and lines held still at the end.
+    /// Starting nodes held still at the end, and the lines held.
     pub held_nodes: usize,
-    pub held_lines: usize,
+    pub held_lines: Vec<usize>,
 }
 
 impl Report {
@@ -1187,7 +1181,7 @@ impl Report {
             at: Tightest::Nothing,
             frozen: Vec::new(),
             held_nodes: 0,
-            held_lines: 0,
+            held_lines: Vec::new(),
         }
     }
 }
@@ -1458,24 +1452,39 @@ fn relax(
         held = rest.held;
         stride = STRIDE_START * unit;
     }
-    // The rounds left straighten kinks and part closed spokes, each round
-    // standing while the least shape ratio rises, no frozen pair breaks
-    // and the least distance holds.
+    // The rounds left straighten kinks and part closed spokes. A round
+    // stands while no shape pair under its target gets worse and the sum
+    // of their shortfalls drops, so one kink nothing can move does not
+    // hold the others, while no frozen pair breaks and the least distance
+    // stays where the distance rounds left it.
     if targets.shape {
         let mut stride = STRIDE_START * unit;
         let until = report.rounds + SHAPE_ROUNDS;
+        let floor_least = least;
+        let shortfalls = |ratios: &BTreeMap<Tightest, f64>| -> Vec<(Tightest, f64)> {
+            ratios
+                .iter()
+                .filter(|(at, r)| {
+                    matches!(at, Tightest::Bend(_) | Tightest::Spokes(..)) && **r < 1.0
+                })
+                .map(|(at, r)| (*at, 1.0 - r))
+                .collect()
+        };
+        let total = |s: &[(Tightest, f64)]| s.iter().map(|(_, v)| v).sum::<f64>();
         while report.rounds < until && work < WORK_CAP {
             let mut push = Push::empty(&layout);
+            let mut was = BTreeMap::new();
             let now = layout.survey(
                 &targets,
                 f64::INFINITY,
                 Some(&mut push),
-                None,
+                Some(&mut was),
                 &frozen,
                 true,
             );
             work += now.tests;
-            if now.shape + EPS >= 1.0 {
+            let before = shortfalls(&was);
+            if before.is_empty() {
                 break;
             }
             report.rounds += 1;
@@ -1484,13 +1493,22 @@ fn relax(
             next.rebuild(&targets, &origin, &still);
             next.quantise(grid(state.board_size), &targets);
             let moved = next.farthest_from(&layout);
-            let after = next.survey(&targets, f64::INFINITY, None, None, &frozen, true);
+            let mut is = BTreeMap::new();
+            let after = next.survey(&targets, f64::INFINITY, None, Some(&mut is), &frozen, true);
             work += after.tests + state.lines.len();
             let crossed = next.crossings(tolerance);
+            let left = shortfalls(&is);
+            let none_worse = left.iter().all(|(at, short)| {
+                before
+                    .iter()
+                    .find(|(pair, _)| pair == at)
+                    .is_some_and(|(_, had)| *short <= had + EPS)
+            });
             let stood = moved > 0.0
-                && after.shape > now.shape + EPS
+                && none_worse
+                && total(&left) + EPS < total(&before)
                 && !after.broken
-                && after.least + EPS >= now.least
+                && after.least + EPS >= floor_least
                 && next.keeps(state, &original, crossings, crossed);
             if stood {
                 layout = next;
@@ -1509,7 +1527,7 @@ fn relax(
     }
     report.work = work;
     report.held_nodes = still.nodes.iter().filter(|h| **h).count();
-    report.held_lines = still.lines.iter().filter(|h| **h).count();
+    report.held_lines = (0..still.lines.len()).filter(|k| still.lines[*k]).collect();
     if held < least {
         let tightest = frozen
             .iter()
@@ -1540,10 +1558,10 @@ fn relax(
         line.polyline = line.flat.clone();
         line.new_node_pos = layout.nodes[layout.mid(k)];
     }
+    // Every node the layout moved is written, a made node included even
+    // when its line ends where it began: the start step can leave the
+    // line's points on their cells and its node one cell along the curve.
     for node in &mut state.nodes {
-        if node.id >= layout.initial && !changed[node.id - layout.initial] {
-            continue;
-        }
         let at = layout.nodes[node.id];
         if at != node.position {
             undo.nodes.push((node.id, node.position));

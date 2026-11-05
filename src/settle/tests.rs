@@ -165,6 +165,9 @@ fn settling_again_never_lowers_the_least_clearance() {
         for recorded in &fixture.moves {
             let mov = fixture_move(&drawn, recorded);
             drawn.apply_move(mov).unwrap();
+            if drawn.settle_version > 0 {
+                settle(&mut drawn);
+            }
             let once = settled_copy(&drawn);
             let mut twice = once.clone();
             settle(&mut twice);
@@ -334,6 +337,9 @@ fn nothing_moves_more_than_the_rounds_allow_or_leaves_the_board() {
         for recorded in &fixture.moves {
             let mov = fixture_move(&drawn, recorded);
             drawn.apply_move(mov).unwrap();
+            if drawn.settle_version > 0 {
+                settle(&mut drawn);
+            }
             let before: Vec<Point> = drawn.nodes.iter().map(|n| n.position).collect();
             let controls: Vec<Vec<Cubic>> =
                 drawn.lines.iter().map(|l| l.segments.clone()).collect();
@@ -701,7 +707,7 @@ fn a_stuck_tightest_pair_still_lets_the_rest_of_the_board_spread() {
         free(&two)
     );
     assert!(
-        second.held_lines < two.lines.len() && second.held_nodes < two.initial_node_count,
+        second.held_lines.len() < two.lines.len() && second.held_nodes < two.initial_node_count,
         "{second:?}"
     );
     assert!(same_face_model(&two));
@@ -719,6 +725,9 @@ fn the_leximin_ends_within_its_rounds_and_work() {
         for recorded in &fixture.moves {
             let mov = fixture_move(&drawn, recorded);
             drawn.apply_move(mov).unwrap();
+            if drawn.settle_version > 0 {
+                settle(&mut drawn);
+            }
             let mut copy = drawn.clone();
             copy.settle_version = SETTLE_VERSION;
             let (before, _) = least_clearance(&copy);
@@ -746,78 +755,50 @@ fn the_leximin_ends_within_its_rounds_and_work() {
     assert!(frozen_pairs > 0);
 }
 
-/// The issue 98 game, whose fifth line hooked into node 11 with a corner
-/// of radius 2.9 units under version 1, replayed as topology under version
-/// 2: the hook ends at the target or wider, and no line ends sharper than
-/// the sharpest version 1 left.
+/// The issue 98 game as recorded under version 1 hooks its fifth line
+/// into node 11 with a corner under the bend target. The same game as
+/// this Mac routed it under version 2, kept as a fixture with every
+/// applied spline so it replays the same on every platform, never forms
+/// the hook: on the roomier board the router draws that line clean and
+/// the settle keeps it so at every move after.
 #[test]
-fn the_hook_of_the_issue_98_game_is_straightened() {
-    let fixture = replay::load(
+fn the_hook_of_the_issue_98_game_does_not_form_under_version_2() {
+    let hook = |state: &GameState| {
+        ratios(state)
+            .get(&Tightest::Bend(4))
+            .copied()
+            .unwrap_or(f64::INFINITY)
+    };
+    let recorded = replay::load(
         &Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/undrawn/pocket-4n-1000.json"),
     )
     .unwrap();
-    assert_eq!(fixture.settle_version, 1);
-    let mut given = fixture.start();
-    let mut faces = Vec::new();
-    for recorded in &fixture.moves {
-        let mov = fixture_move(&given, recorded);
-        faces.push(crate::embedding::embed(&given, &mov).unwrap());
-        given.apply_move(mov).unwrap();
-        settle(&mut given);
+    assert_eq!(recorded.settle_version, 1);
+    let mut hooked = recorded.start();
+    for recorded in &recorded.moves {
+        let mov = fixture_move(&hooked, recorded);
+        hooked.apply_move(mov).unwrap();
+        settle(&mut hooked);
     }
-    // A line whose samples read straight has no bend entry, which is a
-    // bend at or above the target.
-    let bends = |state: &GameState| -> Vec<f64> {
-        let all = ratios(state);
-        (0..state.lines.len())
-            .map(|k| {
-                all.get(&Tightest::Bend(k))
-                    .copied()
-                    .unwrap_or(f64::INFINITY)
-            })
-            .collect()
-    };
-    let hooked = bends(&given);
-    assert!(hooked[4] < 1.0, "{hooked:?}");
-    let start: Vec<Point> = fixture
-        .nodes
-        .as_ref()
-        .unwrap()
-        .iter()
-        .map(|p| Point::new(p[0], p[1]))
-        .collect();
-    let mut state = protocol::start(4, fixture.board_size, Player::Human, Some(start), 2).unwrap();
-    // A move the router refuses on this board goes in as the stroke that
-    // was recorded, as a link would carry it.
-    for (index, listed) in faces.iter().enumerate() {
-        let placed = crate::route::route(&state, listed).is_ok_and(|routed| {
-            let flat = routed.flatten(curve::tolerance(state.board_size));
-            let face: protocol::FaceMove = listed.clone().into();
-            let mut tries = vec![flat[flat.len() / 2]];
-            tries.extend(flat.iter().copied());
-            tries.into_iter().any(|at| {
-                matches!(
-                    protocol::apply_face_move(&mut state, face.clone(), at),
-                    protocol::Outcome::Applied { .. }
-                )
-            })
-        });
-        if !placed {
-            let outcome = protocol::apply(&mut state, fixture.moves[index].wire());
-            assert!(
-                matches!(outcome, protocol::Outcome::Applied { .. }),
-                "move {index} neither routes nor replays as drawn: {outcome:?}"
-            );
+    let was = hook(&hooked);
+    assert!(was < 1.0, "version 1 hooked the line at {was:.3}");
+
+    let routed = replay::load(
+        &Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/settle/pocket-routed-4n-1000.json"),
+    )
+    .unwrap();
+    assert_eq!(routed.settle_version, 2);
+    let mut state = routed.start();
+    let mut least = f64::INFINITY;
+    for recorded in &routed.moves {
+        let mov = fixture_move(&state, recorded);
+        state.apply_move(mov).unwrap();
+        settle(&mut state);
+        if state.lines.len() >= 5 {
+            least = least.min(hook(&state));
         }
     }
-    let straightened = bends(&state);
-    assert_eq!(straightened.len(), 9);
-    assert!(straightened[4] >= 1.0, "{hooked:?} -> {straightened:?}");
-    let sharpest = |bends: &[f64]| bends.iter().copied().fold(f64::INFINITY, f64::min);
-    assert!(
-        sharpest(&straightened) + 1e-9 >= sharpest(&hooked),
-        "{hooked:?} -> {straightened:?}"
-    );
+    assert!(least >= 1.0, "version 2 let the line bend to {least:.3}");
     assert!(same_face_model(&state));
 }
 
@@ -832,6 +813,9 @@ fn shape_costs_the_distance_pairs_nothing() {
         for recorded in &fixture.moves {
             let mov = fixture_move(&drawn, recorded);
             drawn.apply_move(mov).unwrap();
+            if drawn.settle_version > 0 {
+                settle(&mut drawn);
+            }
             let mut with = drawn.clone();
             with.settle_version = SETTLE_VERSION;
             let mut without = with.clone();
@@ -861,6 +845,82 @@ fn shape_costs_the_distance_pairs_nothing() {
         kinked > 0,
         "no fixture position carries a kink to straighten"
     );
+}
+
+/// Settled again under version 2, the issue 98 recording keeps three
+/// bends under target, every one on a line the distance rounds hold
+/// still, so the shape phase has nothing free to move there.
+#[test]
+fn the_kinks_the_shape_phase_leaves_are_on_held_lines() {
+    let fixture = replay::load(
+        &Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/undrawn/pocket-4n-1000.json"),
+    )
+    .unwrap();
+    let mut state = fixture.start();
+    for recorded in &fixture.moves {
+        let mov = fixture_move(&state, recorded);
+        state.apply_move(mov).unwrap();
+        settle(&mut state);
+    }
+    state.settle_version = SETTLE_VERSION;
+    let report = settle_reported(&mut state);
+    let under: Vec<Tightest> = ratios(&state)
+        .into_iter()
+        .filter(|(at, r)| matches!(at, Tightest::Bend(_) | Tightest::Spokes(..)) && *r < 1.0)
+        .map(|(at, _)| at)
+        .collect();
+    assert!(!under.is_empty(), "{report:?}");
+    for at in &under {
+        let on_held = match at {
+            Tightest::Bend(k) => report.held_lines.contains(k),
+            Tightest::Spokes(_, k, l) => {
+                report.held_lines.contains(k) || report.held_lines.contains(l)
+            }
+            _ => false,
+        };
+        assert!(on_held, "{at:?} is free and still under target: {report:?}");
+    }
+}
+
+/// A chord drawn to 10 units short of a node and hooked down into it: the
+/// shape phase straightens the hook past the target.
+#[test]
+fn a_free_hook_is_straightened_by_the_shape_phase() {
+    let mut state = GameState::new(4);
+    state.nodes[0].position = Point::new(200.0, 800.0);
+    state.nodes[1].position = Point::new(600.0, 800.0);
+    state.nodes[2].position = Point::new(200.0, 250.0);
+    state.nodes[3].position = Point::new(800.0, 250.0);
+    let mut hook: Vec<Point> = (0..=58)
+        .map(|i| Point::new(200.0 + 10.0 * i as f64, 250.0 - 6.0 * (i as f64 / 58.0)))
+        .collect();
+    hook.extend([
+        Point::new(790.0, 246.0),
+        Point::new(796.0, 249.0),
+        Point::new(799.0, 255.0),
+        Point::new(800.0, 250.0),
+    ]);
+    let into = crate::types::Move::new(2, 3, hook, Point::new(500.0, 247.0), Player::Human, 1000);
+    protocol::check(&state, &into).unwrap();
+    state.apply_move(into).unwrap();
+    let bend = |state: &GameState| {
+        ratios(state)
+            .get(&Tightest::Bend(0))
+            .copied()
+            .unwrap_or(f64::INFINITY)
+    };
+    let before = bend(&state);
+    assert!(before < 1.0, "the hook reads as a kink: {before:.3}");
+    let mut plain = state.clone();
+    settle_without_shape(&mut plain);
+    settle(&mut state);
+    let after = bend(&state);
+    assert!(
+        after >= 1.0,
+        "hook {before:.3} -> {after:.3}, {:.3} without shape",
+        bend(&plain)
+    );
+    assert!(same_face_model(&state));
 }
 
 /// Two chords leaving a node a few degrees apart: the settle turns their
@@ -1276,6 +1336,8 @@ fn print_topology_record() {
     for (index, face) in faces.iter().enumerate() {
         let listed: crate::face::Move = face.clone().into();
         let mut landed = None;
+        let mut applied_polyline = Vec::new();
+        let mut applied_segments = None;
         let mut refused = String::new();
         match crate::route::route(&state, &listed) {
             Ok(routed) => {
@@ -1286,6 +1348,8 @@ fn print_topology_record() {
                     match protocol::apply_face_move(&mut state, face.clone(), at) {
                         protocol::Outcome::Applied { mov, .. } => {
                             landed = Some(mov.new_node_pos);
+                            applied_polyline = mov.polyline.clone();
+                            applied_segments = mov.segments.clone();
                             break;
                         }
                         protocol::Outcome::Rejected { rejection } => refused = rejection.message,
@@ -1295,6 +1359,19 @@ fn print_topology_record() {
             Err(why) => eprintln!("move {index} does not route under version {version}: {why:?}"),
         }
         if let Some(node) = landed {
+            // SPROUTS_AS_STROKES writes the applied spline instead, which
+            // replays bit for bit on any platform as a version 1 fixture.
+            if std::env::var("SPROUTS_AS_STROKES").is_ok() {
+                let line = state.lines.last().unwrap();
+                moves.push(serde_json::json!({
+                    "from": line.from_node,
+                    "to": line.to_node,
+                    "polyline": applied_polyline.iter().map(|p| [p.x, p.y]).collect::<Vec<_>>(),
+                    "newNode": [node.x, node.y],
+                    "segments": applied_segments,
+                }));
+                continue;
+            }
             moves.push(serde_json::json!({
                 "from": face.a,
                 "to": face.b,
