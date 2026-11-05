@@ -168,8 +168,7 @@ test("a share link reopens the game in review and steps through it", async ({ pa
   await expect(other.locator("#backBtn")).toBeEnabled();
   await shot(other, "history-shared-visitor");
 
-  // The visitor regenerates the board from move indices; where its nodes
-  // sit is the visitor's settle, and the game is the same move for move.
+  // Node positions are the visitor's own settle; the game matches move for move.
   expect((await boardNodes(other)).size).toBe(source.size);
   for (const index of [0, 1]) expect(await rowIds(other, index)).toEqual(await rowIds(page, index));
 
