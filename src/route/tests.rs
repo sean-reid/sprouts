@@ -289,6 +289,10 @@ static HUMAN_TALLY: std::sync::Mutex<sweep::Tally> = std::sync::Mutex::new(sweep
     bugs: std::collections::BTreeMap::new(),
 });
 
+/// Cases run and parity searches that left EXACT_STATES behind, summed
+/// over every case so far, per player.
+static PROGRESS: std::sync::Mutex<[(u32, usize); 2]> = std::sync::Mutex::new([(0, 0); 2]);
+
 /// Random games to play; an unoptimised build takes some twenty seconds
 /// over each. The games are the same on every run, so a result here is
 /// reproducible and the aggregate below is a fixed number.
@@ -302,27 +306,31 @@ const SEED: u64 = 7;
 /// measured values, and a router change that moves them is recorded here.
 const AI_TOPOLOGY_CEILING: usize = 1;
 const HUMAN_TOPOLOGY_CEILING: usize = 3;
-/// Most states a corridor search that found its path may hold over the
-/// sweeps. The fenced search peaks near 5,000; the search without fences,
-/// run again when a fenced corridor fails in the relaxation or the fit,
-/// reached 74,960 as the human.
+/// Most states a corridor search that found its path may hold in one
+/// sweep game. The fenced search peaks near 5,000; the search without
+/// fences, run again when a fenced corridor fails in the relaxation or
+/// the fit, reached 74,960 as the human.
 const CORRIDOR_STATES_CEILING: usize = 100_000;
-/// Parity searches the fences held back from their corridor over the
-/// sweeps, so the search without them ran: 1 as the AI, none as the
-/// human, as measured.
+/// Parity searches in one sweep game the fences held back from their
+/// corridor, so the search without them ran: at most one in any game.
 const FENCE_MISSES_CEILING: usize = 1;
-/// Routes the sweeps try and the listed moves they refuse as Room, as the
-/// AI and as the human: the exact counts, re-recorded with every router
-/// change, so a change in either direction shows. A corridor that hugs
-/// a node costs a later move its room, which the Room count carries.
+/// Routes the release sweeps try and the listed moves they refuse as
+/// Room, as the AI and as the human: the exact counts, asserted when the
+/// last case ends and re-recorded with every router change, so a change
+/// in either direction shows. A corridor that hugs a node costs a later
+/// move its room, which the Room count carries.
 const AI_ROUTES: usize = 927;
 const AI_ROOM: usize = 554;
 const HUMAN_ROUTES: usize = 973;
 const HUMAN_ROOM: usize = 608;
-/// Parity searches over one sweep game that left EXACT_STATES behind,
+/// Parity searches in one sweep game that left EXACT_STATES behind,
 /// whether a fence then missed or a fenced corridor was retried, so a
 /// lowered cap or an arena change that floods the fallback shows.
 const FALLBACK_CEILING: usize = 1;
+/// The same summed over the whole sweep, as the AI and as the human: 1
+/// and 1 measured.
+const AI_FALLBACKS: usize = 1;
+const HUMAN_FALLBACKS: usize = 1;
 
 /// Whether a running count sits under its ceiling.
 fn within(count: usize, ceiling: usize) -> bool {
@@ -384,9 +392,15 @@ proptest! {
         eprintln!("{total}");
         prop_assert_eq!(total.bug, 0);
         prop_assert!(within(total.topology, AI_TOPOLOGY_CEILING), "{}", total);
-        prop_assert!(within(total.tried, AI_ROUTES), "{}", total);
-        if total.tried == AI_ROUTES {
-            prop_assert_eq!(total.room, AI_ROOM, "{}", total);
+        let (cases, fallbacks) = {
+            let mut progress = PROGRESS.lock().unwrap();
+            progress[0].0 += 1;
+            progress[0].1 += s.fence_misses + s.fence_retries;
+            progress[0]
+        };
+        prop_assert!(within(fallbacks, AI_FALLBACKS), "{fallbacks} fallbacks");
+        if cases == CASES && cfg!(not(debug_assertions)) {
+            prop_assert_eq!((total.tried, total.room), (AI_ROUTES, AI_ROOM), "{}", total);
         }
     }
 
@@ -409,9 +423,15 @@ proptest! {
         eprintln!("human {total}");
         prop_assert_eq!(total.bug, 0);
         prop_assert!(within(total.topology, HUMAN_TOPOLOGY_CEILING), "{}", total);
-        prop_assert!(within(total.tried, HUMAN_ROUTES), "{}", total);
-        if total.tried == HUMAN_ROUTES {
-            prop_assert_eq!(total.room, HUMAN_ROOM, "{}", total);
+        let (cases, fallbacks) = {
+            let mut progress = PROGRESS.lock().unwrap();
+            progress[1].0 += 1;
+            progress[1].1 += s.fence_misses + s.fence_retries;
+            progress[1]
+        };
+        prop_assert!(within(fallbacks, HUMAN_FALLBACKS), "{fallbacks} fallbacks");
+        if cases == CASES && cfg!(not(debug_assertions)) {
+            prop_assert_eq!((total.tried, total.room), (HUMAN_ROUTES, HUMAN_ROOM), "{}", total);
         }
     }
 }
