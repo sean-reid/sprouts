@@ -135,16 +135,31 @@ for (const [file, budget, form, topologyMoves] of routed) {
     browser,
   }) => {
     test.setTimeout(600_000);
+    const opened = Date.now();
     const total = await openSaved(page, file);
     await expect(page.locator("#status")).toHaveText("Your turn!");
+    test.info().annotations.push({
+      type: `${name}-restore-ms`,
+      description: String(Date.now() - opened),
+    });
     const before = await strokeCells(page);
+    // The record predates the cache, so the first share indexes once and
+    // the second reads the cache or the refused marker.
     const started = Date.now();
     const { url, payload } = await share(page, `${name}-payload-chars`, SHARE_WAIT);
     test.info().annotations.push({
-      type: `${name}-share-ms`,
+      type: `${name}-first-share-ms`,
       description: String(Date.now() - started),
     });
-    expect(await requestCount(page, "indexMoves")).toBe(0);
+    expect(await requestCount(page, "indexMoves")).toBe(1);
+    const again = Date.now();
+    const second = await share(page, `${name}-payload-chars-again`, SHARE_WAIT);
+    test.info().annotations.push({
+      type: `${name}-second-share-ms`,
+      description: String(Date.now() - again),
+    });
+    expect(second.url).toBe(url);
+    expect(await requestCount(page, "indexMoves")).toBe(1);
     expect(payload).toBeLessThan(budget);
     await expect(page.locator("#status")).not.toHaveText(/replay may stop|may differ/);
     await shot(page, `${name}-source`);
@@ -177,16 +192,16 @@ for (const [file, budget, form, topologyMoves] of routed) {
     if (form === "shapes") expectSameStrokes(before, await strokeCells(other));
 
     // Sharing again from the visitor's board gives a link to the same game.
-    const again = await share(other, `${name}-visitor-payload-chars`, SHARE_WAIT);
+    const visitorShare = await share(other, `${name}-visitor-payload-chars`, SHARE_WAIT);
     const relinked = decodeRecord(
-      again.url.slice(again.url.indexOf(HASH_PREFIX) + HASH_PREFIX.length),
+      visitorShare.url.slice(visitorShare.url.indexOf(HASH_PREFIX) + HASH_PREFIX.length),
     );
     if (!relinked) throw new Error("the visitor's link does not decode");
     expect(sameGame(linked, relinked)).toBe(true);
     if (form === "indices") {
       // The regenerated board is a pure function of the move list, so the
       // visitor's link is the sharer's.
-      expect(again.payload).toBe(payload);
+      expect(visitorShare.payload).toBe(payload);
       await visitor.close();
       // The share put the link in the address bar; a reload with it lands
       // on the live game, since the saved record indexes to the link's

@@ -402,11 +402,6 @@ impl FaceModel {
         Ok(())
     }
 
-    /// The last applied move, as it was applied.
-    pub fn last_move(&self) -> Option<&Move> {
-        self.journal.last().map(|undo| &undo.mv)
-    }
-
     /// Reverts the last applied move and returns it.
     pub fn undo(&mut self) -> Option<Move> {
         let Undo {

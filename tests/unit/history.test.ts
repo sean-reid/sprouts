@@ -973,43 +973,53 @@ describe("a link that names moves by index", () => {
     expect(bytesOf(encodeRecord(history))[0]).toBe(6);
   });
 
-  it("takes each applied move's index from the engine and drops it on undo", () => {
-    const history = new History(4, 1000);
-    const move = {
-      fromNode: 0,
-      toNode: 1,
-      polyline: [at(300, 500), at(700, 500)],
-      newNodePos: at(500, 500),
-    };
-    history.push(move, undefined, 0, { index: 2, along: 100 });
-    history.push({ ...move, fromNode: 2, toNode: 3 }, undefined, 0, false);
-    expect(history.moves[0]?.indexed).toEqual({ index: 2, along: 100 });
-    expect(history.moves[1]?.indexed).toBeUndefined();
-    expect(history.moves[1]?.refused).toBe(true);
+  it("keeps the indices in the saved record and drops them from an undone move on", () => {
+    const history = twoMoves();
+    history.moves[0]!.indexed = { index: 2, along: 100 };
+    history.moves[1]!.refused = true;
     expect(history.indexed).toBe(false);
+    expect(history.cachedIndices()).toEqual([{ index: 2, along: 100 }]);
     const saved = history.record();
     expect(saved.moves[0]).toMatchObject({ index: 2, along: 100 });
     expect(saved.moves[1]).toMatchObject({ refused: true });
-    const back = History.from(saved);
-    expect(back.moves[0]?.indexed).toEqual({ index: 2, along: 100 });
-    expect(back.moves[0]?.polyline).toEqual(move.polyline);
-    expect(back.moves[0]?.fromNode).toBe(0);
-    expect(pendingIndex(back.moves[0]!)).toBeUndefined();
     expect(saved.moves.every(hasStroke)).toBe(true);
     expect(saved.moves.some(isIndexed)).toBe(false);
+    const back = History.from(saved);
+    expect(back.moves[0]?.indexed).toEqual({ index: 2, along: 100 });
+    expect(back.moves[0]?.polyline).toEqual(history.moves[0]?.polyline);
+    expect(pendingIndex(back.moves[0]!)).toBeUndefined();
     expect(back.moves[1]?.refused).toBe(true);
     history.invalidateFrom(1);
     expect(history.moves[0]?.indexed).toEqual({ index: 2, along: 100 });
     expect(history.moves[1]?.refused).toBeUndefined();
-    history.cursor = 1;
-    history.applied(0, {
-      kind: "applied",
-      snapshot: {} as never,
-      cutOff: 0,
-      mov: move,
-      indexed: { index: 2, along: 101 },
-    });
-    expect(history.moves[0]?.indexed).toEqual({ index: 2, along: 101 });
+    history.invalidateFrom(0);
+    expect(history.cachedIndices()).toEqual([]);
+  });
+
+  it("hands the engine the cached prefix and indexes from the first move without one", async () => {
+    const source = twoMoves();
+    source.moves[0]!.indexed = { index: 9, along: 9 };
+    let cached: unknown;
+    const engine: LinkEngine = {
+      classify: (plan) => Promise.resolve({ topology: plan.moves.map(() => undefined) }),
+      index: (plan) => {
+        cached = plan.cached;
+        return Promise.resolve({
+          refused: undefined,
+          moves: [
+            { index: 9, along: 9 },
+            { index: 200, along: 0 },
+          ],
+        });
+      },
+      rehearse: () => Promise.reject(new Error("not asked")),
+    };
+    const { history } = await prepareLink(source, engine);
+    expect(cached).toEqual([{ index: 9, along: 9 }]);
+    expect(history.moves.map((m) => m.indexed)).toEqual([
+      { index: 9, along: 9 },
+      { index: 200, along: 0 },
+    ]);
   });
 
   it("indexes a record from before the cache once and keeps the result", async () => {

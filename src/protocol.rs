@@ -97,11 +97,6 @@ pub enum Outcome {
         snapshot: Snapshot,
         cut_off: usize,
         mov: Move,
-        /// The move's index and place in the move list, filled in by the
-        /// shadow board while a visitor's regeneration of the game holds.
-        #[serde(skip_serializing_if = "Option::is_none")]
-        #[tsify(optional)]
-        indexed: Option<IndexedMove>,
     },
     Rejected {
         rejection: Rejection,
@@ -118,95 +113,6 @@ fn applied(state: &GameState) -> Outcome {
         snapshot: snapshot(state),
         cut_off: cut_off(&state.face),
         mov: Move::from(last.clone()),
-        indexed: None,
-    }
-}
-
-/// The board a visitor's engine would regenerate from the game's indices,
-/// kept alongside the live game and advanced as moves are applied, so
-/// each applied move learns its index and whether the regeneration still
-/// holds without replaying the game. Once a move is refused or the
-/// regenerated position differs the shadow stops following until an undo
-/// takes the live game back to where it stands.
-pub struct Shadow {
-    board: GameState,
-    refused: bool,
-}
-
-impl Shadow {
-    /// A fresh board on the live game's header, before any move.
-    pub fn new(state: &GameState) -> Self {
-        let positions = state.nodes[..state.initial_node_count]
-            .iter()
-            .map(|n| n.position)
-            .collect();
-        let mut board = GameState::with_nodes_at(positions, state.board_size, state.settle_version);
-        board.current_player = state.current_player;
-        Self {
-            board,
-            refused: false,
-        }
-    }
-
-    /// Follows the move `state` just applied, filling in `indexed` when the
-    /// regenerated board lists and draws it to the same position.
-    pub fn follow(&mut self, state: &GameState, outcome: &mut Outcome) {
-        let Outcome::Applied { indexed, .. } = outcome else {
-            return;
-        };
-        if self.refused || self.board.lines.len() + 1 != state.lines.len() {
-            self.refused = true;
-            return;
-        }
-        let Some(applied) = state.face.last_move() else {
-            self.refused = true;
-            return;
-        };
-        let Some(line) = state.move_history.last() else {
-            self.refused = true;
-            return;
-        };
-        let face = normalised(&self.board.face, applied.clone());
-        let other = flipped(&self.board.face, &face);
-        let same = |mv: &ModelMove| *mv == face || other.as_ref() == Some(mv);
-        let Some((index, listed)) = move_list(&self.board)
-            .into_iter()
-            .enumerate()
-            .find(|(_, mv)| same(mv))
-        else {
-            self.refused = true;
-            return;
-        };
-        let along = if line.player == Player::AI {
-            0
-        } else {
-            along_of(&line.segments, line.new_node_pos)
-        };
-        let spot = if along == 0 {
-            Spot::Router
-        } else {
-            Spot::Along(along)
-        };
-        if matches!(
-            apply_listed(&mut self.board, listed, spot),
-            Outcome::Rejected { .. }
-        ) || face::canonical_form(&state.face) != face::canonical_form(&self.board.face)
-        {
-            self.refused = true;
-            return;
-        }
-        *indexed = Some(IndexedMove { index, along });
-    }
-
-    /// Takes the shadow back to the live game's length after an undo; a
-    /// refusal at a move the undo removed is forgotten.
-    pub fn undo_to(&mut self, state: &GameState) {
-        while self.board.lines.len() > state.lines.len() {
-            undo(&mut self.board);
-        }
-        if self.board.lines.len() == state.lines.len() {
-            self.refused = false;
-        }
     }
 }
 
@@ -552,6 +458,11 @@ pub struct Classification {
     pub settle_version: u8,
     pub moves: Vec<Move>,
     pub known: Vec<Option<FaceMove>>,
+    /// Indices already worked out for the leading moves, which index_moves
+    /// takes as read and does not regenerate.
+    #[serde(default)]
+    #[tsify(optional)]
+    pub cached: Vec<IndexedMove>,
 }
 
 /// The face move of each classified move, or none where the router draws
@@ -859,7 +770,10 @@ fn normalised(face: &face::FaceModel, mut mv: ModelMove) -> ModelMove {
 /// replays the link; the first move that board refuses, lists as another
 /// move, or ends as another position stops the indexing and is named, so
 /// a link only goes out as indices when the visitor regenerates the
-/// recorded game.
+/// recorded game. Moves covered by `plan.cached` were regenerated when
+/// they were indexed; they are applied as recorded on both boards, so the
+/// fresh board carries the sharer's geometry for them and the replay by
+/// index starts at the first move without an index.
 pub fn index_moves(plan: Classification) -> Result<Indexed, String> {
     let mut state = start(
         plan.initial_nodes,
@@ -878,6 +792,18 @@ pub fn index_moves(plan: Classification) -> Result<Indexed, String> {
     let mut moves = Vec::with_capacity(plan.moves.len());
     for (index, mov) in plan.moves.into_iter().enumerate() {
         let mov = enter(mov, &state).map_err(|e| format!("move {index}: {}", e.message))?;
+        if let Some(cached) = plan.cached.get(index) {
+            fresh
+                .apply_move(mov.clone())
+                .map_err(|e| format!("move {index}: {}", e.message))?;
+            settle::settle(&mut fresh);
+            state
+                .apply_move(mov)
+                .map_err(|e| format!("move {index}: {}", e.message))?;
+            settle::settle(&mut state);
+            moves.push(*cached);
+            continue;
+        }
         let face = topology(&state, &mov).map_err(|e| format!("move {index}: {}", e.message))?;
         let face = normalised(&state.face, face);
         let other = flipped(&state.face, &face);
@@ -1528,6 +1454,7 @@ mod tests {
             settle_version: SETTLE_VERSION,
             moves: vec![chord.clone(), reply.clone()],
             known,
+            cached: Vec::new(),
         };
         assert_eq!(
             classify(plan(vec![None, None])),
@@ -2681,6 +2608,7 @@ mod tests {
                 settle_version: fixture.settle_version,
                 moves: fixture.moves.iter().map(|m| m.wire()).collect(),
                 known: vec![None; fixture.moves.len()],
+                cached: Vec::new(),
             };
             let indexed = match index_moves(plan) {
                 Ok(Indexed {
@@ -2755,6 +2683,7 @@ mod tests {
             settle_version: SETTLE_VERSION,
             moves: record.clone(),
             known: vec![None; 3],
+            cached: Vec::new(),
         })
         .unwrap()
         .moves;
@@ -2813,6 +2742,7 @@ mod tests {
             settle_version: fixture.settle_version,
             moves: fixture.moves.iter().map(|m| m.wire()).collect(),
             known: vec![None; fixture.moves.len()],
+            cached: Vec::new(),
         };
         let indexed = index_moves(plan).unwrap().moves;
         assert_eq!(indexed.len(), 8);
@@ -2833,93 +2763,33 @@ mod tests {
         }
     }
 
-    /// The shadow gives every applied move the index index_moves would,
-    /// and an undo lets it follow again.
+    /// Indices already cached for the leading moves are taken as read and
+    /// the rest come out as a full indexing would give them.
     #[test]
-    fn the_shadow_indexes_moves_as_they_are_applied() {
-        let mut state = GameState::new(5);
-        let mut shadow = Shadow::new(&state);
-        let mut record = Vec::new();
-        let mut shadowed = Vec::new();
-        for face in [
-            face_move(0, 0, vec![1, 2]),
-            face_move(3, 4, vec![]),
-            face_move(1, 2, vec![]),
-        ] {
-            let RouteReply::Routed { mov, .. } = route_move(&state, face) else {
-                panic!("the move did not route");
-            };
-            let mut outcome = apply(&mut state, mov);
-            shadow.follow(&state, &mut outcome);
-            let Outcome::Applied { mov, indexed, .. } = outcome else {
-                panic!("the move was refused");
-            };
-            record.push(mov);
-            shadowed.push(indexed.expect("the shadow indexed the move"));
-        }
-        let whole = index_moves(Classification {
-            initial_nodes: 5,
-            board_size: 1000,
+    fn index_moves_takes_a_cached_prefix_as_read() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("fixtures/saved/eight-moves-4n-1000.json");
+        let fixture = crate::replay::load(&path).unwrap();
+        let plan = |cached: Vec<IndexedMove>| Classification {
+            initial_nodes: fixture.initial_nodes,
+            board_size: fixture.board_size,
             first_player: Player::Human,
             nodes: None,
-            settle_version: SETTLE_VERSION,
-            moves: record,
-            known: vec![None; 3],
-        })
-        .unwrap();
+            settle_version: fixture.settle_version,
+            moves: fixture.moves.iter().map(|m| m.wire()).collect(),
+            known: vec![None; fixture.moves.len()],
+            cached,
+        };
+        let whole = index_moves(plan(Vec::new())).unwrap();
         assert_eq!(whole.refused, None);
-        assert_eq!(shadowed, whole.moves);
-
-        assert!(undo(&mut state));
-        shadow.undo_to(&state);
-        let RouteReply::Routed { mov, .. } = route_move(&state, face_move(1, 2, vec![])) else {
-            panic!("the move did not route again");
-        };
-        let mut outcome = apply(&mut state, mov);
-        shadow.follow(&state, &mut outcome);
-        let Outcome::Applied { indexed, .. } = outcome else {
-            panic!("the move was refused");
-        };
-        assert_eq!(indexed, Some(shadowed[2]));
-    }
-
-    /// Once the regenerated board refuses a move the shadow stops indexing,
-    /// and follows again after an undo past the refusal.
-    #[test]
-    fn the_shadow_stops_at_a_refused_move_and_resumes_after_undo() {
-        let mut state = GameState::new(4);
-        let mut shadow = Shadow::new(&state);
-        let RouteReply::Routed { mov, .. } = route_move(&state, face_move(0, 1, vec![])) else {
-            panic!("the chord did not route");
-        };
-        let mut outcome = apply(&mut state, mov);
-        shadow.follow(&state, &mut outcome);
-        let Outcome::Applied { indexed, .. } = outcome else {
-            panic!("the chord was refused");
-        };
-        assert!(indexed.is_some());
-        shadow.refused = true;
-        let RouteReply::Routed { mov, .. } = route_move(&state, face_move(2, 3, vec![])) else {
-            panic!("the second chord did not route");
-        };
-        let mut outcome = apply(&mut state, mov);
-        shadow.follow(&state, &mut outcome);
-        let Outcome::Applied { indexed, .. } = outcome else {
-            panic!("the second chord was refused");
-        };
-        assert_eq!(indexed, None);
-        assert!(undo(&mut state));
-        shadow.undo_to(&state);
-        assert!(!shadow.refused);
-        let RouteReply::Routed { mov, .. } = route_move(&state, face_move(2, 3, vec![])) else {
-            panic!("the chord did not route again");
-        };
-        let mut outcome = apply(&mut state, mov);
-        shadow.follow(&state, &mut outcome);
-        let Outcome::Applied { indexed, .. } = outcome else {
-            panic!("the chord was refused again");
-        };
-        assert!(indexed.is_some());
+        let partial = index_moves(plan(whole.moves[..5].to_vec())).unwrap();
+        assert_eq!(partial, whole);
+        // The cache is trusted, so a wrong prefix comes back as given.
+        let mut wrong = whole.moves[..3].to_vec();
+        wrong[1].index += 1;
+        let trusted = index_moves(plan(wrong.clone())).unwrap();
+        assert_eq!(trusted.moves[..3], wrong[..]);
+        assert_eq!(trusted.moves[3..], whole.moves[3..]);
     }
 
     /// A record from a newer settle would replay through this one and show

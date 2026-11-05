@@ -23,7 +23,7 @@ use protocol::RouteHashPlan;
 use protocol::{
     AiReply, AutoPlacement, AutoPlacementQuery, Classification, Classified, Curve, FaceMove,
     FitQuery, Indexed, IndexedMove, Layout, Move, MovesFrom, Outcome, Placement, PlacementQuery,
-    Rehearsal, Rehearsed, RouteReply, Shadow, Snapshot,
+    Rehearsal, Rehearsed, RouteReply, Snapshot,
 };
 use tsify::{Ts, Tsify};
 use types::{GameState, Player, Point};
@@ -32,7 +32,6 @@ use wasm_bindgen::prelude::*;
 #[wasm_bindgen]
 pub struct SproutsGame {
     state: GameState,
-    shadow: Shadow,
 }
 
 /// The settled board after each move of the seeded random game of `nodes`
@@ -66,8 +65,7 @@ impl SproutsGame {
             settle_version,
         )
         .map_err(|e| JsError::new(&e))?;
-        let shadow = Shadow::new(&state);
-        Ok(Self { state, shadow })
+        Ok(Self { state })
     }
 
     pub fn snapshot(&self) -> Result<Ts<Snapshot>, JsError> {
@@ -76,9 +74,7 @@ impl SproutsGame {
 
     #[wasm_bindgen(js_name = applyMove)]
     pub fn apply_move(&mut self, mov: Ts<Move>) -> Result<Ts<Outcome>, JsError> {
-        let mut outcome = protocol::apply(&mut self.state, mov.to_rust()?);
-        self.shadow.follow(&self.state, &mut outcome);
-        Ok(outcome.into_ts()?)
+        Ok(protocol::apply(&mut self.state, mov.to_rust()?).into_ts()?)
     }
 
     #[wasm_bindgen(js_name = applyFaceMove)]
@@ -87,9 +83,7 @@ impl SproutsGame {
         mov: Ts<FaceMove>,
         at: Ts<Point>,
     ) -> Result<Ts<Outcome>, JsError> {
-        let mut outcome = protocol::apply_face_move(&mut self.state, mov.to_rust()?, at.to_rust()?);
-        self.shadow.follow(&self.state, &mut outcome);
-        Ok(outcome.into_ts()?)
+        Ok(protocol::apply_face_move(&mut self.state, mov.to_rust()?, at.to_rust()?).into_ts()?)
     }
 
     /// The first move of a link a fresh engine refuses, if any, and the
@@ -117,9 +111,7 @@ impl SproutsGame {
 
     #[wasm_bindgen(js_name = applyIndexedMove)]
     pub fn apply_indexed_move(&mut self, mov: Ts<IndexedMove>) -> Result<Ts<Outcome>, JsError> {
-        let mut outcome = protocol::apply_indexed_move(&mut self.state, mov.to_rust()?);
-        self.shadow.follow(&self.state, &mut outcome);
-        Ok(outcome.into_ts()?)
+        Ok(protocol::apply_indexed_move(&mut self.state, mov.to_rust()?).into_ts()?)
     }
 
     /// FNV-1a over the board's node positions and line flattenings, as
@@ -147,9 +139,7 @@ impl SproutsGame {
     }
 
     pub fn undo(&mut self) -> bool {
-        let undone = protocol::undo(&mut self.state);
-        self.shadow.undo_to(&self.state);
-        undone
+        protocol::undo(&mut self.state)
     }
 
     #[wasm_bindgen(js_name = aiMove)]

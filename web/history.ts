@@ -191,22 +191,19 @@ export class History {
   }
 
   // A move made from the cursor discards whatever was ahead of it; the
-  // AI's move comes with the face move it was drawn from, and a move the
-  // engine applied with the index its shadow board gave it, or `false`
-  // when that board refused it.
-  push(move: Move, topology?: FaceMove, cutOff?: number, indexed?: IndexedMove | false): void {
+  // AI's move comes with the face move it was drawn from.
+  push(move: Move, topology?: FaceMove, cutOff?: number): void {
     this.moves.length = this.cursor;
     const kept = cloneMove(move);
     if (cutOff !== undefined) kept.cutOff = cutOff;
     if (topology) kept.topology = topology;
-    setIndexed(kept, indexed);
     this.moves.push(kept);
     this.cursor = this.moves.length;
   }
 
   // Forgets the indices of move number index + 1 and every move after it:
-  // an undo may change what comes before them, and the engine reports
-  // them again as the moves are applied.
+  // an undo may change what comes before them, and the next share indexes
+  // again from here.
   invalidateFrom(index: number): void {
     for (const move of this.moves.slice(index)) {
       delete move.indexed;
@@ -217,6 +214,17 @@ export class History {
   // Whether every move carries the index the link would send.
   get indexed(): boolean {
     return this.moves.length > 0 && this.moves.every((move) => move.indexed);
+  }
+
+  // The indices of the leading moves that have them, which a share hands
+  // the engine so it indexes from the first move without one.
+  cachedIndices(): IndexedMove[] {
+    const cached: IndexedMove[] = [];
+    for (const move of this.moves) {
+      if (!move.indexed) break;
+      cached.push(move.indexed);
+    }
+    return cached;
   }
 
   // A copy to work on while the game goes on.
@@ -272,9 +280,7 @@ export class History {
     const { segments } = outcome.mov;
     if (segments) this.settle(index, { ...outcome.mov, segments });
     const move = this.moves[index];
-    if (!move) return;
-    move.cutOff = outcome.cutOff;
-    setIndexed(move, outcome.indexed ?? false);
+    if (move) move.cutOff = outcome.cutOff;
   }
 
   // The id of the node move number index + 1 created.
@@ -324,11 +330,9 @@ export class History {
   }
 }
 
-// Records what the engine's shadow board said about an applied move: its
-// index, or `false` when the regenerated board refused it; nothing is
-// recorded when the engine was not asked.
-function setIndexed(move: RecordedMove, indexed: IndexedMove | false | undefined): void {
-  if (indexed === undefined) return;
+// Records what the engine's indexing said about a move: its index, or
+// `false` when the regenerated board refused it.
+function setIndexed(move: RecordedMove, indexed: IndexedMove | false): void {
   if (indexed) {
     move.indexed = indexed;
     delete move.refused;
@@ -927,13 +931,12 @@ export interface LinkEngine {
 }
 
 // The game as the link will carry it, worked out on a copy. An index
-// link comes first: a game whose every move carries the index the
-// engine gave it as it was applied goes out at once, a game with a move
-// the regenerated board refused goes as shapes at once, and a record
-// from before the indices asks the engine once, which names every move
-// by index while replaying them on a fresh board, so the visitor's
-// board is that board rather than this one; only that call's failure is
-// caught. For shapes the
+// link comes first: a game whose every move carries an index from an
+// earlier share goes out at once, a game with a move the regenerated
+// board refused goes as shapes at once, and otherwise the engine indexes
+// the moves past the cached ones while replaying them on a fresh board,
+// so the visitor's board is that board rather than this one; only that
+// call's failure is caught. For shapes the
 // engine says which drawn moves the router redraws, then the link
 // is replayed as decoded and any topology move the replay refuses,
 // or lands its node more than DRIFT_TOLERANCE from the recorded
@@ -960,6 +963,7 @@ export async function prepareLink(
   if (history.indexed) return { history };
   const plan = classification(history);
   if (plan && !history.moves.some((move) => move.refused)) {
+    plan.cached = history.cachedIndices();
     const indexed = await engine.index(plan).catch(() => undefined);
     if (indexed) {
       history.moves.forEach((move, i) => setIndexed(move, indexed.moves[i] ?? false));
@@ -1050,6 +1054,7 @@ export async function sameIndexedGame(
   if (cached.indexed) return same(cached.moves.map((move) => move.indexed!));
   const plan = classification(cached);
   if (!plan) return false;
+  plan.cached = cached.cachedIndices();
   const indexed = await index(plan).catch(() => undefined);
   return indexed !== undefined && indexed.refused === undefined && same(indexed.moves);
 }
