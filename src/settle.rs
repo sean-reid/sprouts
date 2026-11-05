@@ -1541,11 +1541,17 @@ fn relax(
         report.at = at;
     }
     report.frozen = frozen;
+    // A line counts as changed when its points moved or its made node did;
+    // the start step can leave the points on their cells and the node one
+    // cell along the curve, and the two must be written together.
     let changed: Vec<bool> = layout
         .lines
         .iter()
         .zip(&origin.lines)
-        .map(|(now, was)| now.pts != was.pts)
+        .enumerate()
+        .map(|(k, (now, was))| {
+            now.pts != was.pts || layout.nodes[layout.mid(k)] != origin.nodes[layout.mid(k)]
+        })
         .collect();
     for (k, chain) in layout.lines.iter().enumerate() {
         if !changed[k] {
@@ -1558,9 +1564,6 @@ fn relax(
         line.polyline = line.flat.clone();
         line.new_node_pos = layout.nodes[layout.mid(k)];
     }
-    // Every node the layout moved is written, a made node included even
-    // when its line ends where it began: the start step can leave the
-    // line's points on their cells and its node one cell along the curve.
     for node in &mut state.nodes {
         let at = layout.nodes[node.id];
         if at != node.position {

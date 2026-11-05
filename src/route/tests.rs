@@ -942,10 +942,8 @@ fn shared_game_at(pick: usize) -> Result<SharedGame, String> {
 fn a_shared_game_replays_to_the_same_board() {
     // Pick 1 is out: the recorder cannot apply its move 3, a chord the
     // router draws within a unit of its own spoke, which the unit-grid
-    // snap on entry turns into a crossing. Pick 13 stands in for pick 9,
-    // whose seventh stroke landed a node on another under settle version
-    // 2 on an earlier router.
-    for pick in [0, 2, 3, 4, 10, 11, 12, 13, 17, 36] {
+    // snap on entry turns into a crossing.
+    for pick in [0, 2, 3, 4, 9, 10, 11, 12, 17, 36] {
         let game = shared_game_at(pick).unwrap();
         let drift = rehearse_shared_game(&game);
         assert_eq!(

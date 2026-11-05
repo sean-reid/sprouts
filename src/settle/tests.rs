@@ -757,12 +757,14 @@ fn the_leximin_ends_within_its_rounds_and_work() {
 
 /// The issue 98 game as recorded under version 1 hooks its fifth line
 /// into node 11 with a corner under the bend target. The same game as
-/// this Mac routed it under version 2, kept as a fixture with every
-/// applied spline so it replays the same on every platform, never forms
-/// the hook: on the roomier board the router draws that line clean and
-/// the settle keeps it so at every move after.
+/// this Mac routed it under version 2 is kept as a fixture with every
+/// applied spline, so what is checked here is the settle on pinned
+/// splines, not the router: replayed, the line goes in clean and the
+/// settle keeps it at the target or wider at every move after, and the
+/// board hashes as recorded on macOS.
 #[test]
 fn the_hook_of_the_issue_98_game_does_not_form_under_version_2() {
+    const ROUTED_HASH: u64 = 0xbb67fdbefd0f4c54;
     let hook = |state: &GameState| {
         ratios(state)
             .get(&Tightest::Bend(4))
@@ -799,7 +801,44 @@ fn the_hook_of_the_issue_98_game_does_not_form_under_version_2() {
         }
     }
     assert!(least >= 1.0, "version 2 let the line bend to {least:.3}");
+    assert_eq!(hash(&state), ROUTED_HASH, "{:#x}", hash(&state));
     assert!(same_face_model(&state));
+}
+
+/// After every settle each line's made node sits where the line says it
+/// does, over every fixture position and the version 2 seeded game.
+#[test]
+fn a_made_node_and_its_line_agree_after_every_settle() {
+    let agree = |state: &GameState| {
+        for line in &state.lines {
+            let node = state.find_node(state.initial_node_count + line.id).unwrap();
+            assert_eq!(
+                node.position, line.new_node_pos,
+                "line {} and node {} disagree",
+                line.id, node.id
+            );
+        }
+    };
+    for fixture in all_fixtures() {
+        let mut drawn = fixture.start();
+        for recorded in &fixture.moves {
+            let mov = fixture_move(&drawn, recorded);
+            drawn.apply_move(mov).unwrap();
+            if drawn.settle_version > 0 {
+                settle(&mut drawn);
+                agree(&drawn);
+            }
+            let mut copy = drawn.clone();
+            copy.settle_version = SETTLE_VERSION;
+            settle(&mut copy);
+            agree(&copy);
+            settle(&mut copy);
+            agree(&copy);
+        }
+    }
+    let (state, moves) = play_random(9, &seeded_picks(9, 40), SETTLE_VERSION);
+    assert!(moves.len() >= 6);
+    agree(&state);
 }
 
 /// The shape phase runs after the distance pairs are done, so a board
