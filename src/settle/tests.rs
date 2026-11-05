@@ -1,6 +1,6 @@
 use super::golden::{
     bits, hash, play_random, seeded_hashes, seeded_picks, stage_report, VERSION_1_GOLDEN,
-    VERSION_1_SEEDED_GAME,
+    VERSION_1_SEEDED_GAME, VERSION_2_GOLDEN, VERSION_2_SEEDED_GAME,
 };
 use super::*;
 use crate::protocol::{self, SETTLE_VERSION};
@@ -89,7 +89,7 @@ fn replays_to_the_same_model(state: &GameState) -> bool {
 }
 
 fn same_face_model(state: &GameState) -> bool {
-    let targets = Targets::for_board(state.board_size);
+    let targets = targets_of(state);
     let layout = Layout::from_state(state, &targets).unwrap();
     layout.holds(state, &journal(state))
 }
@@ -226,8 +226,8 @@ proptest! {
         nodes in 3usize..=9,
         picks in proptest::collection::vec((0usize..64, 0usize..64, 0.0..1.0f64, 0.0..1.0f64), 40),
     ) {
-        let (first, played) = play_random(nodes, &picks);
-        let (second, again) = play_random(nodes, &picks);
+        let (first, played) = play_random(nodes, &picks, SETTLE_VERSION);
+        let (second, again) = play_random(nodes, &picks, SETTLE_VERSION);
         prop_assert!(!played.is_empty());
         prop_assert_eq!(played.len(), again.len());
         prop_assert_eq!(bits(&first), bits(&second));
@@ -393,7 +393,7 @@ fn nothing_moves_more_than_the_rounds_allow_or_leaves_the_board() {
 /// with the moves as sent.
 fn settled_games() -> Vec<(GameState, Vec<protocol::Move>)> {
     (3..=9)
-        .map(|nodes| play_random(nodes, &seeded_picks(nodes as u64, 40)))
+        .map(|nodes| play_random(nodes, &seeded_picks(nodes as u64, 40), SETTLE_VERSION))
         .filter(|(_, moves)| !moves.is_empty())
         .collect()
 }
@@ -440,18 +440,31 @@ fn undo_restores_the_board_the_next_move_was_drawn_on() {
     }
 }
 
-#[test]
-fn version_1_settles_the_seeded_game_to_the_golden_board() {
-    let (state, moves) = play_random(7, &seeded_picks(7, 40));
+/// The seeded 7-node game settles to the board recorded for `version`.
+fn settles_the_seeded_game_to_the_golden_board(version: u8, golden: u64) {
+    let (state, moves) = play_random(7, &seeded_picks(7, 40), version);
     assert!(moves.len() >= 6, "{} moves", moves.len());
-    assert_eq!(state.settle_version, SETTLE_VERSION);
+    assert_eq!(state.settle_version, version);
     assert_eq!(
         hash(&state),
-        VERSION_1_GOLDEN,
-        "{:#x}; stages of move 1: {}",
+        golden,
+        "version {version}: {:#x}; stages of move 1: {}",
         hash(&state),
-        stage_report(7, 1)
+        stage_report(7, 1, version)
     );
+}
+
+/// Version 1 stays as recorded, since records and links at that version
+/// replay through it.
+#[test]
+fn version_1_settles_the_seeded_game_to_the_golden_board() {
+    settles_the_seeded_game_to_the_golden_board(1, VERSION_1_GOLDEN);
+}
+
+#[test]
+fn version_2_settles_the_seeded_game_to_the_golden_board() {
+    assert_eq!(SETTLE_VERSION, 2);
+    settles_the_seeded_game_to_the_golden_board(2, VERSION_2_GOLDEN);
 }
 
 /// A link rounds every point to a whole unit. The moves a settled game
@@ -494,21 +507,29 @@ fn moves_rounded_to_the_link_quantum_replay_a_settled_game() {
     }
 }
 
-#[test]
-fn version_1_settles_the_seeded_game_the_same_on_every_platform() {
-    let hashes = seeded_hashes(9);
+/// The seeded 9-node game settles move for move to the boards recorded
+/// for `version`.
+fn settles_the_seeded_game_the_same_on_every_platform(version: u8, want: &[u64]) {
+    let hashes = seeded_hashes(9, version);
     let printed: Vec<String> = hashes.iter().map(|h| format!("{h:#x}")).collect();
-    let first = hashes
-        .iter()
-        .zip(VERSION_1_SEEDED_GAME)
-        .position(|(got, want)| got != want);
+    let first = hashes.iter().zip(want).position(|(got, want)| got != want);
     assert_eq!(
         hashes.as_slice(),
-        VERSION_1_SEEDED_GAME,
-        "first differing move {first:?}; got {}; stages of that move: {}",
+        want,
+        "version {version}: first differing move {first:?}; got {}; stages of that move: {}",
         printed.join(" "),
-        stage_report(9, first.unwrap_or(0))
+        stage_report(9, first.unwrap_or(0), version)
     );
+}
+
+#[test]
+fn version_1_settles_the_seeded_game_the_same_on_every_platform() {
+    settles_the_seeded_game_the_same_on_every_platform(1, VERSION_1_SEEDED_GAME);
+}
+
+#[test]
+fn version_2_settles_the_seeded_game_the_same_on_every_platform() {
+    settles_the_seeded_game_the_same_on_every_platform(2, VERSION_2_SEEDED_GAME);
 }
 
 /// Forty points round `center` at `radius`, starting at `start`.
@@ -553,7 +574,7 @@ fn the_round_guard_refuses_a_changed_face_and_a_new_crossing() {
     );
     protocol::check(&state, &mov).unwrap();
     state.apply_move(mov).unwrap();
-    let targets = Targets::for_board(state.board_size);
+    let targets = targets_of(&state);
     let tolerance = curve::tolerance(state.board_size);
     let original = journal(&state);
     let layout = Layout::from_state(&state, &targets).unwrap();
@@ -616,4 +637,342 @@ fn a_version_0_fixture_replays_to_the_recorded_board() {
         fnv.feed((f64::from_bits(b) * 1e6).round() / 1e6);
     }
     assert_eq!(fnv.0, HUMAN_4N_1000, "{}", fnv.hex());
+}
+
+/// The settle under `version` of the position after `count` moves of a
+/// recorded game, with its report.
+fn settled_at(fixture: &replay::Fixture, count: usize, version: u8) -> (GameState, Report) {
+    let mut state = fixture.start();
+    for recorded in fixture.moves.iter().take(count) {
+        let mov = fixture_move(&state, recorded);
+        state.apply_move(mov).unwrap();
+    }
+    state.settle_version = version;
+    let report = settle_reported(&mut state);
+    (state, report)
+}
+
+fn median(mut values: Vec<f64>) -> f64 {
+    values.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    values[values.len() / 2]
+}
+
+/// Move 6 of the saved 9-node game leaves a line squeezed past three nodes
+/// that no round can free. Version 1 stops there; version 2 freezes that
+/// pair, holds what takes part in it, and goes on spreading the rest, so
+/// the pairs end roomier on the whole, the lines farther apart, with the
+/// least no lower than drawn.
+#[test]
+fn a_stuck_tightest_pair_still_lets_the_rest_of_the_board_spread() {
+    let fixture = replay::load(
+        &Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/saved/ten-moves-9n-1000.json"),
+    )
+    .unwrap();
+    let (drawn, _) = least_clearance(&settled_at(&fixture, 6, 0).0);
+    let (one, first) = settled_at(&fixture, 6, 1);
+    let (two, second) = settled_at(&fixture, 6, 2);
+    assert_eq!(first.stop, Stop::Stuck);
+    assert!(second.frozen >= 1, "{second:?}");
+    assert!(
+        least_clearance(&two).0 + 1e-9 >= drawn,
+        "{drawn} -> {second:?}"
+    );
+    let room = |state: &GameState| {
+        let all = ratios(state);
+        all.values().map(|r| r.ln()).sum::<f64>() / all.len() as f64
+    };
+    assert!(
+        room(&two) > room(&one),
+        "{:.3} -> {:.3}",
+        room(&one),
+        room(&two)
+    );
+    assert!(same_face_model(&two));
+    assert!(replays_to_the_same_model(&two));
+}
+
+/// Every settle ends within its round and work caps, one round's tests
+/// over the cap at most, and a frozen pair is never pushed below the
+/// ratio it was frozen at.
+#[test]
+fn the_leximin_ends_within_its_rounds_and_work() {
+    for fixture in all_fixtures() {
+        let mut drawn = fixture.start();
+        for recorded in &fixture.moves {
+            let mov = fixture_move(&drawn, recorded);
+            drawn.apply_move(mov).unwrap();
+            let mut copy = drawn.clone();
+            copy.settle_version = SETTLE_VERSION;
+            let (before, _) = least_clearance(&copy);
+            let report = settle_reported(&mut copy);
+            let (after, at) = least_clearance(&copy);
+            assert!(report.rounds <= ROUNDS_V2, "{report:?}");
+            assert!(report.work <= WORK_CAP + 400_000, "{report:?}");
+            assert!(
+                after + 1e-9 >= before.min(report.least),
+                "{} nodes, {} lines: {before} -> {after} at {at:?} {report:?}",
+                fixture.initial_nodes,
+                copy.lines.len()
+            );
+        }
+    }
+}
+
+fn class(at: Tightest) -> &'static str {
+    match at {
+        Tightest::Nothing => "none",
+        Tightest::Nodes(..) => "nodes",
+        Tightest::LineNode(..) => "line-node",
+        Tightest::Lines(..) => "lines",
+        Tightest::Hairpin(_) => "hairpin",
+        Tightest::NodeEdge(_) => "node-edge",
+        Tightest::LineEdge(_) => "line-edge",
+        Tightest::Bend(_) => "bend",
+        Tightest::Spokes(..) => "spokes",
+    }
+}
+
+const CLASSES: [&str; 8] = [
+    "nodes",
+    "line-node",
+    "lines",
+    "hairpin",
+    "node-edge",
+    "line-edge",
+    "bend",
+    "spokes",
+];
+
+/// The 10th percentile and the median of `values`, or dashes.
+fn spread(values: &mut [f64]) -> String {
+    if values.is_empty() {
+        return "   -  /  -  ".to_string();
+    }
+    values.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let at = |q: f64| values[((values.len() - 1) as f64 * q).round() as usize];
+    format!("{:5.2}/{:5.2}", at(0.1), at(0.5))
+}
+
+/// One line per settled position: the least ratio and its pair, the
+/// rounds and share of the work cap the settle spent, why it ended, and
+/// per pair class the p10 and median ratio after it.
+fn describe(index: usize, report: &Report, state: &GameState) -> String {
+    let ratios = ratios(state);
+    let mut by_class: Vec<Vec<f64>> = vec![Vec::new(); CLASSES.len()];
+    for (at, ratio) in &ratios {
+        let slot = CLASSES.iter().position(|c| *c == class(*at)).unwrap();
+        by_class[slot].push(*ratio);
+    }
+    let spreads: Vec<String> = by_class.iter_mut().map(|v| spread(v)).collect();
+    format!(
+        "m{index:>2} least {:5.2} {:<9} rounds {:>2} work {:>3.0}% {:<6} | {}",
+        report.least,
+        class(report.at),
+        report.rounds,
+        100.0 * report.work as f64 / WORK_CAP as f64,
+        format!("{:?}", report.stop),
+        spreads.join(" | ")
+    )
+}
+
+fn header() -> String {
+    format!(
+        "{:<54}| {}",
+        "position",
+        CLASSES
+            .iter()
+            .map(|c| format!("{c:^11}"))
+            .collect::<Vec<_>>()
+            .join(" | ")
+    )
+}
+
+/// Replays `moves` as recorded under the current settle, settling after
+/// each, and prints the table.
+fn report_game(name: &str, fixture: &replay::Fixture) {
+    println!(
+        "\n{name}: {} nodes, {} moves",
+        fixture.initial_nodes,
+        fixture.moves.len()
+    );
+    println!("{}", header());
+    let mut state = fixture.start();
+    let mut stops: BTreeMap<String, usize> = BTreeMap::new();
+    let mut least_over_game = f64::INFINITY;
+    for (index, recorded) in fixture.moves.iter().enumerate() {
+        let mov = fixture_move(&state, recorded);
+        state.apply_move(mov).unwrap();
+        let report = if state.settle_version == 0 {
+            let mut copy = state.clone();
+            copy.settle_version = SETTLE_VERSION;
+            let report = settle_reported(&mut copy);
+            println!("{}", describe(index, &report, &copy));
+            report
+        } else {
+            let report = settle_reported(&mut state);
+            println!("{}", describe(index, &report, &state));
+            report
+        };
+        *stops.entry(format!("{:?}", report.stop)).or_default() += 1;
+        least_over_game = least_over_game.min(report.least);
+    }
+    println!("stops {stops:?}; least ratio over the game {least_over_game:.2}");
+}
+
+/// Where the room goes: seeded self-play at 6 and 12 nodes played under
+/// the current settle, and the recorded games settled position by
+/// position. Run with --ignored --nocapture in release.
+#[test]
+#[ignore]
+fn probe_settle_room() {
+    for nodes in [6usize, 12] {
+        let (moves, stop) = replay::self_play(nodes, 1000, true);
+        let fixture = replay::Fixture {
+            version: replay::FIXTURE_VERSION,
+            initial_nodes: nodes,
+            board_size: 1000,
+            settle_version: SETTLE_VERSION,
+            nodes: Some(
+                crate::types::opening_layout(nodes, 1000)
+                    .iter()
+                    .map(|p| [p.x, p.y])
+                    .collect(),
+            ),
+            moves,
+        };
+        report_game(
+            &format!("self-play {nodes} nodes, stopped {stop:?}"),
+            &fixture,
+        );
+    }
+    for path in [
+        "settle/selfplay-24n-1000",
+        "saved/eight-moves-4n-1000",
+        "saved/ten-moves-9n-1000",
+        "saved/finished-4n-500",
+    ] {
+        let fixture = replay::load(
+            &Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("fixtures/{path}.json")),
+        )
+        .unwrap();
+        report_game(&format!("fixture {path}"), &fixture);
+    }
+}
+
+/// Settle time per position of the 24-node fixture under the current
+/// version, and the cost of one survey, one crossing count and one model
+/// check at its last position. Run with --ignored --nocapture in release.
+#[test]
+#[ignore]
+fn probe_settle_time() {
+    let fixture = replay::load(
+        &Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/settle/selfplay-24n-1000.json"),
+    )
+    .unwrap();
+    let times = replay::settle_times(&fixture);
+    let peak = times.iter().copied().fold(0.0, f64::max);
+    let printed: Vec<String> = times.iter().map(|t| format!("{t:.0}")).collect();
+    println!("settle ms per position: {}", printed.join(" "));
+    println!("peak {peak:.1} ms");
+    let mut state = fixture.start();
+    for recorded in &fixture.moves {
+        let mov = fixture_move(&state, recorded);
+        state.apply_move(mov).unwrap();
+    }
+    state.settle_version = SETTLE_VERSION;
+    let targets = targets_of(&state);
+    let layout = Layout::from_state(&state, &targets).unwrap();
+    let original = journal(&state);
+    let tolerance = curve::tolerance(state.board_size);
+    let t = std::time::Instant::now();
+    let survey = layout.survey(&targets, 1.5, None, None, &[]);
+    println!(
+        "survey at level 1.5: {:.2} ms, {} tests",
+        t.elapsed().as_secs_f64() * 1000.0,
+        survey.tests
+    );
+    let t = std::time::Instant::now();
+    let crossed = layout.crossings(tolerance);
+    println!(
+        "crossings: {:.2} ms ({crossed})",
+        t.elapsed().as_secs_f64() * 1000.0
+    );
+    let t = std::time::Instant::now();
+    let holds = layout.holds(&state, &original);
+    println!(
+        "holds: {:.2} ms ({holds})",
+        t.elapsed().as_secs_f64() * 1000.0
+    );
+    let t = std::time::Instant::now();
+    let mut next = layout.clone();
+    let push = Push::empty(&layout);
+    let held = Held::none(&layout);
+    next.apply(&push, 1.0, &held);
+    next.rebuild(&targets, &layout, &held);
+    next.quantise(grid(state.board_size), &targets);
+    println!(
+        "clone, apply, rebuild, quantise: {:.2} ms",
+        t.elapsed().as_secs_f64() * 1000.0
+    );
+}
+
+/// The saved 9-node game as a record of face moves with the node each
+/// move lands on when the engine routes and settles it under the settle
+/// version SPROUTS_SETTLE names; printed as the JSON the page restores
+/// from localStorage.
+#[test]
+#[ignore]
+fn print_topology_record() {
+    let version: u8 = std::env::var("SPROUTS_SETTLE")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(SETTLE_VERSION);
+    let fixture = replay::load(
+        &Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/saved/ten-moves-9n-1000.json"),
+    )
+    .unwrap();
+    let mut drawn = fixture.start();
+    let mut state = GameState::with_nodes_at(
+        drawn.nodes.iter().map(|n| n.position).collect(),
+        fixture.board_size,
+        version,
+    );
+    let mut moves = Vec::new();
+    for recorded in &fixture.moves {
+        let mov = fixture_move(&drawn, recorded);
+        let listed = crate::embedding::embed(&drawn, &mov).unwrap();
+        let face: protocol::FaceMove = listed.clone().into();
+        drawn.apply_move(mov.clone()).unwrap();
+        let routed = crate::route::route(&state, &listed).expect("the move routes");
+        let flat = routed.flatten(curve::tolerance(state.board_size));
+        let mut tries = vec![mov.new_node_pos, flat[flat.len() / 2]];
+        tries.extend(flat.iter().copied());
+        let mut landed = None;
+        for at in tries {
+            if let protocol::Outcome::Applied { mov, .. } =
+                protocol::apply_face_move(&mut state, face.clone(), at)
+            {
+                landed = Some(mov.new_node_pos);
+                break;
+            }
+        }
+        let node = landed.expect("some point on the routed curve takes the node");
+        moves.push(serde_json::json!({
+            "from": face.a,
+            "to": face.b,
+            "face": face,
+            "node": [node.x, node.y],
+        }));
+    }
+    let record = serde_json::json!({
+        "version": 1,
+        "initialNodes": fixture.initial_nodes,
+        "boardSize": fixture.board_size,
+        "nodes": fixture.nodes,
+        "firstPlayer": "human",
+        "cursor": moves.len(),
+        "settleVersion": version,
+        "moves": moves,
+    });
+    println!("RECORD {record}");
 }

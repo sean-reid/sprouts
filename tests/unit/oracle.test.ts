@@ -13,13 +13,15 @@ function recorded(name: string): string[] {
 }
 
 describe("the wasm build settles the seeded games as macOS did", () => {
-  it("matches the recorded boards move for move", async () => {
-    await init({ module_or_path: readFileSync("pkg/sprouts_bg.wasm") });
-    const nine = goldenHashes(9);
-    const want = recorded("VERSION_1_SEEDED_GAME");
-    const first = nine.findIndex((h, i) => h !== want[i]);
-    expect(nine, `first differing move ${first}`).toEqual(want);
-    const seven = goldenHashes(7);
-    expect(seven.at(-1)).toBe(recorded("VERSION_1_GOLDEN")[0]);
-  });
+  for (const version of [1, 2]) {
+    it(`matches the recorded version ${version} boards move for move`, async () => {
+      await init({ module_or_path: readFileSync("pkg/sprouts_bg.wasm") });
+      const nine = goldenHashes(9, version);
+      const want = recorded(`VERSION_${version}_SEEDED_GAME`);
+      const first = nine.findIndex((h, i) => h !== want[i]);
+      expect(nine, `first differing move ${first}`).toEqual(want);
+      const seven = goldenHashes(7, version);
+      expect(seven.at(-1)).toBe(recorded(`VERSION_${version}_GOLDEN`)[0]);
+    });
+  }
 });

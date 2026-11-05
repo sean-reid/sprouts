@@ -1,5 +1,5 @@
-//! A seeded random game at the current settle version, hashed after every
-//! move, so one number says whether a build settles as macOS did when the
+//! A seeded random game at each settle version, hashed after every move,
+//! so one number says whether a build settles as macOS did when the
 //! values below were recorded. Only sums, products, divisions and square
 //! roots go into the strokes, which every platform rounds the same.
 
@@ -10,16 +10,22 @@ use crate::protocol::{self, Outcome};
 use crate::settle;
 use crate::types::{GameState, Player, Point};
 
-/// The settled board of the seeded 7-node game. A change means version 1
-/// settles differently: bump SETTLE_VERSION in src/protocol.rs and record
-/// the new value.
+/// The settled board of the seeded 7-node game under version 1, which
+/// records and links at that version replay through. A change means
+/// version 1 settles differently, which no change may do.
 #[cfg(test)]
 pub const VERSION_1_GOLDEN: u64 = 0xd77fd8c18d5f65f0;
 
-/// The settled board after each move of the seeded 9-node game, recorded
-/// on macOS. A mismatch names the first move another platform settles
-/// differently; a mismatch after a change to the settle means bumping
-/// SETTLE_VERSION and recording the new values.
+/// The settled board of the seeded 7-node game under the current version.
+/// A change means the settle moved: bump SETTLE_VERSION in
+/// src/protocol.rs, keep this version's settle for its records, and
+/// record the new value under the new name.
+#[cfg(test)]
+pub const VERSION_2_GOLDEN: u64 = 0xd01919a7b06a068d;
+
+/// The settled board after each move of the seeded 9-node game under
+/// version 1, recorded on macOS. A mismatch names the first move another
+/// platform settles differently.
 #[cfg(test)]
 pub const VERSION_1_SEEDED_GAME: &[u64] = &[
     0x3d7fa941984d9c88,
@@ -31,6 +37,25 @@ pub const VERSION_1_SEEDED_GAME: &[u64] = &[
     0xf1d0c3108dcd6725,
     0x0777b6443ff308e3,
     0x339c593f9e2c0ec9,
+];
+
+/// The settled board after each move of the seeded 9-node game under the
+/// current version, recorded on macOS.
+#[cfg(test)]
+pub const VERSION_2_SEEDED_GAME: &[u64] = &[
+    0x2343da5810eafb04,
+    0x611d4db5d89dd035,
+    0x6261118092e6dcde,
+    0x8f113bc531349297,
+    0xfa061dda0d14287e,
+    0xbb9e355a8b981d4a,
+    0x1ef388c404eee382,
+    0x5f8b85a94631e801,
+    0x7c52e42988fc5f0c,
+    0xcb9dd9318c8da303,
+    0xe4e07106c4e69ca2,
+    0xa046b4f28c98cebd,
+    0x63dbb9b1c4492c1b,
 ];
 
 /// Picks for a random game from a small multiplicative generator, so the
@@ -118,15 +143,25 @@ pub fn random_move(state: &GameState, pick: (usize, usize, f64, f64)) -> Option<
     Some(wire)
 }
 
+/// A fresh 1000 board of `nodes` nodes settling at `version`, the human
+/// to move.
+fn board(nodes: usize, version: u8) -> GameState {
+    let mut state =
+        GameState::with_nodes_at(crate::types::opening_layout(nodes, 1000), 1000, version);
+    state.current_player = Player::Human;
+    state
+}
+
 /// A random game of `nodes` nodes played through the protocol, settling
-/// after each move, with the moves as the engine applied them.
+/// after each move at `version`, with the moves as the engine applied
+/// them.
 #[cfg(test)]
 pub fn play_random(
     nodes: usize,
     picks: &[(usize, usize, f64, f64)],
+    version: u8,
 ) -> (GameState, Vec<protocol::Move>) {
-    let mut state = GameState::with_board_size(nodes, 1000);
-    state.current_player = Player::Human;
+    let mut state = board(nodes, version);
     let mut played = Vec::new();
     for pick in picks {
         if state.face.is_game_over() {
@@ -170,11 +205,10 @@ pub fn hash(state: &GameState) -> u64 {
     fnv.0
 }
 
-/// The settled board after each move of the seeded game of `nodes` nodes,
-/// 40 picks long.
-pub fn seeded_hashes(nodes: usize) -> Vec<u64> {
-    let mut state = GameState::with_board_size(nodes, 1000);
-    state.current_player = Player::Human;
+/// The settled board after each move of the seeded game of `nodes` nodes
+/// under settle `version`, 40 picks long.
+pub fn seeded_hashes(nodes: usize, version: u8) -> Vec<u64> {
+    let mut state = board(nodes, version);
     let mut hashes = Vec::new();
     for pick in seeded_picks(nodes as u64, 40) {
         if state.face.is_game_over() {
@@ -209,14 +243,13 @@ fn fold_cubics(cubics: &[curve::Cubic]) -> u64 {
 }
 
 /// Hashes along the pipeline of applied move `index` of the seeded game
-/// of `nodes` nodes: the stroke as generated, the fit as kurbo returns
-/// it, the cubics and node after grid rounding, the board before the
-/// settle and after each of its rounds, and the board after it, so one
-/// run on another platform shows the first stage that differs.
+/// of `nodes` nodes under `version`: the stroke as generated, the fit as
+/// kurbo returns it, the cubics and node after grid rounding, the board
+/// before the settle and after each of its rounds, and the board after
+/// it, so one run on another platform shows the first stage that differs.
 #[cfg(test)]
-pub fn stages(nodes: usize, index: usize) -> Vec<(String, u64)> {
-    let mut state = GameState::with_board_size(nodes, 1000);
-    state.current_player = Player::Human;
+pub fn stages(nodes: usize, index: usize, version: u8) -> Vec<(String, u64)> {
+    let mut state = board(nodes, version);
     let mut applied = 0;
     for pick in seeded_picks(nodes as u64, 40) {
         if state.face.is_game_over() {
@@ -262,8 +295,8 @@ pub fn stages(nodes: usize, index: usize) -> Vec<(String, u64)> {
 
 /// `stages` as one line of text.
 #[cfg(test)]
-pub fn stage_report(nodes: usize, index: usize) -> String {
-    stages(nodes, index)
+pub fn stage_report(nodes: usize, index: usize, version: u8) -> String {
+    stages(nodes, index, version)
         .iter()
         .map(|(name, h)| format!("{name} {h:#x}"))
         .collect::<Vec<_>>()

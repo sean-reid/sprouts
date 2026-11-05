@@ -435,8 +435,9 @@ pub const ROUTER_VERSION: u8 = 7;
 
 /// Changes whenever the settle moves a board differently. Records and
 /// links carry the version they were played under; 0 is a game recorded
-/// with no settling, replayed with none, so its strokes still fit.
-pub const SETTLE_VERSION: u8 = 1;
+/// with no settling, replayed with none, so its strokes still fit, and
+/// an older version replays through that version's settle.
+pub const SETTLE_VERSION: u8 = 2;
 
 /// Changes whenever `move_list` orders a position's moves differently. A
 /// link that names moves by index carries it, so a page listing moves

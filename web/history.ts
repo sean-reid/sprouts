@@ -134,7 +134,7 @@ const LINK_VERSION = 6;
 // src/protocol.rs; a link
 // carries them after the version byte from versions 4 and 5 on.
 export const ROUTER_VERSION = 7;
-export const SETTLE_VERSION = 1;
+export const SETTLE_VERSION = 2;
 export const MOVE_LIST_VERSION = 1;
 const SHAPES_LINK_VERSION = 5;
 const FACE_LINK_VERSION = 4;
